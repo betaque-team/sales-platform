@@ -1,0 +1,148 @@
+"""Celery application configuration."""
+
+import os
+from celery import Celery
+from celery.schedules import crontab
+
+# Aggressive mode: scan frequently during initial data collection
+# Set SCAN_MODE=normal in env to switch to twice-daily
+SCAN_MODE = os.environ.get("SCAN_MODE", "aggressive")
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+
+celery_app = Celery(
+    "job_platform",
+    broker=REDIS_URL,
+    backend=REDIS_URL,
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
+    enable_utc=True,
+    task_track_started=True,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
+    result_expires=3600,
+)
+
+# Autodiscover tasks from the tasks subpackage
+celery_app.autodiscover_tasks(["app.workers.tasks"])
+
+# Beat schedule for recurring tasks
+if SCAN_MODE == "aggressive":
+    # Aggressive: scan every 30 min, career pages every hour, discovery daily
+    celery_app.conf.beat_schedule = {
+        "scan_all_platforms": {
+            "task": "app.workers.tasks.scan_task.scan_all_platforms",
+            "schedule": crontab(minute="*/30"),  # Every 30 minutes
+        },
+        "check_career_pages": {
+            "task": "app.workers.tasks.career_page_task.check_career_pages",
+            "schedule": crontab(minute=0, hour="*/1"),  # Every hour
+        },
+        "run_discovery": {
+            "task": "app.workers.tasks.discovery_task.run_discovery",
+            "schedule": crontab(minute=0, hour=0),  # Daily at midnight
+        },
+        "expire_stale_jobs": {
+            "task": "app.workers.tasks.maintenance_task.expire_stale_jobs",
+            "schedule": crontab(minute=0, hour=2),
+        },
+        "rescore_jobs": {
+            "task": "app.workers.tasks.maintenance_task.rescore_jobs",
+            "schedule": crontab(minute=0, hour=3),
+        },
+        "decay_scoring_signals": {
+            "task": "app.workers.tasks.feedback_task.decay_scoring_signals",
+            "schedule": crontab(minute=30, hour=2),
+        },
+        "collect_questions": {
+            "task": "app.workers.tasks.question_collection_task.collect_questions",
+            "schedule": crontab(minute=0, hour=4),
+        },
+        "enrich_target_companies": {
+            "task": "app.workers.tasks.enrichment_task.enrich_target_companies_batch",
+            "schedule": crontab(minute=0, hour=1),
+        },
+        "verify_stale_emails": {
+            "task": "app.workers.tasks.enrichment_task.verify_stale_emails",
+            "schedule": crontab(minute=30, hour=1),
+        },
+        "auto_target_companies": {
+            "task": "app.workers.tasks.maintenance_task.auto_target_companies",
+            "schedule": crontab(minute=15, hour=3),  # After rescore
+        },
+        "fix_stuck_enrichments": {
+            "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
+            "schedule": crontab(minute=45, hour="*/6"),  # Every 6 hours
+        },
+        "deduplicate_contacts": {
+            "task": "app.workers.tasks.enrichment_task.deduplicate_contacts",
+            "schedule": crontab(minute=0, hour=2, day_of_week="sunday"),  # Weekly Sunday 2am
+        },
+        "nightly_backup": {
+            "task": "app.workers.tasks.backup_task.run_backup",
+            "schedule": crontab(minute=0, hour=3, day_of_week="*"),  # Nightly 3am UTC
+            "kwargs": {"label": "nightly"},
+        },
+    }
+else:
+    # Normal: scan twice daily, career pages every 4h, discovery weekly
+    celery_app.conf.beat_schedule = {
+        "scan_all_platforms": {
+            "task": "app.workers.tasks.scan_task.scan_all_platforms",
+            "schedule": crontab(minute=0, hour="8,20"),  # 8am and 8pm UTC
+        },
+        "check_career_pages": {
+            "task": "app.workers.tasks.career_page_task.check_career_pages",
+            "schedule": crontab(minute=0, hour="*/4"),
+        },
+        "run_discovery": {
+            "task": "app.workers.tasks.discovery_task.run_discovery",
+            "schedule": crontab(minute=0, hour=0, day_of_week="sunday"),
+        },
+        "expire_stale_jobs": {
+            "task": "app.workers.tasks.maintenance_task.expire_stale_jobs",
+            "schedule": crontab(minute=0, hour=2),
+        },
+        "rescore_jobs": {
+            "task": "app.workers.tasks.maintenance_task.rescore_jobs",
+            "schedule": crontab(minute=0, hour=3),
+        },
+        "decay_scoring_signals": {
+            "task": "app.workers.tasks.feedback_task.decay_scoring_signals",
+            "schedule": crontab(minute=30, hour=2),
+        },
+        "collect_questions": {
+            "task": "app.workers.tasks.question_collection_task.collect_questions",
+            "schedule": crontab(minute=0, hour=4),
+        },
+        "enrich_target_companies": {
+            "task": "app.workers.tasks.enrichment_task.enrich_target_companies_batch",
+            "schedule": crontab(minute=0, hour=1),
+        },
+        "verify_stale_emails": {
+            "task": "app.workers.tasks.enrichment_task.verify_stale_emails",
+            "schedule": crontab(minute=30, hour=1),
+        },
+        "auto_target_companies": {
+            "task": "app.workers.tasks.maintenance_task.auto_target_companies",
+            "schedule": crontab(minute=15, hour=3),
+        },
+        "fix_stuck_enrichments": {
+            "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
+            "schedule": crontab(minute=45, hour="*/6"),
+        },
+        "deduplicate_contacts": {
+            "task": "app.workers.tasks.enrichment_task.deduplicate_contacts",
+            "schedule": crontab(minute=0, hour=2, day_of_week="sunday"),
+        },
+        "nightly_backup": {
+            "task": "app.workers.tasks.backup_task.run_backup",
+            "schedule": crontab(minute=0, hour=3),  # Nightly 3am UTC
+            "kwargs": {"label": "nightly"},
+        },
+    }

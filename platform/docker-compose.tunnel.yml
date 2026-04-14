@@ -1,0 +1,49 @@
+# =============================================================================
+# Cloudflare Tunnel overlay — use INSTEAD of exposing ports 80/443
+#
+# How it works:
+#   cloudflared connects outbound to Cloudflare's edge network.
+#   No inbound ports needed. Cloudflare handles SSL, DDoS, WAF.
+#   Traffic: Internet → Cloudflare edge → tunnel → nginx → backend/frontend
+#
+# Usage:
+#   make tunnel-up         (or: docker compose -f docker-compose.prod.yml -f docker-compose.tunnel.yml up -d)
+#   make tunnel-status     (check tunnel health)
+#
+# First-time setup:
+#   make tunnel-login      (authenticate with Cloudflare)
+#   make tunnel-create     (create named tunnel + DNS route)
+# =============================================================================
+
+services:
+  # ── Override nginx: internal-only, tunnel Nginx config ──
+  nginx:
+    ports: !reset
+      - "127.0.0.1:8080:80"     # localhost only — cloudflared connects via docker network
+    volumes: !reset
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d/app-tunnel.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # ── Cloudflare Tunnel daemon ──
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    command: tunnel --config /etc/cloudflared/config.yml run
+    depends_on:
+      - nginx
+    volumes:
+      - ./infra/cloudflare/config.yml:/etc/cloudflared/config.yml:ro
+      - ./infra/cloudflare/creds:/etc/cloudflared/creds:ro
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+
+  # ── Disable certbot (not needed with tunnel) ──
+  certbot:
+    profiles:
+      - disabled
+

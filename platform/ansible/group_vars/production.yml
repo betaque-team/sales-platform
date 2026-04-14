@@ -1,0 +1,49 @@
+# =============================================================================
+# Production group variables
+# =============================================================================
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+app_root: /opt/sales-platform
+app_repo: "{{ app_root }}/repo"
+app_releases: "{{ app_root }}/releases"
+app_current: "{{ app_root }}/current"       # symlink → latest release
+app_shared: "{{ app_root }}/shared"          # persistent data (backups, .env)
+app_backups: "{{ app_shared }}/backups"
+max_releases: 5                               # rollback depth
+
+# ── Git ──────────────────────────────────────────────────────────────────────
+git_repo: "git@github.com:your-org/sales-data-platform.git"
+git_branch: main
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+compose_file: docker-compose.prod.yml
+docker_compose_version: "2.27.0"
+
+# ── Database ─────────────────────────────────────────────────────────────────
+postgres_user: postgres
+postgres_password: "{{ vault_postgres_password | default('changeme_in_vault') }}"
+postgres_db: jobplatform
+postgres_port: 5432
+
+# ── Redis ────────────────────────────────────────────────────────────────────
+redis_port: 6379
+
+# ── Application ──────────────────────────────────────────────────────────────
+jwt_secret: "{{ vault_jwt_secret | default('changeme_in_vault') }}"
+anthropic_api_key: "{{ vault_anthropic_api_key | default('') }}"
+scan_mode: normal      # aggressive | normal
+
+# ── Backup ───────────────────────────────────────────────────────────────────
+backup_keep_last: 14
+backup_cron_hour: 3
+backup_cron_minute: 0
+
+# ── Nginx / SSL ──────────────────────────────────────────────────────────────
+certbot_email: "{{ alert_email | default('admin@example.com') }}"
+nginx_client_max_body: 20m
+
+# ── Firewall ─────────────────────────────────────────────────────────────────
+firewall_allowed_ports:
+  - 22    # SSH
+  - 80    # HTTP
+  - 443   # HTTPS

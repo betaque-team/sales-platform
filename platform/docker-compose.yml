@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-jobplatform}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+    image: platform-backend
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - backups:/app/backups
+      - uploads:/app/uploads
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - BACKUP_DIR=/app/backups
+      - BACKUP_KEEP_LAST=14
+
+  celery-worker:
+    image: platform-backend
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker -l info
+    depends_on:
+      - postgres
+      - redis
+      - backend
+    env_file:
+      - .env
+    volumes:
+      - backups:/app/backups
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - BACKUP_DIR=/app/backups
+      - BACKUP_KEEP_LAST=14
+
+  celery-beat:
+    image: platform-backend
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app beat -l info
+    depends_on:
+      - celery-worker
+    env_file:
+      - .env
+
+  frontend:
+    build:
+      context: ./frontend
+    image: platform-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+  tunnel-nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./cloudflared/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend
+      - frontend
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - tunnel-nginx
+
+volumes:
+  postgres-data:
+  redis-data:
+  backups:
+  uploads:

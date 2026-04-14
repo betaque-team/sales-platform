@@ -1,0 +1,108 @@
+# =============================================================================
+# status.yml — Check platform health, containers, backups, disk usage
+#
+# Usage:
+#   ansible-playbook playbooks/status.yml
+# =============================================================================
+---
+- name: Platform Status Check
+  hosts: production
+  become: yes
+  tasks:
+    - name: Check Docker containers
+      shell: docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Status{{'}}'}}\t{{'{{'}}.Ports{{'}}'}}"
+      register: containers
+      changed_when: false
+
+    - name: Check current release symlink
+      shell: "readlink -f {{ app_current }} 2>/dev/null || echo 'NOT SET'"
+      register: current_release
+      changed_when: false
+
+    - name: Check disk usage
+      shell: "df -h / | tail -1"
+      register: disk_usage
+      changed_when: false
+
+    - name: Check backup count and latest
+      shell: |
+        COUNT=$(ls -d {{ app_backups }}/[0-9]* 2>/dev/null | wc -l)
+        LATEST=$(ls -dt {{ app_backups }}/[0-9]* 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo 'none')
+        LATEST_SIZE=$(du -sh $(ls -dt {{ app_backups }}/[0-9]* 2>/dev/null | head -1) 2>/dev/null | cut -f1 || echo 'N/A')
+        echo "Count: $COUNT | Latest: $LATEST ($LATEST_SIZE)"
+      register: backup_info
+      changed_when: false
+
+    - name: Check database row counts
+      shell: |
+        docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} -c "
+          SELECT relname AS table, n_live_tup AS rows
+          FROM pg_stat_user_tables
+          WHERE n_live_tup > 0
+          ORDER BY n_live_tup DESC
+          LIMIT 10;"
+      register: db_rows
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check alembic migration
+      shell: |
+        docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} \
+          -t -A -c "SELECT version_num FROM alembic_version;"
+      register: alembic_ver
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check release history
+      shell: |
+        ls -dt {{ app_releases }}/[0-9]* 2>/dev/null | head -5
+      register: releases
+      changed_when: false
+
+    - name: Backend health check
+      uri:
+        url: "http://127.0.0.1:8000/api/v1/monitoring"
+        status_code: [200, 401]
+        timeout: 5
+      register: api_health
+      ignore_errors: yes
+
+    - name: Frontend health check
+      uri:
+        url: "http://127.0.0.1:3000"
+        status_code: 200
+        timeout: 5
+      register: frontend_health
+      ignore_errors: yes
+
+    - name: Display status report
+      debug:
+        msg: |
+          ════════════════════════════════════════════════
+                    SALES PLATFORM STATUS
+          ════════════════════════════════════════════════
+
+          CONTAINERS:
+          {{ containers.stdout }}
+
+          CURRENT RELEASE:
+            {{ current_release.stdout }}
+
+          RELEASES (last 5):
+          {{ releases.stdout }}
+
+          DATABASE:
+            Migration:  {{ alembic_ver.stdout | default('unknown') | trim }}
+          {{ db_rows.stdout | default('  (unavailable)') }}
+
+          BACKUPS:
+            {{ backup_info.stdout }}
+
+          HEALTH:
+            Backend:  {{ 'HEALTHY' if (api_health.status | default(0)) in [200, 401] else 'DOWN' }}
+            Frontend: {{ 'HEALTHY' if (frontend_health.status | default(0)) == 200 else 'DOWN' }}
+
+          DISK:
+            {{ disk_usage.stdout }}
+
+          ════════════════════════════════════════════════

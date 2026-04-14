@@ -1,0 +1,50 @@
+# =============================================================================
+# No-SSL config — Use this for initial setup BEFORE obtaining SSL certs.
+# Rename to app.conf and remove the HTTPS version.
+# After `make ssl-init`, switch back to the SSL version.
+# =============================================================================
+
+upstream backend_api {
+    server backend:8000;
+    keepalive 16;
+}
+
+upstream frontend_app {
+    server frontend:80;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 20m;
+
+    # Certbot challenge
+    location /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+    }
+
+    location /api/ {
+        proxy_pass         http://backend_api;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    location / {
+        proxy_pass         http://frontend_app;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    location = /health {
+        proxy_pass http://backend_api/api/v1/monitoring;
+        access_log off;
+    }
+}

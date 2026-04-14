@@ -1,0 +1,77 @@
+"""Interview preparation AI API."""
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.models.job import Job, JobDescription
+from app.models.company import Company
+from app.models.resume import Resume
+from app.models.user import User
+from app.api.deps import get_current_user
+
+router = APIRouter(prefix="/interview-prep", tags=["interview-prep"])
+
+
+class InterviewPrepRequest(BaseModel):
+    job_id: str
+    resume_id: str | None = None
+
+
+@router.post("/generate")
+async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Generate AI-powered interview preparation for a specific job."""
+    job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    company = (await db.execute(select(Company).where(Company.id == job.company_id))).scalar_one_or_none()
+    company_name = company.name if company else "the company"
+    company_info = ""
+    if company:
+        parts = []
+        if company.industry:
+            parts.append(f"Industry: {company.industry}")
+        if company.employee_count:
+            parts.append(f"Size: {company.employee_count} employees")
+        if company.funding_stage:
+            parts.append(f"Funding: {company.funding_stage}")
+        if company.description:
+            parts.append(f"About: {company.description[:300]}")
+        company_info = ". ".join(parts)
+
+    desc = (await db.execute(select(JobDescription).where(JobDescription.job_id == job.id))).scalar_one_or_none()
+    job_description = desc.text_content if desc else ""
+
+    resume_id = body.resume_id or user.active_resume_id
+    if not resume_id:
+        raise HTTPException(400, "No active resume. Upload a resume first.")
+
+    resume = (await db.execute(select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id))).scalar_one_or_none()
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    if not resume.text_content:
+        raise HTTPException(400, "Resume text not extracted yet.")
+
+    from app.workers.tasks._interview_prep import generate_interview_prep
+    result = generate_interview_prep(
+        resume_text=resume.text_content,
+        job_title=job.title,
+        company_name=company_name,
+        job_description=job_description,
+        company_info=company_info,
+    )
+
+    if result.get("error"):
+        raise HTTPException(500, result.get("error_message", "Generation failed"))
+
+    return {
+        "job_title": job.title,
+        "company_name": company_name,
+        "questions": result.get("questions", []),
+        "talking_points": result.get("talking_points", []),
+        "company_research": result.get("company_research", []),
+        "red_flags": result.get("red_flags", []),
+    }

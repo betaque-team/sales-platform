@@ -1,0 +1,261 @@
+# =============================================================================
+# Rollback role — Revert to a previous release + optionally restore DB
+#
+# Usage:
+#   ansible-playbook playbooks/rollback.yml                    # → rollback to previous release
+#   ansible-playbook playbooks/rollback.yml -e target=20260406_120000  # → specific release
+#   ansible-playbook playbooks/rollback.yml -e restore_db=true          # → also restore DB
+#
+# Flow:
+#   1. Identify target release (previous or specified)
+#   2. Verify target release exists + has valid code
+#   3. Pre-rollback safety backup
+#   4. Restore database (if restore_db=true and backup exists)
+#   5. Rebuild images from target release
+#   6. Run alembic downgrade if needed (or stamp)
+#   7. Swap symlink to target release
+#   8. Restart all containers
+#   9. Health checks
+#   10. Record rollback metadata
+# =============================================================================
+---
+# ── Step 1: Identify target ──────────────────────────────────────────────────
+- name: List available releases
+  find:
+    paths: "{{ app_releases }}"
+    file_type: directory
+  register: all_releases
+
+- name: Sort releases
+  set_fact:
+    releases_sorted: "{{ all_releases.files | sort(attribute='path') | map(attribute='path') | list }}"
+
+- name: Identify current release
+  shell: "readlink -f {{ app_current }}"
+  register: current_link
+  changed_when: false
+
+- name: Determine rollback target
+  set_fact:
+    rollback_target: >-
+      {%- if target is defined -%}
+        {{ app_releases }}/{{ target }}
+      {%- else -%}
+        {{ releases_sorted | reject('equalto', current_link.stdout) | list | last | default('') }}
+      {%- endif -%}
+
+- name: Validate rollback target exists
+  stat:
+    path: "{{ rollback_target | trim }}"
+  register: target_stat
+
+- name: Fail if target release not found
+  fail:
+    msg: |
+      Rollback target not found: {{ rollback_target | trim }}
+      Available releases:
+      {{ releases_sorted | join('\n') }}
+  when: not target_stat.stat.exists
+
+- name: Extract target release name
+  set_fact:
+    rollback_ts: "{{ rollback_target | trim | basename }}"
+
+- name: Display rollback plan
+  debug:
+    msg: |
+      ── Rollback Plan ─────────────────────
+      Current:     {{ current_link.stdout | basename }}
+      Target:      {{ rollback_ts }}
+      Restore DB:  {{ restore_db | default(false) }}
+      ──────────────────────────────────────
+
+# ── Step 2: Verify target release ────────────────────────────────────────────
+- name: Check target has docker compose
+  stat:
+    path: "{{ rollback_target | trim }}/platform/backend/Dockerfile"
+  register: has_dockerfile
+
+- name: Fail if target release is incomplete
+  fail:
+    msg: "Target release {{ rollback_ts }} is missing Dockerfile — cannot rollback"
+  when: not has_dockerfile.stat.exists
+
+# ── Step 3: Safety backup before rollback ────────────────────────────────────
+- name: "Step 3 — Safety backup before rollback"
+  shell: |
+    docker exec platform-postgres-1 pg_dump \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      --format=custom --compress=9 --no-password \
+      > {{ app_backups }}/pre_rollback_{{ rollback_ts }}.pgdump
+  register: safety_backup
+  ignore_errors: yes
+
+- name: Record safety backup checksum
+  shell: "shasum -a 256 {{ app_backups }}/pre_rollback_{{ rollback_ts }}.pgdump > {{ app_backups }}/pre_rollback_{{ rollback_ts }}.sha256"
+  when: safety_backup is succeeded
+
+# ── Step 4: Database restore (optional) ──────────────────────────────────────
+- name: Look for pre-deploy backup matching target
+  stat:
+    path: "{{ app_backups }}/pre_deploy_{{ rollback_ts }}.pgdump"
+  register: target_backup
+  when: restore_db | default(false) | bool
+
+- name: Verify backup checksum
+  shell: "cd {{ app_backups }} && shasum -a 256 -c pre_deploy_{{ rollback_ts }}.sha256"
+  when:
+    - restore_db | default(false) | bool
+    - target_backup.stat is defined
+    - target_backup.stat.exists
+  register: checksum_verify
+
+- name: Stop application for DB restore
+  shell: |
+    docker stop platform-backend-1 platform-celery-worker-1 platform-celery-beat-1 || true
+  when:
+    - restore_db | default(false) | bool
+    - checksum_verify is succeeded
+
+- name: Terminate active DB connections
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} postgres -c "
+      SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE datname = '{{ postgres_db }}' AND pid <> pg_backend_pid();"
+  when:
+    - restore_db | default(false) | bool
+    - checksum_verify is succeeded
+  ignore_errors: yes
+
+- name: Drop and recreate database
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} postgres \
+      -c "DROP DATABASE IF EXISTS {{ postgres_db }};"
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} postgres \
+      -c "CREATE DATABASE {{ postgres_db }};"
+  when:
+    - restore_db | default(false) | bool
+    - checksum_verify is succeeded
+
+- name: Restore database from backup
+  shell: |
+    docker exec -i platform-postgres-1 pg_restore \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      --no-password --exit-on-error \
+      < {{ app_backups }}/pre_deploy_{{ rollback_ts }}.pgdump
+  when:
+    - restore_db | default(false) | bool
+    - checksum_verify is succeeded
+  register: db_restore
+
+- name: DB restore skipped notice
+  debug:
+    msg: "DB restore skipped — no matching backup found for {{ rollback_ts }} or restore_db not set"
+  when: not (restore_db | default(false) | bool) or not (target_backup.stat is defined and target_backup.stat.exists)
+
+# ── Step 5: Build images from target release ─────────────────────────────────
+- name: "Step 5 — Build backend from target release"
+  shell: "docker build -t platform-backend {{ rollback_target | trim }}/platform/backend"
+
+- name: "Step 5 — Build frontend from target release"
+  shell: "docker build -t platform-frontend {{ rollback_target | trim }}/platform/frontend"
+
+# ── Step 6: Swap symlink ─────────────────────────────────────────────────────
+- name: "Step 6 — Swap current symlink to target"
+  file:
+    src: "{{ rollback_target | trim }}"
+    dest: "{{ app_current }}"
+    state: link
+    force: yes
+  become: no
+
+# ── Step 7: Restart all containers ───────────────────────────────────────────
+- name: "Step 7 — Restart all application containers"
+  shell: |
+    docker compose -f {{ app_shared }}/docker-compose.prod.yml up -d --force-recreate \
+      backend celery-worker celery-beat frontend
+
+# ── Step 8: Health checks ────────────────────────────────────────────────────
+- name: "Step 8 — Wait for backend health"
+  uri:
+    url: "http://127.0.0.1:8000/api/v1/monitoring"
+    status_code: [200, 401]
+    timeout: 5
+  register: health_backend
+  retries: 15
+  delay: 5
+  until: health_backend.status in [200, 401]
+
+- name: "Step 8 — Wait for frontend health"
+  uri:
+    url: "http://127.0.0.1:3000"
+    status_code: 200
+    timeout: 10
+  register: health_frontend
+  retries: 10
+  delay: 5
+  until: health_frontend.status == 200
+
+# ── Step 9: Post-rollback row count validation ──────────────────────────────
+- name: Record post-rollback row counts
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} -t -A -c "
+      SELECT json_agg(row_to_json(t)) FROM (
+        SELECT relname AS table, n_live_tup::int AS rows
+        FROM pg_stat_user_tables ORDER BY relname
+      ) t;"
+  register: post_rollback_counts
+
+- name: Compare row counts with pre-deploy backup
+  shell: |
+    python3 -c "
+    import json, sys
+    try:
+      pre  = json.load(open('{{ app_backups }}/pre_deploy_{{ rollback_ts }}_counts.json'))
+      post = json.loads('''{{ post_rollback_counts.stdout }}''')
+      pre_d  = {t['table']: t['rows'] for t in (pre or [])}
+      post_d = {t['table']: t['rows'] for t in (post or [])}
+      for tbl in ['jobs','companies','users','company_contacts']:
+        e, g = pre_d.get(tbl,0), post_d.get(tbl,0)
+        s = 'OK' if (g >= e * 0.95 or e == 0) else 'MISMATCH'
+        print(f'  {s}: {tbl:30s} pre={e:>8,}  post={g:>8,}')
+    except Exception as ex:
+      print(f'  Warning: count comparison failed: {ex}')
+    "
+  when: restore_db | default(false) | bool
+  register: count_comparison
+  ignore_errors: yes
+
+- name: Show count comparison
+  debug:
+    msg: "{{ count_comparison.stdout_lines | default(['Count comparison skipped']) }}"
+
+# ── Step 10: Record rollback metadata ─────────────────────────────────────────
+- name: "Step 10 — Record rollback metadata"
+  copy:
+    content: |
+      {
+        "action":         "rollback",
+        "from_release":   "{{ current_link.stdout | basename }}",
+        "to_release":     "{{ rollback_ts }}",
+        "db_restored":    {{ restore_db | default(false) | bool | lower }},
+        "rolled_back_at": "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}",
+        "rolled_back_by": "{{ lookup('env', 'USER') }}",
+        "backend_health": "{{ 'healthy' if health_backend.status in [200, 401] else 'degraded' }}",
+        "frontend_health":"{{ 'healthy' if health_frontend.status == 200 else 'degraded' }}"
+      }
+    dest: "{{ rollback_target | trim }}/ROLLBACK_META.json"
+    mode: "0644"
+  become: no
+
+- name: Rollback complete
+  debug:
+    msg: |
+      ── Rollback Complete ─────────────────
+      From:       {{ current_link.stdout | basename }}
+      To:         {{ rollback_ts }}
+      DB restore: {{ restore_db | default(false) }}
+      Backend:    {{ 'HEALTHY' if health_backend.status in [200, 401] else 'DEGRADED' }}
+      Frontend:   {{ 'HEALTHY' if health_frontend.status == 200 else 'DEGRADED' }}
+      ──────────────────────────────────────

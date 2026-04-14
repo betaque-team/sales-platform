@@ -1,0 +1,112 @@
+# =============================================================================
+# CD — Deploy to production on push to main (after CI passes)
+# =============================================================================
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:    # manual trigger from GitHub UI
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  SERVER_HOST: ${{ secrets.SERVER_HOST }}
+  SERVER_USER: ${{ secrets.SERVER_USER }}
+  APP_DIR: /opt/sales-platform
+  # Set USE_TUNNEL=true in GitHub secrets to deploy with Cloudflare Tunnel
+  USE_TUNNEL: ${{ secrets.USE_TUNNEL || 'false' }}
+  COMPOSE_CMD: ${{ secrets.USE_TUNNEL == 'true' && 'docker compose -f docker-compose.prod.yml -f docker-compose.tunnel.yml' || 'docker compose -f docker-compose.prod.yml' }}
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: []           # add 'ci' job reference if in same workflow
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set release tag
+        id: tag
+        run: echo "tag=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pre-deploy backup
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "cd ${{ env.APP_DIR }} && bash infra/scripts/backup.sh --label pre-deploy-${{ steps.tag.outputs.tag }}"
+
+      - name: Sync code to server
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='__pycache__' \
+            --exclude='.env' \
+            --exclude='backups/' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:${{ env.APP_DIR }}/
+
+      - name: Build images on server
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << EOF
+            cd ${{ env.APP_DIR }}
+            docker build -t platform-backend:${{ steps.tag.outputs.tag }} ./backend
+            docker tag platform-backend:${{ steps.tag.outputs.tag }} platform-backend:latest
+            docker build -t platform-frontend:${{ steps.tag.outputs.tag }} ./frontend
+            docker tag platform-frontend:${{ steps.tag.outputs.tag }} platform-frontend:latest
+          EOF
+
+      - name: Run migrations
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "cd ${{ env.APP_DIR }} && \
+             ${{ env.COMPOSE_CMD }} run --rm backend alembic upgrade head"
+
+      - name: Rolling restart
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} << EOF
+            cd ${{ env.APP_DIR }}
+            export RELEASE_TAG=${{ steps.tag.outputs.tag }}
+            ${{ env.COMPOSE_CMD }} up -d --no-deps backend
+            sleep 5
+            ${{ env.COMPOSE_CMD }} up -d --no-deps celery-worker celery-beat frontend nginx
+            # Restart tunnel if in tunnel mode
+            if [ "${{ env.USE_TUNNEL }}" = "true" ]; then
+              ${{ env.COMPOSE_CMD }} up -d --no-deps cloudflared
+            fi
+          EOF
+
+      - name: Health check
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "cd ${{ env.APP_DIR }} && bash infra/scripts/health-check.sh"
+
+      - name: Record deployment
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "echo '{\"release\":\"${{ steps.tag.outputs.tag }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"branch\":\"main\",\"sha\":\"${{ github.sha }}\"}' > ${{ env.APP_DIR }}/.last-deploy.json"
+
+      - name: Cleanup old images
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "docker image prune -f"
+
+      - name: Deploy summary
+        run: |
+          echo "### Deploy Complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | ${{ steps.tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | main |" >> $GITHUB_STEP_SUMMARY

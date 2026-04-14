@@ -1,0 +1,43 @@
+# Environment & secrets
+.env
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+*.tfplan
+terraform.tfvars
+
+# Backups & dumps
+backups/
+*.sql
+*.dump
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cloudflare tunnel credentials
+cloudflared/credentials.json

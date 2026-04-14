@@ -1,0 +1,15 @@
+# =============================================================================
+# rollback.yml — Revert to a previous release
+#
+# Usage:
+#   ansible-playbook playbooks/rollback.yml                          # previous release
+#   ansible-playbook playbooks/rollback.yml -e target=20260406_120000  # specific release
+#   ansible-playbook playbooks/rollback.yml -e restore_db=true        # + DB restore
+#   ansible-playbook playbooks/rollback.yml -e "target=20260406_120000 restore_db=true"
+# =============================================================================
+---
+- name: Rollback Sales Platform
+  hosts: production
+  become: yes
+  roles:
+    - rollback

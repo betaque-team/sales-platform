@@ -1,0 +1,101 @@
+# =============================================================================
+# Backup role — On-demand backup via Ansible
+# Usage: ansible-playbook playbooks/backup.yml -e label="before-migration"
+# =============================================================================
+---
+- name: Set backup timestamp
+  set_fact:
+    backup_ts: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+- name: Create backup directory
+  file:
+    path: "{{ app_backups }}/{{ backup_ts }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Record pre-backup row counts
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} -t -A -c "
+      SELECT json_agg(row_to_json(t)) FROM (
+        SELECT relname AS table, n_live_tup::int AS rows
+        FROM pg_stat_user_tables ORDER BY relname
+      ) t;"
+  register: row_counts
+
+- name: Dump database (custom format)
+  shell: |
+    docker exec platform-postgres-1 pg_dump \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      --format=custom --compress=9 --no-password \
+      > {{ app_backups }}/{{ backup_ts }}/jobplatform.pgdump
+  register: dump_result
+
+- name: Dump database (SQL gzip)
+  shell: |
+    docker exec platform-postgres-1 pg_dump \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      --format=plain --no-password \
+      | gzip -9 > {{ app_backups }}/{{ backup_ts }}/jobplatform.sql.gz
+
+- name: Generate checksums
+  shell: |
+    cd {{ app_backups }}/{{ backup_ts }} && \
+    shasum -a 256 jobplatform.pgdump jobplatform.sql.gz > checksums.sha256
+
+- name: Get alembic revision
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} \
+      -t -A -c "SELECT version_num FROM alembic_version;"
+  register: alembic_rev
+
+- name: Get file sizes
+  shell: |
+    wc -c < {{ app_backups }}/{{ backup_ts }}/jobplatform.pgdump
+  register: dump_size
+
+- name: Write manifest
+  copy:
+    content: |
+      {
+        "timestamp":        "{{ backup_ts }}",
+        "created_at":       "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}",
+        "label":            "{{ label | default('ansible-manual') }}",
+        "database":         "{{ postgres_db }}",
+        "alembic_revision": "{{ alembic_rev.stdout | trim }}",
+        "total_rows":       {{ row_counts.stdout | from_json | map(attribute='rows') | sum }},
+        "dump_size_bytes":  {{ dump_size.stdout | trim }},
+        "table_row_counts": {{ row_counts.stdout }}
+      }
+    dest: "{{ app_backups }}/{{ backup_ts }}/manifest.json"
+    mode: "0644"
+
+- name: Verify backup (pg_restore --list)
+  shell: |
+    docker exec -i platform-postgres-1 pg_restore --list \
+      < {{ app_backups }}/{{ backup_ts }}/jobplatform.pgdump 2>/dev/null \
+      | grep -c "TABLE DATA"
+  register: table_count
+
+- name: Verify checksums
+  shell: "cd {{ app_backups }}/{{ backup_ts }} && shasum -a 256 -c checksums.sha256"
+  register: checksum_verify
+
+- name: Rotate old backups (keep {{ backup_keep_last }})
+  shell: |
+    ls -dt {{ app_backups }}/[0-9]* 2>/dev/null | tail -n +{{ backup_keep_last + 1 }} | xargs rm -rf
+  changed_when: false
+
+- name: Backup summary
+  debug:
+    msg: |
+      ── Backup Complete ───────────────────
+      Timestamp:  {{ backup_ts }}
+      Label:      {{ label | default('ansible-manual') }}
+      Tables:     {{ table_count.stdout | trim }}
+      Rows:       {{ row_counts.stdout | from_json | map(attribute='rows') | sum }}
+      Size:       {{ (dump_size.stdout | trim | int / 1024 / 1024) | round(2) }} MB
+      Checksums:  {{ 'VALID' if checksum_verify.rc == 0 else 'FAILED' }}
+      Migration:  {{ alembic_rev.stdout | trim }}
+      Path:       {{ app_backups }}/{{ backup_ts }}
+      ──────────────────────────────────────

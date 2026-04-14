@@ -1,0 +1,46 @@
+# Managed by Ansible — do not edit manually
+upstream backend_api {
+    server 127.0.0.1:8000;
+}
+
+upstream frontend_app {
+    server 127.0.0.1:3000;
+}
+
+server {
+    listen 80;
+    server_name {{ app_domain }};
+
+    client_max_body_size {{ nginx_client_max_body }};
+
+    # API requests
+    location /api/ {
+        proxy_pass         http://backend_api;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # Frontend (SPA)
+    location / {
+        proxy_pass         http://frontend_app;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    # Health check
+    location /health {
+        proxy_pass http://backend_api/api/v1/monitoring;
+        access_log off;
+    }
+
+    # Security headers
+    add_header X-Frame-Options       "SAMEORIGIN"       always;
+    add_header X-Content-Type-Options "nosniff"          always;
+    add_header X-XSS-Protection      "1; mode=block"    always;
+    add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+}

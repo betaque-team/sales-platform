@@ -1,0 +1,15 @@
+# =============================================================================
+# deploy.yml — Deploy a new release with pre-backup + health checks
+#
+# Usage:
+#   ansible-playbook playbooks/deploy.yml                          # deploy main
+#   ansible-playbook playbooks/deploy.yml -e deploy_branch=feature # deploy branch
+#   ansible-playbook playbooks/deploy.yml --tags build             # rebuild only
+#   ansible-playbook playbooks/deploy.yml --tags migrate           # migrate only
+# =============================================================================
+---
+- name: Deploy Sales Platform
+  hosts: production
+  become: yes
+  roles:
+    - deploy

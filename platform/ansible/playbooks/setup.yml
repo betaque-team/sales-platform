@@ -1,0 +1,15 @@
+# =============================================================================
+# setup.yml — One-time server provisioning
+# Run this ONCE on a fresh server to install Docker, configure firewall, etc.
+#
+# Usage:
+#   ansible-playbook playbooks/setup.yml
+#   ansible-playbook playbooks/setup.yml --tags env     # just update .env
+#   ansible-playbook playbooks/setup.yml --tags compose  # just update docker-compose
+# =============================================================================
+---
+- name: Provision Sales Platform Server
+  hosts: production
+  become: yes
+  roles:
+    - setup

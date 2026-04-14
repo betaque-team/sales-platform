@@ -1,0 +1,198 @@
+"""Seed additional remote-first companies known for global remote hiring."""
+
+import asyncio
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+
+from app.config import get_settings
+from app.models.company import Company, CompanyATSBoard
+
+settings = get_settings()
+
+# Remote-first companies with known ATS boards focused on infra/security/devops roles
+REMOTE_COMPANIES = [
+    # Greenhouse boards
+    {"name": "GitLab", "platform": "greenhouse", "slug": "gitlab"},
+    {"name": "Elastic", "platform": "greenhouse", "slug": "elastic"},
+    {"name": "Sourcegraph", "platform": "greenhouse", "slug": "sourcegraph91"},
+    {"name": "Grafana Labs", "platform": "greenhouse", "slug": "grafanalabs"},
+    {"name": "Aiven", "platform": "greenhouse", "slug": "aaborisenko"},  # TODO: verify slug
+    {"name": "Netlify", "platform": "greenhouse", "slug": "netlify"},
+    {"name": "Mattermost", "platform": "greenhouse", "slug": "mattermost"},
+    {"name": "Pulumi", "platform": "greenhouse", "slug": "pulumi"},
+    {"name": "Teleport", "platform": "greenhouse", "slug": "teleport"},
+    {"name": "Percona", "platform": "greenhouse", "slug": "percona"},
+    {"name": "Turing", "platform": "greenhouse", "slug": "turing"},
+    {"name": "Toptal", "platform": "greenhouse", "slug": "toptal"},
+    {"name": "Remote.com", "platform": "greenhouse", "slug": "remotecom"},
+    {"name": "Deel", "platform": "greenhouse", "slug": "deel"},
+    {"name": "Oyster HR", "platform": "greenhouse", "slug": "oysterhr"},
+    {"name": "Vercel", "platform": "greenhouse", "slug": "vercel"},
+    {"name": "Supabase", "platform": "greenhouse", "slug": "supabase"},
+    {"name": "PlanetScale", "platform": "greenhouse", "slug": "planetscale"},
+    {"name": "Temporal", "platform": "greenhouse", "slug": "temporaltechnologies"},
+    {"name": "Airbyte", "platform": "greenhouse", "slug": "airbyte"},
+    {"name": "dbt Labs", "platform": "greenhouse", "slug": "dbtlabsinc"},
+    {"name": "PostHog", "platform": "greenhouse", "slug": "posthog"},
+    {"name": "Cal.com", "platform": "greenhouse", "slug": "calcom"},
+    {"name": "Neon", "platform": "greenhouse", "slug": "neondatabase"},
+    {"name": "CrowdStrike", "platform": "greenhouse", "slug": "crowdstrike"},
+    {"name": "Snyk", "platform": "greenhouse", "slug": "snyk"},
+    {"name": "Lacework", "platform": "greenhouse", "slug": "lacework"},
+    {"name": "Wiz", "platform": "greenhouse", "slug": "wizinc"},
+    {"name": "SentinelOne", "platform": "greenhouse", "slug": "sentinelone"},
+    {"name": "1Password", "platform": "greenhouse", "slug": "1password"},
+    {"name": "Bitwarden", "platform": "greenhouse", "slug": "bitwarden"},
+
+    # Lever boards
+    {"name": "Zapier", "platform": "lever", "slug": "zapier"},
+    {"name": "DigitalOcean", "platform": "lever", "slug": "digitalocean"},
+    {"name": "CircleCI", "platform": "lever", "slug": "circleci"},
+    {"name": "Kong", "platform": "lever", "slug": "kong"},
+    {"name": "Automattic", "platform": "lever", "slug": "automattic"},
+    {"name": "InVision", "platform": "lever", "slug": "invisionapp"},
+    {"name": "Loom", "platform": "lever", "slug": "useloom"},
+    {"name": "Auth0", "platform": "lever", "slug": "auth0"},
+    {"name": "Heroku", "platform": "lever", "slug": "heroku"},
+    {"name": "Render", "platform": "lever", "slug": "render"},
+    {"name": "Fly.io", "platform": "lever", "slug": "fly-io"},
+    {"name": "Railway", "platform": "lever", "slug": "railway"},
+    {"name": "Spacelift", "platform": "lever", "slug": "spacelift"},
+    {"name": "Env0", "platform": "lever", "slug": "env0"},
+    {"name": "Oxeye", "platform": "lever", "slug": "oxeye"},
+
+    # Ashby boards
+    {"name": "Tailscale", "platform": "ashby", "slug": "tailscale"},
+    {"name": "Fly.io", "platform": "ashby", "slug": "fly-io"},
+    {"name": "Linear", "platform": "ashby", "slug": "linear"},
+    {"name": "Resend", "platform": "ashby", "slug": "resend"},
+    {"name": "Tinybird", "platform": "ashby", "slug": "tinybird"},
+    {"name": "Axiom", "platform": "ashby", "slug": "axiom"},
+    {"name": "Stainless", "platform": "ashby", "slug": "stainlessapi"},
+
+    # SmartRecruiters boards (slug = company identifier)
+    {"name": "Visa", "platform": "smartrecruiters", "slug": "Visa"},
+    {"name": "SUSE", "platform": "smartrecruiters", "slug": "SUSE"},
+    {"name": "Spotify", "platform": "smartrecruiters", "slug": "Spotify"},
+    {"name": "Booking.com", "platform": "smartrecruiters", "slug": "Booking"},
+    {"name": "Adidas", "platform": "smartrecruiters", "slug": "Adidas"},
+    {"name": "Siemens", "platform": "smartrecruiters", "slug": "Siemens"},
+    {"name": "DHL", "platform": "smartrecruiters", "slug": "DHL"},
+    {"name": "Bosch", "platform": "smartrecruiters", "slug": "Bosch"},
+    {"name": "Philips", "platform": "smartrecruiters", "slug": "Philips"},
+    {"name": "ABB", "platform": "smartrecruiters", "slug": "ABB"},
+
+    # Recruitee boards (slug = subdomain)
+    {"name": "Superside", "platform": "recruitee", "slug": "superside"},
+    {"name": "Huntr", "platform": "recruitee", "slug": "huntr"},
+    {"name": "Toggl", "platform": "recruitee", "slug": "toggl"},
+    {"name": "Omnipresent", "platform": "recruitee", "slug": "omnipresent"},
+    {"name": "Lano", "platform": "recruitee", "slug": "lano"},
+    {"name": "Multiplier", "platform": "recruitee", "slug": "multiplier"},
+    {"name": "Oyster HR", "platform": "recruitee", "slug": "oyster"},
+    {"name": "Velocity Global", "platform": "recruitee", "slug": "velocity-global"},
+
+    # BambooHR boards (slug = subdomain)
+    {"name": "Toggl", "platform": "bamboohr", "slug": "toggl"},
+    {"name": "Hotjar", "platform": "bamboohr", "slug": "hotjar"},
+    {"name": "Buffer", "platform": "bamboohr", "slug": "buffer"},
+    {"name": "UserVoice", "platform": "bamboohr", "slug": "uservoice"},
+    {"name": "Aha!", "platform": "bamboohr", "slug": "aha"},
+
+    # Jobvite boards (slug = company path segment)
+    {"name": "Twilio", "platform": "jobvite", "slug": "twilio"},
+    {"name": "Zendesk", "platform": "jobvite", "slug": "zendesk"},
+    {"name": "Unity", "platform": "jobvite", "slug": "unity"},
+    {"name": "PagerDuty", "platform": "jobvite", "slug": "pagerduty"},
+    {"name": "Rapid7", "platform": "jobvite", "slug": "rapid7"},
+
+    # Wellfound boards (slug = company handle, uses GraphQL API)
+    {"name": "Superside", "platform": "wellfound", "slug": "superside"},
+    {"name": "Notion", "platform": "wellfound", "slug": "notion"},
+    {"name": "Linear", "platform": "wellfound", "slug": "linear"},
+    {"name": "Vercel", "platform": "wellfound", "slug": "vercel"},
+    {"name": "Supabase", "platform": "wellfound", "slug": "supabase"},
+    {"name": "Snyk", "platform": "wellfound", "slug": "snyk"},
+    {"name": "Zapier", "platform": "wellfound", "slug": "zapier"},
+    {"name": "Figma", "platform": "wellfound", "slug": "figma"},
+    {"name": "dbt Labs", "platform": "wellfound", "slug": "dbt-labs"},
+    {"name": "Tailscale", "platform": "wellfound", "slug": "tailscale"},
+
+    # Himalayas boards (aggregator API - __all__ fetches all remote jobs)
+    {"name": "Himalayas Remote", "platform": "himalayas", "slug": "__all__"},
+
+    # WeWorkRemotely (aggregator - __all__ fetches across all WWR categories)
+    {"name": "WeWorkRemotely", "platform": "weworkremotely", "slug": "__all__"},
+
+    # RemoteOK (aggregator - __all__ fetches all remote jobs)
+    {"name": "RemoteOK", "platform": "remoteok", "slug": "__all__"},
+
+    # Remotive (aggregator - __all__ fetches all remote jobs)
+    {"name": "Remotive", "platform": "remotive", "slug": "__all__"},
+]
+
+
+def slugify(name: str) -> str:
+    return name.lower().replace(" ", "-").replace(".", "-").replace("_", "-").strip("-")
+
+
+async def seed_remote():
+    engine = create_async_engine(settings.database_url)
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with async_session() as session:
+        added = 0
+        skipped = 0
+
+        for entry in REMOTE_COMPANIES:
+            name = entry["name"]
+            platform = entry["platform"]
+            slug = entry["slug"]
+
+            # Find or create company
+            result = await session.execute(select(Company).where(Company.name == name))
+            company = result.scalar_one_or_none()
+            if not company:
+                company = Company(
+                    id=uuid.uuid4(),
+                    name=name,
+                    slug=slugify(name),
+                    is_target=False,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(company)
+                await session.flush()
+
+            # Check if board exists
+            result = await session.execute(
+                select(CompanyATSBoard).where(
+                    CompanyATSBoard.company_id == company.id,
+                    CompanyATSBoard.platform == platform,
+                    CompanyATSBoard.slug == slug,
+                )
+            )
+            if result.scalar_one_or_none():
+                skipped += 1
+                continue
+
+            session.add(CompanyATSBoard(
+                id=uuid.uuid4(),
+                company_id=company.id,
+                platform=platform,
+                slug=slug,
+                is_active=True,
+            ))
+            added += 1
+
+        await session.commit()
+        print(f"Added {added} new boards, skipped {skipped} existing")
+
+    await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(seed_remote())

@@ -1,0 +1,13 @@
+# =============================================================================
+# backup.yml — On-demand database backup
+#
+# Usage:
+#   ansible-playbook playbooks/backup.yml                           # default
+#   ansible-playbook playbooks/backup.yml -e label="pre-migration"  # labelled
+# =============================================================================
+---
+- name: Backup Sales Platform Database
+  hosts: production
+  become: yes
+  roles:
+    - backup

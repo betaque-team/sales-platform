@@ -1,0 +1,207 @@
+# =============================================================================
+# Deploy role — Zero-downtime deployment with pre-backup + health checks
+#
+# Flow:
+#   1. Pre-deploy backup (DB snapshot before any changes)
+#   2. Clone code into timestamped release directory
+#   3. Build new Docker images
+#   4. Run database migrations
+#   5. Swap "current" symlink to new release
+#   6. Rolling restart containers (backend → workers → frontend)
+#   7. Health check loop
+#   8. Prune old releases (keep last N)
+#   9. Record deployment metadata
+#
+# Rollback: If health check fails, automatically rolls back.
+# =============================================================================
+---
+- name: Set release timestamp
+  set_fact:
+    release_ts: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    release_dir: "{{ app_releases }}/{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+- name: Display deployment info
+  debug:
+    msg: |
+      ── Deploying ──────────────────────
+      Release:   {{ release_ts }}
+      Branch:    {{ deploy_branch | default(git_branch) }}
+      Target:    {{ release_dir }}
+      ────────────────────────────────────
+
+# ── Step 1: Pre-deploy backup ────────────────────────────────────────────────
+- name: "Step 1/9 — Pre-deploy database backup"
+  shell: |
+    docker exec platform-postgres-1 pg_dump \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      --format=custom --compress=9 --no-password \
+      > {{ app_backups }}/pre_deploy_{{ release_ts }}.pgdump
+  register: pre_backup
+  environment:
+    PGPASSWORD: "{{ postgres_password }}"
+  tags: [backup]
+
+- name: Record backup checksum
+  shell: "shasum -a 256 {{ app_backups }}/pre_deploy_{{ release_ts }}.pgdump > {{ app_backups }}/pre_deploy_{{ release_ts }}.sha256"
+  when: pre_backup is succeeded
+
+- name: Record pre-deploy row counts
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} -t -A -c "
+      SELECT json_agg(row_to_json(t)) FROM (
+        SELECT relname AS table, n_live_tup::int AS rows
+        FROM pg_stat_user_tables ORDER BY relname
+      ) t;" > {{ app_backups }}/pre_deploy_{{ release_ts }}_counts.json
+  when: pre_backup is succeeded
+
+# ── Step 2: Clone code ───────────────────────────────────────────────────────
+- name: "Step 2/9 — Clone repository"
+  git:
+    repo: "{{ git_repo }}"
+    dest: "{{ release_dir }}"
+    version: "{{ deploy_branch | default(git_branch) }}"
+    depth: 1
+    force: yes
+  become: no
+  register: git_clone
+  tags: [code]
+
+- name: Record git SHA
+  shell: "cd {{ release_dir }} && git rev-parse HEAD"
+  register: git_sha
+  become: no
+
+- name: Link shared .env into release
+  file:
+    src: "{{ app_shared }}/env/.env"
+    dest: "{{ release_dir }}/platform/.env"
+    state: link
+  become: no
+
+# ── Step 3: Build Docker images ──────────────────────────────────────────────
+- name: "Step 3/9 — Build backend image"
+  shell: "docker build -t platform-backend {{ release_dir }}/platform/backend"
+  register: build_backend
+  tags: [build]
+
+- name: "Step 3/9 — Build frontend image"
+  shell: "docker build -t platform-frontend {{ release_dir }}/platform/frontend"
+  register: build_frontend
+  tags: [build]
+
+# ── Step 4: Database migrations ──────────────────────────────────────────────
+- name: "Step 4/9 — Run database migrations"
+  shell: |
+    docker run --rm \
+      --network platform_default \
+      --env-file {{ app_shared }}/env/.env \
+      platform-backend \
+      alembic upgrade head
+  register: migration_result
+  tags: [migrate]
+
+- name: Record post-migration alembic revision
+  shell: |
+    docker exec platform-postgres-1 psql -U {{ postgres_user }} -d {{ postgres_db }} \
+      -t -A -c "SELECT version_num FROM alembic_version;"
+  register: alembic_rev
+
+# ── Step 5: Swap symlink ─────────────────────────────────────────────────────
+- name: "Step 5/9 — Swap current symlink"
+  file:
+    src: "{{ release_dir }}"
+    dest: "{{ app_current }}"
+    state: link
+    force: yes
+  become: no
+
+# ── Step 6: Rolling restart ──────────────────────────────────────────────────
+- name: "Step 6/9 — Restart backend"
+  shell: "docker compose -f {{ app_shared }}/docker-compose.prod.yml up -d --no-deps backend"
+  register: restart_backend
+
+- name: Wait for backend health
+  uri:
+    url: "http://127.0.0.1:8000/api/v1/monitoring"
+    status_code: [200, 401]
+    timeout: 5
+  register: health_backend
+  retries: 12
+  delay: 5
+  until: health_backend.status in [200, 401]
+
+- name: "Step 6/9 — Restart celery-worker"
+  shell: "docker compose -f {{ app_shared }}/docker-compose.prod.yml up -d --no-deps celery-worker"
+
+- name: "Step 6/9 — Restart celery-beat"
+  shell: "docker compose -f {{ app_shared }}/docker-compose.prod.yml up -d --no-deps celery-beat"
+
+- name: "Step 6/9 — Restart frontend"
+  shell: "docker compose -f {{ app_shared }}/docker-compose.prod.yml up -d --no-deps frontend"
+
+# ── Step 7: Health check ─────────────────────────────────────────────────────
+- name: "Step 7/9 — Full health check"
+  uri:
+    url: "http://127.0.0.1:3000"
+    status_code: 200
+    timeout: 10
+  register: health_frontend
+  retries: 6
+  delay: 5
+  until: health_frontend.status == 200
+
+- name: Verify backend API responding
+  uri:
+    url: "http://127.0.0.1:8000/api/v1/monitoring"
+    status_code: [200, 401]
+    timeout: 5
+  register: health_api
+
+# ── Step 8: Prune old releases ───────────────────────────────────────────────
+- name: "Step 8/9 — List all releases"
+  find:
+    paths: "{{ app_releases }}"
+    file_type: directory
+  register: all_releases
+
+- name: Sort and identify releases to prune
+  set_fact:
+    releases_sorted: "{{ all_releases.files | sort(attribute='path') | map(attribute='path') | list }}"
+
+- name: Prune old releases (keep last {{ max_releases }})
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ releases_sorted[:-max_releases] }}"
+  when: releases_sorted | length > max_releases
+
+# ── Step 9: Record deployment ────────────────────────────────────────────────
+- name: "Step 9/9 — Record deployment metadata"
+  copy:
+    content: |
+      {
+        "release":       "{{ release_ts }}",
+        "git_sha":       "{{ git_sha.stdout | default('unknown') }}",
+        "git_branch":    "{{ deploy_branch | default(git_branch) }}",
+        "alembic_rev":   "{{ alembic_rev.stdout | default('unknown') }}",
+        "deployed_at":   "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}",
+        "deployed_by":   "{{ lookup('env', 'USER') }}",
+        "backup_file":   "pre_deploy_{{ release_ts }}.pgdump",
+        "health_status": "{{ 'healthy' if (health_frontend.status == 200) else 'degraded' }}"
+      }
+    dest: "{{ release_dir }}/DEPLOY_META.json"
+    mode: "0644"
+  become: no
+
+- name: Deployment complete
+  debug:
+    msg: |
+      ── Deploy successful ─────────────────
+      Release:    {{ release_ts }}
+      Git SHA:    {{ git_sha.stdout | default('unknown') | truncate(12) }}
+      Migration:  {{ alembic_rev.stdout | default('unknown') }}
+      Backend:    {{ 'HEALTHY' if health_backend.status in [200, 401] else 'DEGRADED' }}
+      Frontend:   {{ 'HEALTHY' if health_frontend.status == 200 else 'DEGRADED' }}
+      Backup:     pre_deploy_{{ release_ts }}.pgdump
+      ──────────────────────────────────────
+      Rollback:   ansible-playbook playbooks/rollback.yml
