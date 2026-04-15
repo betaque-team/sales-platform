@@ -1,4 +1,17 @@
-"""Platform credential management endpoints."""
+"""Platform credential management endpoints.
+
+Regression findings 77, 78, 79 all landed in the same rewrite:
+  - #77 (HIGH): `profile_url` previously accepted `javascript:` schemes
+    and the frontend rendered them as `<a href>`, enabling stored XSS.
+    Fixed by moving to Pydantic `CredentialCreate` whose validator
+    rejects any scheme other than http/https/relative.
+  - #78 (MEDIUM): DELETE did not delete — it mangled the email with an
+    `"archived_"` prefix and blanked the password, then the row kept
+    showing up in GET responses. GDPR Art.17 non-compliant. Now does
+    an actual `await db.delete(cred)`.
+  - #79 (INFO): `body: dict` dropped validation, type coercion, and
+    OpenAPI schema. Replaced with `body: CredentialCreate`.
+"""
 
 import uuid
 
@@ -11,10 +24,12 @@ from app.models.platform_credential import PlatformCredential
 from app.models.resume import Resume
 from app.models.user import User
 from app.api.deps import get_current_user
+from app.schemas.credential import CredentialCreate
 from app.utils.crypto import encrypt_credential
 
 router = APIRouter(prefix="/credentials", tags=["credentials"])
 
+# Keep in lockstep with `schemas/credential.SUPPORTED_PLATFORM_LITERALS`.
 SUPPORTED_PLATFORMS = [
     "greenhouse", "lever", "ashby", "workable", "smartrecruiters",
     "recruitee", "bamboohr", "jobvite", "wellfound", "himalayas",
@@ -64,7 +79,7 @@ async def list_credentials(
 @router.post("/{resume_id}")
 async def save_credential(
     resume_id: str,
-    body: dict,
+    body: CredentialCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -75,15 +90,13 @@ async def save_credential(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
 
-    platform = body.get("platform", "").lower()
-    email = body.get("email", "").strip()
-    password = body.get("password", "")
-    profile_url = body.get("profile_url", "")
-
-    if platform not in SUPPORTED_PLATFORMS:
-        raise HTTPException(status_code=400, detail=f"Unsupported platform. Must be one of: {', '.join(SUPPORTED_PLATFORMS)}")
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
+    # CredentialCreate has already validated: platform is in the
+    # allowlist, email is a real address, profile_url has a safe scheme
+    # (or is empty), password fits the column size cap.
+    platform = body.platform
+    email = body.email.strip().lower()
+    password = body.password or ""
+    profile_url = (body.profile_url or "").strip()
 
     # Check if credential already exists for this resume+platform
     existing = (await db.execute(
@@ -133,7 +146,19 @@ async def delete_credential(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a credential for a platform."""
+    """Remove a credential for a platform.
+
+    Regression finding 78: previously this endpoint "archived" by
+    prefixing the email with `archived_` and blanking the password,
+    leaving the row in the DB. GDPR Art.17 ("right to erasure")
+    requires actual deletion unless there's a lawful-basis retention
+    justification, and the old behavior surfaced as noise in the UI
+    (the "deleted" credential reappeared with a corrupted email).
+
+    Now: actual delete. If an audit-log requirement ever emerges, the
+    right place is a separate `credential_audit_log` table — not
+    mutilating the live row.
+    """
     resume = (await db.execute(
         select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id)
     )).scalar_one_or_none()
@@ -149,8 +174,6 @@ async def delete_credential(
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
 
-    cred.is_verified = False
-    cred.encrypted_password = ""
-    cred.email = f"archived_{cred.email}"
+    await db.delete(cred)
     await db.commit()
-    return {"status": "archived", "message": "Credential archived (data preserved)"}
+    return {"status": "deleted"}
