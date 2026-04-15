@@ -115,7 +115,8 @@ one place.
 | 55 | 🟡 | Applications | **Applications stat cards cover only 4 of the 8 filter statuses.** Filter tabs: `All · Prepared · Submitted · Applied · Interview · Offer · Rejected · Withdrawn`. Stat cards: `Total · Applied · Interview · Offer`. The `Prepared` / `Submitted` (pre-submit states) and `Rejected` / `Withdrawn` (negative outcomes) buckets are invisible in the overview — users only see the happy path. A pipeline that's 80% rejected looks identical to a pipeline that's 80% in-progress until you click each tab | ⬜ open — `ApplicationsPage.tsx`: either (a) collapse the stat-cards into 5 (`Total · In Progress (Prepared+Submitted+Applied+Interview) · Outcomes (Offer+Rejected) · Withdrawn`) so the overview has meaningful aggregates, or (b) render a small progress/funnel visualization that sums all 8. Current 4-card layout hides half the state |
 | 56 | 🟡 | Pipeline | **Kanban cards are not clickable — no navigation to company detail from the pipeline.** On `/pipeline`, company names (`20four7VA`, `Cribl`, `Consensys`, `MoonPay`, `Wolfi (Chainguard)`, `Coreflight (Corelight)`, `Sophos`, `Canonical`, `name`) render as plain `<p class="text-sm font-semibold">`. The card container is a `<div>` with no `role` / `onclick` / `<a>` child. `document.querySelectorAll('main a').length === 0`. Clicking a card is a no-op. Users working the pipeline naturally want to click through to the Company detail (`/companies/{id}`) to review roles or enrich the row — no affordance to do that | ⬜ open — `PipelinePage.tsx` card body: wrap the heading in a `<Link to={`/companies/${card.company_id}`}>`, or make the card itself a link (`<Link>` wraps the whole card, `role="article"`). Keep the two stage-move buttons (Move previous / Move next) as `stopPropagation` so clicking them doesn't also fire the card click |
 | 57 | 🔵 | Pipeline / UX | **Kanban has no drag-and-drop; stage changes require per-card button clicks.** Each card has two icon-only buttons (`Move to previous stage`, `Move to next stage`) with `title` attribute (same `title` vs `aria-label` issue as Finding #45). Moving a card from `New Lead` → `Engaged` takes 4 forward-clicks per card. There are 10 cards in pipeline today, which stays manageable; at 50+ cards the friction shows. Not a functional bug but a common kanban affordance users will expect | ⬜ open (optional) — `PipelinePage.tsx`: add HTML5 drag-drop (`draggable="true"`, `onDragStart` / `onDragOver` / `onDrop` handlers) or adopt a small lib like `@dnd-kit/core`. Keep the existing arrow buttons as the accessible fallback — keyboard users can't drag. Emit the same `PATCH /api/v1/pipeline/{id} {stage}` on drop |
-| 58 | 🟡 | Companies | **Company list cards navigate via `div.onClick` instead of `<a>`, breaking standard web-nav affordances; company-detail "Open Roles" is plain text.** On `/companies`, each card is a `<div class="... cursor-pointer group" onClick={…}>` that calls `navigate('/companies/{id}')` — no `<a>` anywhere. Consequences: (a) middle-click and Ctrl/Cmd-click don't open in a new tab, (b) right-click → "Open in new tab" / "Copy link" don't work, (c) keyboard users can't Tab to the card (no `tabindex`), (d) screen readers announce the card as a generic `<div>` not a link. On the company-detail page (`/companies/{id}`) the "Open Roles: 1" metric is plain text — it should link to `/jobs?company_id={id}` so the user can see which roles | ⬜ open — `CompaniesPage.tsx`: replace `<div onClick={() => navigate(path)}>` with `<Link to={path} className="… block">`. If the card has interior controls (the `Pipeline` button), make it `<Link>` with interior buttons calling `e.preventDefault(); e.stopPropagation()`. On `CompanyDetailPage.tsx`, wrap `Open Roles: {n}` in `<Link to={`/jobs?company_id=${company.id}`}>{n} open role{n===1?'':'s'}</Link>` |
+| 58 | 🟡 | Companies / Jobs | **Company list cards AND Jobs table rows navigate via `div|tr.onClick` instead of `<a>`, breaking standard web-nav affordances.** `/companies`: each card is `<div class="cursor-pointer group" onClick={…}>` → `navigate('/companies/{id}')`. `/jobs`: each row is `<tr class="cursor-pointer hover:bg-gray-50" onClick={…}>` → `navigate('/jobs/{id}')`. Neither has an `<a>` inside, `tabindex`, or `role="link"`. Consequences across both pages: (a) middle-click and Ctrl/Cmd-click don't open in a new tab, (b) right-click → "Open in new tab" / "Copy link" don't work, (c) keyboard users can't Tab to the row/card, (d) screen readers announce generic container instead of a link. Additionally, `/companies/{id}` detail view's "Open Roles: N" is plain text instead of a link to `/jobs?company_id={id}` | ⬜ open — two patches: `CompaniesPage.tsx` replaces `<div onClick={navigate}>` with `<Link to={…} className="block …">`, nested buttons use `e.preventDefault();e.stopPropagation()`. `JobsPage.tsx` restructures the table: either (a) change the `<tr>` to `<tr><td><Link to="/jobs/{id}">` inside each cell (accessible) or (b) wrap the whole row in a `TableRowLink` component that stacks an invisible `<a>` covering the row + `position:relative` on the `<tr>`. Same approach on `CompanyDetailPage.tsx` for the `Open Roles` metric |
+| 59 | 🟠 | Security / XSS-adjacent | **External links on `/jobs/{id}` open in new tabs **without** `rel="noopener noreferrer"` — reverse-tabnabbing vector.** On a live Job Detail page (alphasense/greenhouse), `document.querySelectorAll('main a')` surfaces three external links: "View Original Listing" → Greenhouse (has `rel="noopener noreferrer"` ✅), "alpha-sense.com" → `target="_blank" rel="(none)"` ❌, "Careers page" (company career url) → `target="_blank" rel="(none)"` ❌. The two un-hardened anchors use `Company.website` and `Company.careers_url`. An attacker whose domain becomes a company `website`/`careers_url` (via manual admin-add, or a compromised scrape) can use `window.opener.location = 'https://phishing.example'` from the opened tab to redirect the user's original sales-platform tab to a phishing clone of the login page. Users click back to the original tab, see the login page, and re-enter credentials | ⬜ open — in `JobDetailPage.tsx` (and anywhere else `Company.website` / `Company.careers_url` / arbitrary ATS URLs are rendered): every `<a target="_blank">` must have `rel="noopener noreferrer"`. Simplest fix: add a small `<ExternalLink href={url}>…</ExternalLink>` component with those attrs baked in and replace every `<a target="_blank">` on the page. Browser behavior changed in Chrome 88 / Firefox 79 (implicit `noopener` when `target="_blank"`), but Safari and older browsers still leak `window.opener`, so the explicit `rel` is still required by modern security guides (OWASP: Reverse Tabnabbing) |
 
 ---
 
@@ -1908,6 +1909,61 @@ Same applies to "Enriched", "Accepted", etc. if any of those have a correspondin
 
 #### Cleanup
 Read-only. Clicking the first card navigated to the detail page; hitting Back returned to the list. No mutations.
+
+**Addendum (same pattern on `/jobs`):** further probing showed that the same `<div onClick>` anti-pattern also applies to Jobs table rows — `<tr class="cursor-pointer hover:bg-gray-50" onClick={…}>`, no anchor inside, no `tabindex`, same failure mode. The fix pattern is identical (use `<Link>`). Updated the summary-row detail in §1.
+
+---
+
+### 59. External anchors on `/jobs/{id}` open with `target="_blank"` but no `rel="noopener noreferrer"`
+**Severity:** 🟠 HIGH · **Area:** Security / XSS-adjacent
+
+#### What I saw
+Probed a live Job Detail page (`/jobs/62bd2b45-…`, AlphaSense Compliance Analyst role scraped from Greenhouse):
+
+```js
+[...document.querySelectorAll('main a')]
+  .filter(a => /^https?:/.test(a.getAttribute('href')) && !/salesplatform\.reventlabs\.com/.test(a.href))
+  .map(a => ({ text: a.innerText, href: a.href, target: a.target, rel: a.rel }));
+// → [
+//   { text:'View Original Listing', href:'https://job-boards.greenhouse.io/…',
+//     target:'_blank', rel:'noopener noreferrer' },                              // ✅
+//   { text:'alpha-sense.com',       href:'http://alpha-sense.com/',
+//     target:'_blank', rel:'(none)' },                                           // ❌
+//   { text:'Careers page',          href:'https://www.alpha-sense.com/careers/',
+//     target:'_blank', rel:'(none)' },                                           // ❌
+// ]
+```
+
+"View Original Listing" is rendered correctly. The two `Company.*` URLs (`website` and `careers_url`) are not.
+
+#### Why it matters
+`<a target="_blank" rel="">` is the classic reverse-tabnabbing vector (OWASP: Reverse Tabnabbing). The opened tab can execute `window.opener.location = 'https://evil.example'` and replace the originating sales-platform tab with a phishing clone. User clicks back to their "sales platform" tab, sees what looks like a login page, and re-enters credentials. Because our JWT is in an HttpOnly cookie, the phishing site can't read it — but it *can* harvest the typed password.
+
+Browser defaults changed in Chrome 88 / Firefox 79 to implicitly set `noopener` when `target="_blank"`, but:
+- Safari still honours `window.opener` in some configurations.
+- Older Chromium-based browsers (Edge Legacy, older Brave, in-app webviews) don't.
+- Corporate environments that pin browser versions often lag.
+
+An attacker's path: register a company, get an admin to paste `https://attacker.example` into `Company.website` (via manual add or a compromised scrape), wait for users to click the link on any job posting for that company.
+
+#### Suggested fix
+Two-part:
+
+1. `JobDetailPage.tsx`: every `<a target="_blank">` gets `rel="noopener noreferrer"`. A tiny helper avoids future regressions:
+   ```tsx
+   // components/ExternalLink.tsx
+   export function ExternalLink({ href, children, ...rest }: Props) {
+     return <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>;
+   }
+   ```
+   Replace every `<a href={…} target="_blank">` on the page with `<ExternalLink>`.
+
+2. Audit the other places that render arbitrary URLs: company detail (same `website`/`careers_url`), any platform/ATS redirect, any Intelligence > Networking "source URL" link, etc. A grep for `target="_blank"` should surface all of them.
+
+3. Optional belt-and-suspenders: add a global ESLint rule (e.g. `react/jsx-no-target-blank`) that flags any `target="_blank"` without `rel="noopener"` at lint-time.
+
+#### Cleanup
+Read-only probe.
 
 ---
 
