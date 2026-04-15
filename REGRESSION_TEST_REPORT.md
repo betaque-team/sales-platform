@@ -70,6 +70,14 @@ one place.
 | 10 | 🔵 | Pipeline | A card titled literally "1name" appears in `Researching` stage — looks like seeded/test data leaking to prod | ⬜ open — data cleanup task, not code. Run `DELETE FROM potential_clients WHERE company_name ILIKE '1name'` against prod (with admin approval) |
 | 11 | 🔵 | Feedback | Many duplicate "Resume Score / Relevance" tickets (8 identical entries from same user 4/14) — no dedup | ✅ fixed: `feedback.py` now returns 409 if the same user posts an identical open title within 7 days |
 | 12 | 🔵 | Copy | Dashboard AI Insight says "6 ATS sources" when 10 are listed on Platforms | ✅ fixed: analytics fallback now uses `COUNT(DISTINCT platform)` instead of `len(top_sources)` |
+| 13 | 🟠 | Pipeline API | `PATCH /api/v1/pipeline/{id}` accepts any string as `stage` — no validation against known stage keys; cards can be orphaned into non-existent stages | ⬜ open |
+| 14 | 🟡 | Resume upload | File content not validated; plain-text renamed `.pdf` and empty 0-byte files are accepted (200 OK) and persisted with `status:"error"`, cluttering the DB | ⬜ open |
+| 15 | 🟡 | Pipeline API | `PATCH /api/v1/pipeline/{id}` accepts unbounded `priority` (tested 999999999 and -100) and `notes` (tested 100 KB) — no length / range limits | ⬜ open |
+| 16 | 🟠 | Feedback API | `GET /api/v1/feedback/{id}` with a non-UUID path returns **500** instead of 422 — path param is declared `str` rather than `UUID` | ⬜ open |
+| 17 | 🟡 | Platforms | `himalayas.py` hard-caps pagination at ~1020 jobs (`offset > 1000` break); repeated scans return identical `jobs_found: 1020` with varying `new_jobs`, implying the catalog exceeds the cap | ⬜ open |
+| 18 | 🟡 | Search / Data | `Stripe` company shows `job_count: 61` but `/jobs?search=Stripe` returns only 3 (title matches). Finding #4 fix is in `212830a` but may not be deployed, or `Job.company.has()` isn't surfacing all rows | ⬜ open |
+| 19 | 🔵 | Security headers | Response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, Cross-Origin policies. Cookie flags are good (`HttpOnly; Secure; SameSite=lax`) | ⬜ open |
+| 20 | 🔵 | Role Clusters | `POST /api/v1/role-clusters` accepts arbitrary punctuation/special-chars in `name` (stored lowercased); no `[a-z0-9_-]+` sanitization. Safe vs. SQLi (ORM), but `name` is used as URL param downstream | ⬜ open |
 
 ---
 
@@ -310,6 +318,191 @@ Observation: rate limiting is aggressive — several consecutive bad logins flip
 10. Pipeline: "1name" test card in Researching.
 11. Feedback: dedup 8+ identical Resume Score / Relevance tickets.
 12. Dashboard AI Insight: "6 ATS sources" should be "10" based on Platforms data.
+
+---
+
+## 11. Round 2 Findings (2026-04-15, same-day deep retest)
+
+Added after the fixer landed `212830a` (findings 2–6, 8–9, 11–12) and `6205733`
+(finding 1 seed script). Probes run from an authenticated `test-admin` session.
+All side-effects were reverted (bad pipeline stage, test uploads deleted, probe
+role-cluster deleted).
+
+### 13. Pipeline stage PATCH accepts arbitrary strings
+**Severity:** 🟠 HIGH · **Area:** `PATCH /api/v1/pipeline/{client_id}` (`backend/app/api/v1/pipeline.py:347`)
+
+Reproduced:
+```js
+fetch('/api/v1/pipeline/73617d28-a631-46d5-bc45-934c9b135cfc', {
+  method: 'PATCH', credentials: 'include',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({stage: 'TOTALLY_FAKE_STAGE_XYZ_REGRESSION'})
+})
+// → 200 OK; card.stage == "TOTALLY_FAKE_STAGE_XYZ_REGRESSION"
+```
+
+Expected: **400 Bad Request** with `"Invalid stage. Must be one of: new_lead, researching, qualified, outreach, engaged, disqualified"` — exactly what `POST /api/v1/pipeline` already does via `_get_stage_keys(db)` at `pipeline.py:310-312`.
+
+**Fix:** mirror the same check inside `update_client` — before assigning `client.stage = body.stage`, verify `body.stage in await _get_stage_keys(db)`; else raise `HTTPException(400, …)`.
+
+The probe card was PATCHed back to `researching` immediately after testing.
+
+---
+
+### 14. Resume upload does not validate file content
+**Severity:** 🟡 MEDIUM · **Area:** `POST /api/v1/resume/upload`
+
+1. Plain-text body with `.pdf` extension and fake `application/pdf` MIME:
+   ```js
+   const fd = new FormData();
+   fd.append('file', new Blob(['just plain text'], {type: 'application/pdf'}), 'spoofed.pdf');
+   fetch('/api/v1/resume/upload', {method: 'POST', body: fd, credentials: 'include'})
+   // → 200 OK; resume persisted: word_count: 0, status: "error", is_active: false
+   ```
+
+2. Empty 0-byte file (`new Blob([''], {type: 'application/pdf'})`) — same 200 OK, persisted.
+
+3. ✅ Oversized (6 MB padded `%PDF` header): correctly rejected with 400 "File size exceeds 5MB limit".
+
+Both garbage records were deleted via `DELETE /api/v1/resume/{id}` → 200 OK.
+
+**Impact:** pollutes `resume` table with unusable entries that still appear in the user's resume list UI. User has to manually delete or IT has to clean.
+
+**Fix:** after saving, attempt `PyPDF2.PdfReader(io.BytesIO(raw))` / `docx.Document(io.BytesIO(raw))`; if it throws, return 400 before commit. Also reject 0-byte files at the boundary (`UploadFile.size == 0`).
+
+---
+
+### 15. Pipeline PATCH has no bounds on priority or notes
+**Severity:** 🟡 MEDIUM · **Area:** `PATCH /api/v1/pipeline/{client_id}` (`PipelineUpdate` schema)
+
+```
+PATCH {priority: 999999999}     → 200, stored
+PATCH {priority: -100}          → 200, stored
+PATCH {notes: 'x'.repeat(102400)} → 200, 100 KB stored verbatim
+```
+
+Both fields were reset after probing.
+
+XSS probe: `{notes: '<img src=x onerror="window.__PWNED=true">'}` was stored as-is; after navigating to `/pipeline` the script **did not execute** (React escapes text children by default), but the raw string appeared as visible text on the card. Today this is not exploitable — but the unbounded field + stored HTML becomes a persistent-XSS vector the moment anything downstream uses `dangerouslySetInnerHTML` on notes.
+
+**Fix:** on `schemas/pipeline.py`, add `priority: int = Field(default=0, ge=0, le=100)` and `notes: str = Field(default='', max_length=4000)`.
+
+---
+
+### 16. Feedback GET returns 500 for non-UUID path
+**Severity:** 🟠 HIGH (a 500 is a server-error breadcrumb — should be a 4xx) · **Area:** `GET /api/v1/feedback/{feedback_id}` (`backend/app/api/v1/feedback.py:274`)
+
+```
+GET /api/v1/feedback/not-a-uuid   → 500 Internal Server Error   ❌
+GET /api/v1/jobs/not-a-uuid        → 422 Unprocessable Entity   ✅
+GET /api/v1/companies/not-a-uuid   → 422 Unprocessable Entity   ✅
+```
+
+Root cause: `feedback_id: str` at `feedback.py:276` (also 292, 115, 162). `db.get(Feedback, "not-a-uuid")` bubbles a Postgres cast error up as a 500.
+
+**Fix:** change the path-param annotations to `feedback_id: UUID` and import `from uuid import UUID`. Pydantic will then auto-422 for malformed UUIDs.
+
+---
+
+### 17. Himalayas fetcher hard-caps at 1020 jobs per scan
+**Severity:** 🟡 MEDIUM · **Area:** `backend/app/fetchers/himalayas.py:62-63`
+
+```python
+# Safety limit — fetch up to 1000 jobs per scan
+if offset > 1000:
+    break
+```
+
+Last 3 scans (`GET /api/v1/platforms/scan-logs?platform=himalayas&limit=3`):
+```
+jobs_found: 1020, new_jobs: 931, duration_ms: 30660
+jobs_found: 1020, new_jobs: 617, duration_ms: 20568
+jobs_found: 1020, new_jobs: 933, duration_ms: 22647
+```
+
+Identical `jobs_found` with fluctuating `new_jobs` implies the Himalayas catalog is >1020 and each scan grabs a slightly different subset of the head. This is the structural driver behind part of **Finding #7** (himalayas 180 accumulated errors) — we likely keep re-inserting/updating the same ~1020 rows while the tail is never seen.
+
+**Fix options:**
+1. Lift the cap (e.g. to 5000) if latency stays acceptable — simplest.
+2. Switch to incremental pagination: persist the highest `pubDate` we saw, only fetch newer-than that next scan.
+3. Keep the cap, but rotate the `offset` seed per run so we cycle through the catalog.
+
+---
+
+### 18. `/jobs?search=Stripe` returns 3 but Stripe has 61 jobs
+**Severity:** 🟡 MEDIUM · **Area:** search routing / deployment integrity
+
+```
+GET /api/v1/companies?search=stripe
+  → {total: 1, items: [{name: "Stripe", job_count: 61}]}
+GET /api/v1/jobs?company_id=89619c2c-46d4-470e-a696-0292e4936ec1
+  → {total: 61}     ✅ direct company filter works
+GET /api/v1/jobs?search=Stripe
+  → {total: 3}      ❌ only title matches come through
+GET /api/v1/jobs?search=Stripe&status=all
+  → {total: 0}      ❌ default-status override breaks results entirely
+```
+
+Commit `212830a` added `Job.company.has(Company.name.ilike(...))` at `jobs.py:76`, which should return all 61. Either:
+- The backend container hasn't been rebuilt / redeployed yet (fix is in git, not on the running process).
+- `joinedload(Job.company)` is fine, but the EXISTS subquery behind `has()` might hit a different Company row than expected (e.g. jobs whose `company_id` points to a company named "Stripe, Inc." vs "Stripe").
+
+**Next step:** hit `/api/v1/monitoring/health` (or similar) to confirm the deployed commit SHA; if it still shows `b2cb1d4` / pre-fix, trigger a redeploy first. If it already says `212830a`, add a server-side log of the generated SQL to see why the `has()` branch returns 0.
+
+Also: the `status=all` permutation going to **0** (not 3) is suspicious — looks like `status=all` is treated as a literal enum value by the handler rather than as "no filter". Worth a separate look at `jobs.py:56-57`.
+
+---
+
+### 19. Missing defensive response security headers
+**Severity:** 🔵 LOW · **Area:** HTTP response headers (origin + Cloudflare edge)
+
+`curl -sI https://salesplatform.reventlabs.com/api/v1/auth/me`:
+```
+✅ x-content-type-options: nosniff
+✅ x-frame-options: SAMEORIGIN
+✅ x-xss-protection: 1; mode=block
+✅ referrer-policy: strict-origin-when-cross-origin
+❌ Content-Security-Policy                       (missing)
+❌ Strict-Transport-Security                     (missing)
+❌ Permissions-Policy                            (missing)
+❌ Cross-Origin-{Opener,Embedder,Resource}-Policy (missing)
+```
+
+Login-cookie flags (from `POST /api/v1/auth/login`):
+`Set-Cookie: session=…; HttpOnly; Max-Age=86400; Path=/; SameSite=lax; Secure` ✅
+
+The JWT is also echoed in the JSON body (not just the cookie), but `Object.keys(localStorage)` is `[]` after login — so the frontend does not persist it anywhere JS-reachable. Fine.
+
+**Fix (cheap):** add HSTS + a starter CSP at the Cloudflare edge (Rules → Transform Rules → HTTP Response Header Modification). Start CSP in `Content-Security-Policy-Report-Only` mode so we don't break the existing bundle.
+
+---
+
+### 20. Role-cluster `name` accepts arbitrary characters
+**Severity:** 🔵 LOW · **Area:** `POST /api/v1/role-clusters`
+
+Probe:
+```
+POST /api/v1/role-clusters
+{ "name": "test'); DROP TABLE role_cluster_config;--",
+  "display_name": "x", "keywords": "test", "approved_roles": "" }
+→ 200 OK; name stored as "test');_drop_table_role_cluster_config;--"
+```
+
+Not SQLi (SQLAlchemy params are safe). But `name` is used as a URL query value (e.g. `/jobs?role_cluster=<name>`) and as a key in UI state — punctuation, whitespace, or quotes silently surviving normalization will bite us later.
+
+**Fix:** in `schemas/role_config.py`, restrict `name` via `Field(..., pattern=r'^[a-z0-9][a-z0-9_-]{1,30}$')` so the cluster key stays URL-safe.
+
+Test cluster was deleted via `DELETE /api/v1/role-clusters/<id>` → 200 OK.
+
+---
+
+## 12. Observations from the retest (no finding, FYI)
+
+- **RBAC sanity:** as `admin`, `/users` and `/auth/register` correctly return 403; `/role-clusters` POST correctly allowed. OK.
+- **UUID handling:** `/jobs/not-a-uuid` → 422, `/companies/not-a-uuid` → 422, `/pipeline/{non-uuid}/stage` → 404. Consistent except feedback (Finding 16).
+- **Pagination bounds:** `page=0` → 422, `page=999999999` → 200 with empty items + correct `total_pages`, `page_size=-1` → 422, `page_size=9999` → 422 (clamped at 200). Sensible.
+- **Silent sort fallback:** `sort_by=malicious_column` → 200 with default sort (first_seen_at). Safe but no error signal — consider 422 for unknown sort columns.
+- **Finding #10 retest:** the "1name" card still exists at id `73617d28-a631-46d5-bc45-934c9b135cfc` with `total_open_roles: 123, accepted_jobs_count: 1, stage: researching`. Awaiting the data-cleanup task the fixer flagged.
 
 ---
 
