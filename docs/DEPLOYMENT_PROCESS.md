@@ -91,19 +91,19 @@ Rollback: `Actions → Rollback → Run workflow` with prior tag. **<30 sec.**
 
 ### Standing invariants
 
-Re-verify these quarterly (script in `scripts/security-audit.sh` TBD):
+Re-verify these quarterly. The automated subset is `scripts/security-audit.sh`:
+
+```bash
+bash scripts/security-audit.sh          # from Mac — SSHes in and checks 16 invariants
+# Or on the VM itself:
+sudo bash /opt/sales-platform/scripts/security-audit.sh --local
+```
+
+Expected baseline: **15 PASS · 1 WARN · 0 FAIL** (the WARN is `PermitRootLogin without-password`, documented as optional hardening below).
+
+Items the script doesn't cover — check manually in the GitHub UI:
 
 ```
-VM (ssh ubuntu@...):
-  id deploy                              # uid/gid, groups: docker ONLY
-  sudo cat /home/deploy/.ssh/authorized_keys   # starts with "restrict,command="
-  stat -c '%a %U:%G' /opt/sales-platform/.env   # 640 deploy:deploy
-  stat -c '%a %U:%G' /opt/sales-platform/cloudflared/credentials.json  # 600 deploy:deploy
-  sudo ufw status                        # 22/tcp only, deny incoming default
-  sudo ss -tlnp | grep LISTEN            # 22 only on non-loopback
-  systemctl is-active fail2ban           # active
-  sudo fail2ban-client status sshd       # shows sshd jail active
-
 GitHub (browser):
   Settings → Environments → production   # wait timer present, secrets scoped
   Settings → Actions → Workflow permissions → Read-only for GITHUB_TOKEN (default)
