@@ -43,6 +43,17 @@ class JobviteFetcher(BaseFetcher):
                 logger.warning("Jobvite %s request failed: %s", slug, exc)
                 break
 
+            # Jobvite now redirects unknown/migrated slugs to their marketing
+            # support page (www.jobvite.com/support/...?invalid=1). Detect and
+            # treat as a permanently-dead slug instead of spamming warnings.
+            final_host = str(resp.url.host) if resp.url else ""
+            if final_host.endswith("www.jobvite.com"):
+                logger.info(
+                    "Jobvite %s: slug no longer hosted on jobs.jobvite.com (redirected to %s)",
+                    slug, final_host,
+                )
+                break
+
             try:
                 data = resp.json()
             except Exception:

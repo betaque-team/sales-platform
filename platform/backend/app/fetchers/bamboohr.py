@@ -43,6 +43,17 @@ class BambooHRFetcher(BaseFetcher):
                 logger.warning("BambooHR %s %s request failed: %s", slug, url, exc)
                 continue
 
+            # If BambooHR redirected us off the tenant subdomain and onto the
+            # marketing site (www.bamboohr.com), the slug is not a valid tenant.
+            # No point trying the next endpoint with the same slug.
+            final_host = str(resp.url.host) if resp.url else ""
+            if final_host == "www.bamboohr.com" or final_host == "bamboohr.com":
+                logger.info(
+                    "BambooHR %s: slug is not a valid tenant (redirected to %s)",
+                    slug, final_host,
+                )
+                return []
+
             content_type = resp.headers.get("content-type", "")
             if "json" not in content_type and "javascript" not in content_type:
                 logger.warning("BambooHR %s %s returned non-JSON content-type: %s", slug, url, content_type)

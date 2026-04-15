@@ -82,7 +82,19 @@ class WellfoundFetcher(BaseFetcher):
             return [self._normalize(job, slug, startup.get("name", slug)) for job in listings]
 
         except httpx.HTTPStatusError as exc:
-            logger.warning("Wellfound %s returned %s", slug, exc.response.status_code)
+            code = exc.response.status_code
+            if code == 403:
+                # Wellfound's GraphQL endpoint is behind Cloudflare bot detection.
+                # Raw httpx requests are blocked regardless of User-Agent.
+                # Fix requires either an authenticated session token or a
+                # headless-browser fetch path — out of scope for this fetcher.
+                logger.warning(
+                    "Wellfound %s: blocked by Cloudflare (HTTP 403) — fetcher "
+                    "cannot scrape without a browser session",
+                    slug,
+                )
+            else:
+                logger.warning("Wellfound %s returned %s", slug, code)
             return []
         except httpx.RequestError as exc:
             logger.warning("Wellfound %s request failed: %s", slug, exc)

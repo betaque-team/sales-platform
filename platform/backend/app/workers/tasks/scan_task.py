@@ -233,21 +233,29 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
                         if existing_co:
                             job_company = existing_co
                         else:
+                            # Wrap the insert in a SAVEPOINT so an IntegrityError
+                            # on a concurrent duplicate (same slug / same name)
+                            # does NOT rollback the outer transaction and wipe
+                            # out every job we've already upserted in this batch.
                             try:
-                                job_company = Company(
-                                    id=uuid.uuid4(),
-                                    name=agg_company_name,
-                                    slug=agg_slug,
-                                    is_target=False,
-                                )
-                                session.add(job_company)
-                                session.flush()
+                                with session.begin_nested():
+                                    job_company = Company(
+                                        id=uuid.uuid4(),
+                                        name=agg_company_name,
+                                        slug=agg_slug,
+                                        is_target=False,
+                                    )
+                                    session.add(job_company)
                             except Exception:
-                                session.rollback()
-                                # Retry lookup after rollback
+                                # Re-lookup by slug, then by name (uniqueness
+                                # can live on either column depending on history)
                                 existing_co = session.execute(
                                     select(Company).where(Company.slug == agg_slug)
                                 ).scalar_one_or_none()
+                                if not existing_co:
+                                    existing_co = session.execute(
+                                        select(Company).where(Company.name == agg_company_name)
+                                    ).scalar_one_or_none()
                                 if existing_co:
                                     job_company = existing_co
                                 else:

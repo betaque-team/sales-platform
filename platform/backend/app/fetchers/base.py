@@ -13,11 +13,24 @@ class BaseFetcher(ABC):
         self._client = client
         self._own_client = client is None
 
+    # Browser-ish UA so bot-detection (Cloudflare, Akamai) doesn't auto-block
+    # us on first request. Some platforms (Wellfound) still block this — that
+    # is a per-fetcher problem, not a base-client problem.
+    _DEFAULT_UA = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+
     def _get_client(self) -> httpx.Client:
         """Return the injected client or create a new one."""
         if self._client:
             return self._client
-        self._created_client = httpx.Client(timeout=30, follow_redirects=True)
+        self._created_client = httpx.Client(
+            timeout=30,
+            follow_redirects=True,
+            headers={"User-Agent": self._DEFAULT_UA},
+        )
         return self._created_client
 
     @abstractmethod
