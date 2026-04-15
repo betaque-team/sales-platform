@@ -12,6 +12,7 @@ from app.models.company import Company, CompanyATSBoard
 from app.models.company_contact import CompanyContact, JobContactRelevance
 from app.models.company_office import CompanyOffice
 from app.models.job import Job
+from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.company import (
@@ -26,6 +27,26 @@ from app.schemas.job import JobOut
 from app.utils.sql import escape_like
 
 router = APIRouter(prefix="/companies", tags=["companies"])
+
+
+async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
+    """Return the list of role cluster names flagged as relevant.
+
+    Mirrors the helper in `jobs.py` — duplicated (not imported) to keep
+    the two router modules decoupled. Falls back to the hardcoded
+    `["infra", "security"]` pair if no cluster config exists yet, which
+    matches the behavior documented in CLAUDE.md and the
+    `_get_relevant_clusters` helper that `jobs.py` already uses for the
+    `role_cluster=relevant` pseudo-value.
+    """
+    result = await db.execute(
+        select(RoleClusterConfig.name).where(
+            RoleClusterConfig.is_relevant == True,  # noqa: E712
+            RoleClusterConfig.is_active == True,  # noqa: E712
+        )
+    )
+    clusters = result.scalars().all()
+    return list(clusters) if clusters else ["infra", "security"]
 
 
 @router.get("/scores")
@@ -155,7 +176,32 @@ async def list_companies(
             q = q.where(Company.funded_at >= funded_cutoff)
         return q
 
-    query = apply_filters(select(Company).options(joinedload(Company.ats_boards)))
+    # Regression finding 98: build a per-company relevant-job-count
+    # subquery so the main SELECT can both surface the value AND sort
+    # by it without a second round-trip. Filters by the live role-
+    # cluster config (falling back to the hardcoded infra/security
+    # pair) so a new cluster flipped to `is_relevant=True` in the
+    # admin UI shows up immediately without a backend deploy.
+    relevant_clusters = await _get_relevant_clusters(db)
+    relevant_count_subq = (
+        select(
+            Job.company_id.label("company_id"),
+            func.count(Job.id).label("cnt"),
+        )
+        .where(Job.role_cluster.in_(relevant_clusters))
+        .group_by(Job.company_id)
+        .subquery()
+    )
+    # `COALESCE(cnt, 0)` so companies with zero matching jobs return 0
+    # instead of NULL after the LEFT JOIN. Wrapped in a column label so
+    # both the SELECT and the ORDER BY reference the same expression.
+    relevant_count_col = func.coalesce(relevant_count_subq.c.cnt, 0).label("relevant_job_count")
+
+    query = apply_filters(
+        select(Company, relevant_count_col)
+        .outerjoin(relevant_count_subq, Company.id == relevant_count_subq.c.company_id)
+        .options(joinedload(Company.ats_boards))
+    )
     count_base = apply_filters(select(Company.id))
     total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar() or 0
 
@@ -163,12 +209,22 @@ async def list_companies(
         query = query.order_by(Company.funded_at.desc().nulls_last(), Company.name.asc())
     elif sort_by == "total_funding":
         query = query.order_by(Company.total_funding_usd.desc().nulls_last(), Company.name.asc())
+    elif sort_by == "relevant_job_count":
+        # Tiebreak by name ASC so the order is stable across requests —
+        # otherwise two companies with the same count would swap order
+        # on each page load (Postgres doesn't promise stable sort).
+        query = query.order_by(relevant_count_col.desc(), Company.name.asc())
     else:
         query = query.order_by(Company.name.asc())
     query = query.offset((page - 1) * per_page).limit(per_page)
 
     result = await db.execute(query)
-    companies = result.unique().scalars().all()
+    # Rows come back as `(Company, int)` tuples because of the labeled
+    # subquery column in the SELECT. `unique()` dedupes the eagerly-loaded
+    # `ats_boards` fanout the same way the old single-entity path did.
+    rows = result.unique().all()
+    companies = [r[0] for r in rows]
+    relevant_counts: dict = {r[0].id: int(r[1] or 0) for r in rows}
 
     # Get job counts and contact counts per company
     company_ids = [c.id for c in companies]
@@ -202,6 +258,7 @@ async def list_companies(
     for c in companies:
         item = CompanyOut.model_validate(c)
         item.job_count = job_counts.get(c.id, 0)
+        item.relevant_job_count = relevant_counts.get(c.id, 0)
         item.accepted_count = accepted_counts.get(c.id, 0)
         item.contact_count = contact_counts.get(c.id, 0)
         items.append(item)
