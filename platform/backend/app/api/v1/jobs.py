@@ -43,6 +43,7 @@ async def list_jobs(
     geography_bucket: str | None = None,
     geography: str | None = None,
     role_cluster: str | None = None,
+    is_classified: bool | None = None,
     search: str | None = None,
     q: str | None = None,
     sort_by: str = "first_seen_at",
@@ -91,6 +92,25 @@ async def list_jobs(
             query = query.where(Job.role_cluster.in_(relevant_clusters))
         else:
             query = query.where(Job.role_cluster == role_cluster)
+
+    # Regression finding 87: let callers filter the (huge — ~90% of rows)
+    # unclassified pool without hand-crafting `role_cluster=` URLs that
+    # some clients strip as empty. `is_classified=false` → the row has
+    # NULL or "" cluster; `is_classified=true` → anything else. We
+    # check both NULL and "" because historical rows use the empty
+    # string while newer inserts may leave it NULL. Combining this with
+    # `role_cluster=foo` is contradictory-but-valid SQL (returns 0) —
+    # we don't reject it; the frontend just shouldn't send both.
+    if is_classified is True:
+        query = query.where(
+            Job.role_cluster.is_not(None),
+            Job.role_cluster != "",
+        )
+    elif is_classified is False:
+        query = query.where(
+            or_(Job.role_cluster.is_(None), Job.role_cluster == "")
+        )
+
     if effective_search and effective_search.strip():
         # Search across title, company name, and location. Findings 84+85:
         # strip whitespace-only input and escape LIKE metachars — a search
