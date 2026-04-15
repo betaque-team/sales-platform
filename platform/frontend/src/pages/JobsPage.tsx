@@ -417,16 +417,12 @@ export function JobsPage() {
                     clickable
                     onClick={() => navigate(`/jobs/${job.id}`)}
                   >
-                    <TableCell
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSelect(job.id);
-                      }}
-                    >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={selectedIds.has(job.id)}
                         onChange={() => toggleSelect(job.id)}
+                        onClick={(e) => e.stopPropagation()}
                         className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                       />
                     </TableCell>

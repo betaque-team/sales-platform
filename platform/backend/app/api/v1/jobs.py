@@ -69,8 +69,13 @@ async def list_jobs(
         else:
             query = query.where(Job.role_cluster == role_cluster)
     if search:
+        # Search across title, company name, and location
         query = query.where(
-            or_(Job.title.ilike(f"%{search}%"), Job.location_raw.ilike(f"%{search}%"))
+            or_(
+                Job.title.ilike(f"%{search}%"),
+                Job.company.has(Company.name.ilike(f"%{search}%")),
+                Job.location_raw.ilike(f"%{search}%"),
+            )
         )
 
     # Count

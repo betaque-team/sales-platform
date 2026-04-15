@@ -30,7 +30,10 @@ async def overview(user: User = Depends(get_current_user), db: AsyncSession = De
         status_counts[row[0]] = row[1]
 
     total_jobs = sum(status_counts.values())
-    total_companies = (await db.execute(select(func.count(func.distinct(Job.company_id))))).scalar() or 0
+    # Count companies from the Company table (consistent with Companies page and
+    # Monitoring); previously this used COUNT(DISTINCT jobs.company_id) which
+    # undercounts by excluding companies that don't currently have a job row.
+    total_companies = (await db.execute(select(func.count(Company.id)))).scalar() or 0
     pipeline_count = (await db.execute(select(func.count(PotentialClient.id)))).scalar() or 0
 
     accepted_count = status_counts.get("accepted", 0)
@@ -72,7 +75,8 @@ async def trends(days: int = 30, user: User = Depends(get_current_user), db: Asy
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE role_cluster = 'infra') AS infra,
             COUNT(*) FILTER (WHERE role_cluster = 'security') AS security,
-            COUNT(*) FILTER (WHERE status = 'accepted') AS accepted
+            COUNT(*) FILTER (WHERE status = 'accepted') AS accepted,
+            COUNT(*) FILTER (WHERE status = 'rejected') AS rejected
         FROM jobs
         WHERE first_seen_at >= NOW() - make_interval(days => :days)
         GROUP BY DATE(first_seen_at)
@@ -81,12 +85,16 @@ async def trends(days: int = 30, user: User = Depends(get_current_user), db: Asy
     return [
         {
             "day": str(row[0]),
+            # Keep "date" alias for frontend charts that use date
+            "date": str(row[0]),
             "total": row[1],
             "infra": row[2],
             "security": row[3],
             "accepted": row[4],
-            # Keep legacy "count" for backward compat
+            "rejected": row[5],
+            # Keep legacy "count" and "new_jobs" aliases for backward compat
             "count": row[1],
+            "new_jobs": row[1],
         }
         for row in result
     ]
@@ -110,7 +118,7 @@ async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession =
     reviewed = accepted + rejected
     acceptance_rate = round(accepted / reviewed * 100, 1) if reviewed else 0
 
-    # Source distribution (top 6)
+    # Source distribution (top 6 by volume, for display/prompt sizing)
     src_result = await db.execute(
         select(Job.platform, func.count(Job.id))
         .group_by(Job.platform)
@@ -118,6 +126,12 @@ async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession =
         .limit(6)
     )
     sources = [{"platform": r[0], "count": r[1]} for r in src_result]
+
+    # Total number of distinct ATS sources — used in insight copy so we
+    # don't show a misleading "6 ATS sources" when there are more.
+    total_sources = (await db.execute(
+        select(func.count(func.distinct(Job.platform)))
+    )).scalar() or 0
 
     # Role cluster split
     cluster_result = await db.execute(
@@ -163,6 +177,7 @@ async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession =
         "infra_jobs": clusters.get("infra", 0),
         "security_jobs": clusters.get("security", 0),
         "top_sources": sources,
+        "total_sources": total_sources,
         "active_companies_30d": active_companies,
         "total_contacts": contact_count,
         "verified_contacts": verified_contacts,
@@ -229,7 +244,8 @@ def _fallback_insights(stats: dict) -> dict:
     verified = stats["verified_contacts"]
 
     if total:
-        insights.append(f"Platform has {total:,} jobs indexed across {len(stats['top_sources'])} ATS sources.")
+        source_count = stats.get("total_sources") or len(stats["top_sources"])
+        insights.append(f"Platform has {total:,} jobs indexed across {source_count} ATS sources.")
 
     if infra and security:
         ratio = round(infra / (infra + security) * 100)

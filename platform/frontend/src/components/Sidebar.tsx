@@ -42,12 +42,12 @@ const navigation = [
   { name: "Intelligence", to: "/intelligence", icon: Brain },
   { name: "Feedback", to: "/feedback", icon: MessageSquarePlus },
   { name: "Docs", to: "/docs", icon: HelpCircle },
+  { name: "Settings", to: "/settings", icon: Settings },
 ];
 
 const adminNavigation = [
   { name: "Monitoring", to: "/monitoring", icon: Activity },
   { name: "Role Clusters", to: "/role-clusters", icon: Tags },
-  { name: "Settings", to: "/settings", icon: Settings },
 ];
 
 const superAdminNavigation = [

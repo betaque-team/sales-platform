@@ -201,11 +201,13 @@ export function AnalyticsPage() {
                 <LineChart data={trends} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                   <XAxis
-                    dataKey="date"
+                    dataKey="day"
                     tick={{ fontSize: 11, fill: "#9ca3af" }}
                     axisLine={{ stroke: "#e5e7eb" }}
                     tickFormatter={(val: string) => {
+                      if (!val) return "";
                       const d = new Date(val);
+                      if (isNaN(d.getTime())) return val;
                       return `${d.getMonth() + 1}/${d.getDate()}`;
                     }}
                   />
@@ -223,7 +225,7 @@ export function AnalyticsPage() {
                   <Legend />
                   <Line
                     type="monotone"
-                    dataKey="new_jobs"
+                    dataKey="total"
                     stroke="#6366f1"
                     strokeWidth={2}
                     dot={false}

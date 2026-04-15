@@ -12,6 +12,7 @@ import {
   Copy,
   Check,
   X,
+  Lock,
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
@@ -46,9 +47,14 @@ export function UserManagementPage() {
   // Form state for creating new user
   const [newUser, setNewUser] = useState({ email: "", name: "", password: "", role: "viewer" });
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
+    retry: (failureCount, err: any) => {
+      // Don't retry 403 — user simply lacks permission
+      if (err?.status === 403) return false;
+      return failureCount < 3;
+    },
   });
 
   const createMutation = useMutation({
@@ -89,6 +95,55 @@ export function UserManagementPage() {
     return (
       <div className="flex items-center justify-center py-20">
         <div className="spinner h-8 w-8" />
+      </div>
+    );
+  }
+
+  // Permission-denied state — only super_admin can manage users
+  if (error && (error as any).status === 403) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Manage users, roles, and access permissions
+          </p>
+        </div>
+        <Card>
+          <div className="flex flex-col items-center py-16 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+              <Lock className="h-6 w-6 text-amber-600" />
+            </div>
+            <p className="mt-4 text-base font-semibold text-gray-900">
+              Permission denied
+            </p>
+            <p className="mt-1 max-w-md text-sm text-gray-500">
+              User Management is restricted to super admins. Contact your super
+              admin if you need access to this page.
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Other errors (network, 500, etc.)
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
+        </div>
+        <Card>
+          <div className="py-16 text-center">
+            <p className="text-sm font-medium text-red-600">
+              Failed to load users
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              {(error as Error).message}
+            </p>
+          </div>
+        </Card>
       </div>
     );
   }

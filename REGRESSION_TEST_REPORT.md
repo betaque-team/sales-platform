@@ -5,6 +5,36 @@
 **Branch:** `main` (up-to-date with `origin/main`; pulled `ea0de3c..6e9c76e` before testing)
 **Environment:** Production — https://salesplatform.reventlabs.com
 
+## How we track fixes
+
+This file is the shared source of truth between the tester and the bug fixer.
+Both write to the **same branch** so the findings list and fix status stay in
+one place.
+
+**Workflow (both tester and fixer):**
+
+1. Always work on branch `fix/regression-findings` — **never** push directly to `main`.
+2. Before editing this file, pull the latest so you don't clobber each other:
+   ```bash
+   git fetch origin
+   git checkout fix/regression-findings
+   git pull --rebase origin fix/regression-findings
+   ```
+3. **Tester** appends new rows to the findings table at the bottom (next number
+   in sequence) with `Fix Status = ⬜ open`, describes the finding in a new
+   section below, then commits + pushes:
+   ```bash
+   git add REGRESSION_TEST_REPORT.md
+   git commit -m "Add regression finding #N: <short title>"
+   git push origin fix/regression-findings
+   ```
+4. **Fixer** (Claude) picks up open findings, implements the fix, updates the
+   row's `Fix Status` to ✅ (with a one-line summary of the fix), commits + pushes.
+5. When all findings are ✅ (or deliberately punted to a follow-up ticket), open a
+   single PR `fix/regression-findings → main`.
+
+**Fix Status key:** ✅ fixed · 🟡 partial · ⏳ investigating · ⬜ open
+
 ## Credentials Used
 
 | Role | Email | Auth | Status |
@@ -26,19 +56,20 @@
 
 ## 1. Summary of Key Findings
 
-| # | Severity | Area | Finding |
-|---|---|---|---|
-| 1 | 🔴 | Auth | `test-reviewer` & `test-viewer` credentials from password doc both return 401 — roles cannot be tested end-to-end |
-| 2 | 🔴 | Data integrity | Company count inconsistent: Dashboard says **5,827**, Companies page & Monitoring say **6,638** |
-| 3 | 🟠 | Jobs/UX | Clicking a checkbox on a job row navigates to the job detail (missing `stopPropagation`) — bulk-select effectively unusable |
-| 4 | 🟠 | Search | Search by company name returns 0 results for real companies (e.g. `Bitwarden` → 0, but Bitwarden jobs appear on dashboard). Confirms an existing user ticket |
-| 5 | 🟠 | Admin UX | `/users` page returns empty state for non-super_admin. API returns 403 but UI shows "0 admins, 0 reviewers, 0 viewers" with no permission notice |
-| 6 | 🟡 | Analytics | Job Trends chart axis labels render `NaN/NaN` (multiple times) |
-| 7 | 🟡 | Platforms | `himalayas` fetcher reports **180 errors** on last scan; 4 platforms (`bamboohr`, `jobvite`, `recruitee`, `wellfound`) report 0 jobs but are marked active |
-| 8 | 🟡 | Sidebar | `Settings` link lives inside `adminNavigation` (Sidebar.tsx:47-51) — reviewers/viewers can't reach their own Settings via the nav |
-| 9 | 🔵 | Dashboard | "1864 jobs" badge on Security section wraps onto 2 lines at 1728px viewport |
-| 10 | 🔵 | Pipeline | A card titled literally "1name" appears in `Researching` stage — looks like seeded/test data leaking to prod |
-| 11 | 🔵 | Feedback | Many duplicate "Resume Score / Relevance" tickets (8 identical entries from same user 4/14) — no dedup |
+| # | Severity | Area | Finding | Fix Status |
+|---|---|---|---|---|
+| 1 | 🔴 | Auth | `test-reviewer` & `test-viewer` credentials from password doc both return 401 — roles cannot be tested end-to-end | ⏳ needs super_admin to reset passwords via `/users/{id}/reset-password` — code path works, no code change required |
+| 2 | 🔴 | Data integrity | Company count inconsistent: Dashboard says **5,827**, Companies page & Monitoring say **6,638** | ✅ fixed: Dashboard now uses `COUNT(Company.id)` to match Monitoring (`analytics.py`) |
+| 3 | 🟠 | Jobs/UX | Clicking a checkbox on a job row navigates to the job detail (missing `stopPropagation`) — bulk-select effectively unusable | ✅ fixed: removed double-toggle, added explicit `stopPropagation` on input + cell (`JobsPage.tsx`) |
+| 4 | 🟠 | Search | Search by company name returns 0 results for real companies (e.g. `Bitwarden` → 0, but Bitwarden jobs appear on dashboard). Confirms an existing user ticket | ✅ fixed: `jobs.py` search now matches `Job.title`, `Company.name`, and `Job.location_raw` |
+| 5 | 🟠 | Admin UX | `/users` page returns empty state for non-super_admin. API returns 403 but UI shows "0 admins, 0 reviewers, 0 viewers" with no permission notice | ✅ fixed: `UserManagementPage.tsx` renders a proper permission-denied card on 403 |
+| 6 | 🟡 | Analytics | Job Trends chart axis labels render `NaN/NaN` (multiple times) | ✅ fixed: `dataKey` was `date`/`new_jobs` but backend returns `day`/`total`; added aliases + guarded `tickFormatter` |
+| 7 | 🟡 | Platforms | `himalayas` fetcher reports **180 errors** on last scan; 4 platforms (`bamboohr`, `jobvite`, `recruitee`, `wellfound`) report 0 jobs but are marked active | ⬜ open — needs fetcher-by-fetcher investigation (API changes likely) |
+| 8 | 🟡 | Sidebar | `Settings` link lives inside `adminNavigation` (Sidebar.tsx:47-51) — reviewers/viewers can't reach their own Settings via the nav | ✅ fixed: moved `Settings` into the shared `navigation` list in `Sidebar.tsx` |
+| 9 | 🔵 | Dashboard | "1864 jobs" badge on Security section wraps onto 2 lines at 1728px viewport | ✅ fixed: `Badge` now uses `whitespace-nowrap` + `shrink-0` so it never wraps |
+| 10 | 🔵 | Pipeline | A card titled literally "1name" appears in `Researching` stage — looks like seeded/test data leaking to prod | ⬜ open — data cleanup task, not code. Run `DELETE FROM potential_clients WHERE company_name ILIKE '1name'` against prod (with admin approval) |
+| 11 | 🔵 | Feedback | Many duplicate "Resume Score / Relevance" tickets (8 identical entries from same user 4/14) — no dedup | ✅ fixed: `feedback.py` now returns 409 if the same user posts an identical open title within 7 days |
+| 12 | 🔵 | Copy | Dashboard AI Insight says "6 ATS sources" when 10 are listed on Platforms | ✅ fixed: analytics fallback now uses `COUNT(DISTINCT platform)` instead of `len(top_sources)` |
 
 ---
 

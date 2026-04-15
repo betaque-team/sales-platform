@@ -3,7 +3,7 @@
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
@@ -62,6 +62,34 @@ async def create_feedback(
             raise HTTPException(400, "Feature requests require 'use_case'")
         if not body.impact:
             raise HTTPException(400, "Feature requests require 'impact'")
+
+    # Dedup — block same user from creating a duplicate open ticket with
+    # identical (case-insensitive) title + category within the last 7 days.
+    # Users were accidentally submitting 8+ identical "Resume Score / Relevance"
+    # tickets (see regression test report Finding 11).
+    dedup_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    dup_result = await db.execute(
+        select(Feedback).where(
+            Feedback.user_id == user.id,
+            Feedback.category == body.category,
+            func.lower(Feedback.title) == body.title.strip().lower(),
+            Feedback.status.in_(("open", "in_progress")),
+            Feedback.created_at >= dedup_cutoff,
+        ).limit(1)
+    )
+    existing = dup_result.scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "You already have an open ticket with the same title. "
+                    "Please add a comment there or wait for it to be resolved."
+                ),
+                "existing_feedback_id": str(existing.id),
+                "existing_status": existing.status,
+            },
+        )
 
     fb = Feedback(
         user_id=user.id,
