@@ -182,7 +182,7 @@ export function AnalyticsPage() {
         />
         <MetricCard
           label="Avg Score"
-          value={overview?.avg_relevance_score?.toFixed(0) ?? 0}
+          value={overview?.avg_relevance_score?.toFixed(1) ?? "0.0"}
           icon={TrendingUp}
           color="bg-purple-600"
         />

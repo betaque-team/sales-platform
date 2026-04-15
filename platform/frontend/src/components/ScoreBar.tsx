@@ -35,7 +35,20 @@ export function ScoreBar({ score, showLabel = true, className }: ScoreBarProps) 
       </div>
       {showLabel && (
         <span className={clsx("text-xs font-medium", getScoreTextColor(clamped))}>
-          {clamped}
+          {/*
+            Regression finding 50: the label used to render whatever
+            precision the backend happened to send. For Dashboard's
+            `avg_relevance_score` that's a float (e.g. 39.65) so the
+            ScoreBar showed "39.65" while the Analytics MetricCard
+            rounded the exact same value to 40 via .toFixed(0). Same
+            number, two representations, user-confusing.
+
+            toFixed(1) standardises across every ScoreBar consumer
+            (Dashboard averages, job relevance, resume ATS scores) at
+            one decimal — same precision the role-cluster progress
+            bars already use elsewhere in the app.
+          */}
+          {clamped.toFixed(1)}
         </span>
       )}
     </div>
