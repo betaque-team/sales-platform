@@ -34,13 +34,27 @@ async def submit_review(
     decision_map = {"accept": "accepted", "reject": "rejected", "skip": "skipped"}
     normalized = decision_map.get(body.decision, body.decision)
 
+    # Regression finding 73: rejection tags must only be persisted on
+    # `decision="rejected"` rows. The frontend carried selectedTags across
+    # prev/next navigation (finding 72) AND submitted them in the Accept
+    # payload too — so a reviewer who armed tags for job A, then clicked
+    # Next and hit Accept on job B, produced an accepted-review row with
+    # rejection tags attached. Downstream rejection-reason histograms
+    # double-count those tags because they show up on both accepted and
+    # rejected rows. Silent-drop here (rather than 400) because the
+    # reviewer's intent on Accept is "this is good" — surfacing an error
+    # they never triggered would be a worse UX. The frontend fix
+    # (tester-owned) sets tags=[] on accept/skip too; this is
+    # defense-in-depth for hand-crafted POSTs or a future frontend regression.
+    persisted_tags = list(body.tags) if normalized == "rejected" else []
+
     # Create review
     review = Review(
         job_id=body.job_id,
         reviewer_id=user.id,
         decision=normalized,
         comment=body.comment,
-        tags=body.tags,
+        tags=persisted_tags,
     )
     db.add(review)
 
