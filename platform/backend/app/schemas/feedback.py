@@ -1,8 +1,9 @@
 """Pydantic schemas for feedback / tickets."""
 
+import json
 from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 VALID_CATEGORIES = {"bug", "feature_request", "improvement", "question"}
@@ -67,16 +68,18 @@ class FeedbackOut(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_validator("attachments", mode="before")
     @classmethod
-    def model_validate(cls, obj, **kwargs):
-        # Parse attachments JSON string to list
-        import json
-        instance = super().model_validate(obj, **kwargs)
-        if isinstance(instance.attachments, str):
+    def parse_attachments(cls, v):
+        # DB stores attachments as a JSON-encoded string; coerce to list before validation.
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
             try:
-                instance.attachments = json.loads(instance.attachments)
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else []
             except (json.JSONDecodeError, TypeError):
-                instance.attachments = []
-        elif instance.attachments is None:
-            instance.attachments = []
-        return instance
+                return []
+        return []
