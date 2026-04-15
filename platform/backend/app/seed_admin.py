@@ -34,7 +34,7 @@ async def seed():
 
         if existing:
             existing.password_hash = hash_password(ADMIN_PASSWORD)
-            existing.role = "admin"
+            existing.role = "super_admin"
             existing.is_active = True
             print(f"Updated existing admin user: {ADMIN_EMAIL}")
         else:
@@ -42,7 +42,7 @@ async def seed():
                 id=uuid.uuid4(),
                 email=ADMIN_EMAIL,
                 name=ADMIN_NAME,
-                role="admin",
+                role="super_admin",
                 password_hash=hash_password(ADMIN_PASSWORD),
                 is_active=True,
                 created_at=datetime.now(timezone.utc),
@@ -55,7 +55,7 @@ async def seed():
     await engine.dispose()
     print(f"\n  Email:    {ADMIN_EMAIL}")
     print(f"  Password: {ADMIN_PASSWORD}")
-    print(f"  Role:     admin\n")
+    print(f"  Role:     super_admin\n")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import {
   MessageSquarePlus,
   HelpCircle,
   Brain,
+  Bell,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { logout } from "@/lib/api";
@@ -46,6 +47,7 @@ const navigation = [
 
 const adminNavigation = [
   { name: "Monitoring", to: "/monitoring", icon: Activity },
+  { name: "Notifications", to: "/notifications", icon: Bell },
   { name: "Role Clusters", to: "/role-clusters", icon: Tags },
   { name: "Settings", to: "/settings", icon: Settings },
 ];

@@ -659,17 +659,26 @@ export interface FeedbackCreate {
   screenshot_url?: string;
 }
 
-// ── Alert Configuration ─────────────────────────────────────────────────────
+// ── Alert / Notification Configuration ──────────────────────────────────────
 export interface AlertConfig {
   id: string;
+  name: string;
   channel: string;
   webhook_url: string;
+  email_recipients: string;
   min_relevance_score: number;
   role_clusters: string[] | null;
   geography_filter: string | null;
   is_active: boolean;
+  created_by: string | null;
   last_triggered_at: string | null;
   created_at: string;
+}
+
+export interface SmtpStatus {
+  configured: boolean;
+  host: string | null;
+  from_email: string | null;
 }
 
 // ── Cover Letter ────────────────────────────────────────────────────────────

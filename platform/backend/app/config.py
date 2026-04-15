@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     scan_rate_limit_per_second: float = 2.0
     job_expiry_days: int = 14
 
+    # SMTP / Email
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Sales Platform"
+    smtp_use_tls: bool = True
+
     # Enrichment
     enrichment_stale_days: int = 30
     contact_verify_stale_days: int = 14

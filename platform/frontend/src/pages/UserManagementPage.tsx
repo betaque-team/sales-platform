@@ -19,6 +19,7 @@ import { Button } from "@/components/Button";
 import {
   getUsers,
   createUser,
+  inviteUser,
   updateUser,
   deleteUser,
   adminResetPassword,
@@ -40,11 +41,14 @@ const ROLE_DESCRIPTIONS: Record<string, string> = {
 export function UserManagementPage() {
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
   const [tempPassword, setTempPassword] = useState<{ userId: string; password: string } | null>(null);
+  const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   // Form state for creating new user
   const [newUser, setNewUser] = useState({ email: "", name: "", password: "", role: "viewer" });
+  const [inviteData, setInviteData] = useState({ email: "", name: "", role: "viewer" });
 
   const { data, isLoading } = useQuery({
     queryKey: ["users"],
@@ -57,6 +61,16 @@ export function UserManagementPage() {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       setShowCreate(false);
       setNewUser({ email: "", name: "", password: "", role: "viewer" });
+    },
+  });
+
+  const inviteMutation = useMutation({
+    mutationFn: () => inviteUser(inviteData),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      setShowInvite(false);
+      setInviteSuccess(`Invited ${inviteData.email} — they can now sign in with Google SSO.`);
+      setInviteData({ email: "", name: "", role: "viewer" });
     },
   });
 
@@ -104,10 +118,16 @@ export function UserManagementPage() {
             Manage users, roles, and access permissions
           </p>
         </div>
-        <Button variant="primary" onClick={() => setShowCreate(true)}>
-          <UserPlus className="mr-2 h-4 w-4" />
-          Create User
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => { setShowCreate(true); setShowInvite(false); }}>
+            <UserPlus className="mr-2 h-4 w-4" />
+            Create User
+          </Button>
+          <Button variant="primary" onClick={() => { setShowInvite(true); setShowCreate(false); }}>
+            <UserPlus className="mr-2 h-4 w-4" />
+            Invite (SSO)
+          </Button>
+        </div>
       </div>
 
       {/* Role overview cards */}
@@ -160,6 +180,88 @@ export function UserManagementPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Invite success banner */}
+      {inviteSuccess && (
+        <div className="rounded-lg border border-green-200 bg-green-50 p-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium text-green-800">{inviteSuccess}</p>
+            <button onClick={() => setInviteSuccess(null)} className="text-green-400 hover:text-green-600">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Invite user form (SSO) */}
+      {showInvite && (
+        <Card>
+          <h3 className="text-base font-semibold text-gray-900 mb-1">Invite User (Google SSO)</h3>
+          <p className="text-sm text-gray-500 mb-4">Create a stub account. The user signs in with Google using this email.</p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              inviteMutation.mutate();
+            }}
+            className="grid grid-cols-1 gap-4 sm:grid-cols-3"
+          >
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <input
+                type="email"
+                required
+                value={inviteData.email}
+                onChange={(e) => setInviteData({ ...inviteData, email: e.target.value })}
+                className="input w-full"
+                placeholder="user@company.com"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                type="text"
+                required
+                value={inviteData.name}
+                onChange={(e) => setInviteData({ ...inviteData, name: e.target.value })}
+                className="input w-full"
+                placeholder="Full Name"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+              <select
+                value={inviteData.role}
+                onChange={(e) => setInviteData({ ...inviteData, role: e.target.value })}
+                className="input w-full"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="reviewer">Reviewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div className="sm:col-span-3 flex items-center gap-3">
+              <Button type="submit" variant="primary" loading={inviteMutation.isPending}>
+                Send Invite
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => {
+                  setShowInvite(false);
+                  setInviteData({ email: "", name: "", role: "viewer" });
+                }}
+              >
+                Cancel
+              </Button>
+              {inviteMutation.isError && (
+                <p className="text-sm text-red-600">
+                  {(inviteMutation.error as Error).message}
+                </p>
+              )}
+            </div>
+          </form>
+        </Card>
       )}
 
       {/* Create user form */}
@@ -345,6 +447,9 @@ function UserRow({
           )}
           {user.has_google && (
             <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-700">Google</span>
+          )}
+          {!user.has_password && !user.has_google && (
+            <span className="rounded bg-amber-50 px-1.5 py-0.5 text-xs text-amber-700">Invited</span>
           )}
         </div>
       </td>

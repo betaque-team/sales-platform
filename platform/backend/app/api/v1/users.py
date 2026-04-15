@@ -22,6 +22,47 @@ ROLE_DESCRIPTIONS = {
 }
 
 
+@router.post("/invite")
+async def invite_user(
+    body: dict,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Invite a user by email for SSO login. Creates a stub user with no password."""
+    from pydantic import EmailStr, validate_email
+
+    email = (body.get("email") or "").strip().lower()
+    name = (body.get("name") or "").strip()
+    role = body.get("role", "viewer")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(VALID_ROLES)}")
+
+    # Check duplicate
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
+
+    user = User(email=email, name=name, role=role, is_active=True)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "invited": True,
+        "message": f"Invited {email}. They can now sign in with Google SSO.",
+    }
+
+
 @router.get("")
 async def list_users(
     user: User = Depends(require_role("super_admin")),

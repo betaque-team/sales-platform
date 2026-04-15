@@ -42,6 +42,7 @@ import type {
   Feedback,
   FeedbackCreate,
   AlertConfig,
+  SmtpStatus,
   CoverLetterResult,
   InterviewPrepResult,
   SkillGapResponse,
@@ -506,6 +507,10 @@ export async function createUser(data: { email: string; name: string; password: 
   return request<ManagedUser>("/auth/register", { method: "POST", body: JSON.stringify(data) });
 }
 
+export async function inviteUser(data: { email: string; name: string; role: string }): Promise<ManagedUser & { invited: boolean; message: string }> {
+  return request("/users/invite", { method: "POST", body: JSON.stringify(data) });
+}
+
 export async function updateUser(userId: string, data: { role?: string; is_active?: boolean }): Promise<ManagedUser> {
   return request<ManagedUser>(`/users/${userId}`, { method: "PATCH", body: JSON.stringify(data) });
 }
@@ -754,22 +759,24 @@ export async function deleteFeedbackAttachment(feedbackId: string, filename: str
   return request(`/feedback/${feedbackId}/attachments/${filename}`, { method: "DELETE" });
 }
 
-// ── Job Alerts ──────────────────────────────────────────────────────────────
+// ── Notifications (admin) ───────────────────────────────────────────────────
 export async function getAlerts(): Promise<{ items: AlertConfig[] }> {
   return request<{ items: AlertConfig[] }>("/alerts");
 }
 
 export async function createAlert(data: {
-  webhook_url: string; min_relevance_score?: number; role_clusters?: string[] | null; geography_filter?: string | null;
-}): Promise<{ id: string }> {
-  return request<{ id: string }>("/alerts", { method: "POST", body: JSON.stringify(data) });
+  name: string; channel: string; webhook_url?: string; email_recipients?: string;
+  min_relevance_score?: number; role_clusters?: string[] | null; geography_filter?: string | null;
+}): Promise<AlertConfig> {
+  return request<AlertConfig>("/alerts", { method: "POST", body: JSON.stringify(data) });
 }
 
 export async function updateAlert(id: string, data: {
-  webhook_url?: string; min_relevance_score?: number; role_clusters?: string[] | null;
+  name?: string; channel?: string; webhook_url?: string; email_recipients?: string;
+  min_relevance_score?: number; role_clusters?: string[] | null;
   geography_filter?: string | null; is_active?: boolean;
-}): Promise<{ id: string }> {
-  return request<{ id: string }>(`/alerts/${id}`, { method: "PUT", body: JSON.stringify(data) });
+}): Promise<AlertConfig> {
+  return request<AlertConfig>(`/alerts/${id}`, { method: "PUT", body: JSON.stringify(data) });
 }
 
 export async function deleteAlert(id: string): Promise<void> {
@@ -778,6 +785,10 @@ export async function deleteAlert(id: string): Promise<void> {
 
 export async function testAlert(id: string): Promise<{ status: string; message: string }> {
   return request<{ status: string; message: string }>(`/alerts/${id}/test`, { method: "POST" });
+}
+
+export async function getSmtpStatus(): Promise<SmtpStatus> {
+  return request<SmtpStatus>("/alerts/smtp-status");
 }
 
 // ── Cover Letter ────────────────────────────────────────────────────────────

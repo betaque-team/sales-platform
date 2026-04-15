@@ -22,6 +22,7 @@ import { CompanyDetailPage } from "./pages/CompanyDetailPage";
 import { FeedbackPage } from "./pages/FeedbackPage";
 import { DocsPage } from "./pages/DocsPage";
 import { IntelligencePage } from "./pages/IntelligencePage";
+import { NotificationsPage } from "./pages/NotificationsPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -160,6 +161,14 @@ export default function App() {
         element={
           <ProtectedLayout>
             <UserManagementPage />
+          </ProtectedLayout>
+        }
+      />
+      <Route
+        path="/notifications"
+        element={
+          <ProtectedLayout>
+            <NotificationsPage />
           </ProtectedLayout>
         }
       />
