@@ -377,17 +377,25 @@ export function PlatformsPage() {
                 )}
               </div>
 
+              {/* Regression finding 47: stat cards previously rendered blank
+                  whitespace for platforms with zero jobs (bamboohr / jobvite /
+                  recruitee / wellfound / weworkremotely). Root cause was a
+                  `null`/`undefined` slipping through when a platform had
+                  boards but no Job rows yet — `null.toLocaleString()` throws,
+                  and React then renders nothing in place of the count. Null-
+                  coalescing to 0 keeps the card readable ("0") and consistent
+                  with the other stat cards on the page. */}
               <div className="mt-4 grid grid-cols-3 gap-3">
                 <div className="text-center">
-                  <p className="text-2xl font-bold text-gray-900">{p.total_jobs.toLocaleString()}</p>
+                  <p className="text-2xl font-bold text-gray-900">{(p.total_jobs ?? 0).toLocaleString()}</p>
                   <p className="text-xs text-gray-500">Total Jobs</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl font-bold text-green-600">{p.accepted_jobs}</p>
+                  <p className="text-2xl font-bold text-green-600">{(p.accepted_jobs ?? 0).toLocaleString()}</p>
                   <p className="text-xs text-gray-500">Accepted</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl font-bold text-primary-600">{p.avg_score}</p>
+                  <p className="text-2xl font-bold text-primary-600">{p.avg_score ?? 0}</p>
                   <p className="text-xs text-gray-500">Avg Score</p>
                 </div>
               </div>
