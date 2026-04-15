@@ -14,6 +14,7 @@ from app.models.resume import ResumeScore
 from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user, require_role
 from app.schemas.job import JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest
+from app.utils.sanitize import sanitize_html
 
 
 async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
@@ -244,10 +245,13 @@ async def get_job_description(job_id: UUID, user: User = Depends(get_current_use
     result = await db.execute(select(JobDescription).where(JobDescription.job_id == job_id))
     jd = result.scalar_one_or_none()
     if jd:
+        # The frontend renders this via dangerouslySetInnerHTML, so any HTML
+        # coming from ATS boards must be sanitized (strip <script>, event
+        # handlers, javascript: URLs, etc.) before we hand it back.
         return JobDescriptionOut(
             id=jd.id,
             job_id=jd.job_id,
-            raw_text=jd.text_content or jd.html_content or "",
+            raw_text=sanitize_html(jd.text_content or jd.html_content or ""),
             parsed_requirements=[],
             parsed_nice_to_have=[],
             parsed_tech_stack=[],
@@ -277,7 +281,8 @@ async def get_job_description(job_id: UUID, user: User = Depends(get_current_use
         if raw_text and "&lt;" in raw_text:
             raw_text = html_mod.unescape(raw_text)
 
-    return JobDescriptionOut(raw_text=raw_text, parsed_requirements=[], parsed_nice_to_have=[], parsed_tech_stack=[])
+    # Sanitize before returning — frontend renders via dangerouslySetInnerHTML.
+    return JobDescriptionOut(raw_text=sanitize_html(raw_text), parsed_requirements=[], parsed_nice_to_have=[], parsed_tech_stack=[])
 
 
 @router.get("/{job_id}/reviews")

@@ -191,13 +191,40 @@ async def delete_attachment(
 
 
 @router.get("/attachments/{filename}")
-async def get_attachment(filename: str):
-    """Serve an attachment file."""
+async def get_attachment(
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve an attachment file.
+
+    Authorization: the caller must either own the feedback ticket that lists
+    this filename in its attachments JSON, or be admin/super_admin. Previously
+    this endpoint had no auth dependency at all — any anonymous request could
+    download any attachment by guessing the UUID filename (regression #21).
+    """
     # Sanitize filename to prevent directory traversal
     safe_name = Path(filename).name
     file_path = UPLOAD_DIR / safe_name
     if not file_path.exists():
         raise HTTPException(404, "File not found")
+
+    # Find the feedback row that owns this attachment. The `attachments`
+    # column is a JSON-encoded string, so we LIKE-match the exact
+    # "filename": "<name>" fragment to avoid partial matches.
+    like_needle = f'%"filename": "{safe_name}"%'
+    owner_result = await db.execute(
+        select(Feedback.user_id).where(Feedback.attachments.ilike(like_needle)).limit(1)
+    )
+    owner_id = owner_result.scalar_one_or_none()
+    if owner_id is None:
+        # File exists on disk but isn't linked to any feedback row —
+        # treat as not-found rather than leaking its existence.
+        raise HTTPException(404, "File not found")
+
+    if owner_id != user.id and user.role not in ("admin", "super_admin"):
+        raise HTTPException(403, "Not authorized")
+
     return FileResponse(file_path)
 
 

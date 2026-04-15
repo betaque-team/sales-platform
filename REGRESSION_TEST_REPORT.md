@@ -78,8 +78,8 @@ one place.
 | 18 | 🟡 | Search / Data | `Stripe` company shows `job_count: 61` but `/jobs?search=Stripe` returns only 3 (title matches). Finding #4 fix is in `212830a` but may not be deployed, or `Job.company.has()` isn't surfacing all rows | ⬜ open |
 | 19 | 🔵 | Security headers | Response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, Cross-Origin policies. Cookie flags are good (`HttpOnly; Secure; SameSite=lax`) | ⬜ open |
 | 20 | 🔵 | Role Clusters | `POST /api/v1/role-clusters` accepts arbitrary punctuation/special-chars in `name` (stored lowercased); no `[a-z0-9_-]+` sanitization. Safe vs. SQLi (ORM), but `name` is used as URL param downstream | ⬜ open |
-| 21 | 🔴 | Security / Feedback | `GET /api/v1/feedback/attachments/{filename}` has **NO auth dependency** (`feedback.py:193-201`). Any anonymous request, or any user regardless of role, can download any attachment given its UUID filename. Verified on prod: admin upload + viewer user download returned identical 70-byte file | ⬜ open |
-| 22 | 🔴 | Security / XSS | `JobDetailPage.tsx:390` renders `description.raw_text` via `dangerouslySetInnerHTML` whenever it contains `<`. `raw_text` comes straight from third-party ATS JSON (Greenhouse/Lever/Ashby/etc.), and `jobs.py:276-278` even HTML-unescapes it. A job-poster on any platform can inject `<script>` → stored DOM XSS on our origin (cookies are `HttpOnly` but authenticated APIs still callable) | ⬜ open |
+| 21 | 🔴 | Security / Feedback | `GET /api/v1/feedback/attachments/{filename}` has **NO auth dependency** (`feedback.py:193-201`). Any anonymous request, or any user regardless of role, can download any attachment given its UUID filename. Verified on prod: admin upload + viewer user download returned identical 70-byte file | ✅ fixed |
+| 22 | 🔴 | Security / XSS | `JobDetailPage.tsx:390` renders `description.raw_text` via `dangerouslySetInnerHTML` whenever it contains `<`. `raw_text` comes straight from third-party ATS JSON (Greenhouse/Lever/Ashby/etc.), and `jobs.py:276-278` even HTML-unescapes it. A job-poster on any platform can inject `<script>` → stored DOM XSS on our origin (cookies are `HttpOnly` but authenticated APIs still callable) | ✅ fixed |
 | 23 | 🔴 | Security / Auth | `auth.py:36-43` hashes passwords as single-round `hashlib.sha256(jwt_secret + ':' + password)`. Salt is **global** (not per-user), no key stretching, no constant-time compare. Code comment itself says "For production use bcrypt instead". A DB leak trivially yields all passwords via GPU brute-force | ⬜ open |
 | 24 | 🟠 | Security / Auth | No rate limiting, lockout, or CAPTCHA on `POST /api/v1/auth/login`. 25 wrong-password attempts all accepted; under burst a few return 503 (backend thread exhaustion, not a limiter). Enables online credential stuffing | ⬜ open |
 | 25 | 🟡 | Validation | `FeedbackCreate` schema (`schemas/feedback.py`) bounds `title` to 200 chars but `description`, `steps_to_reproduce`, `expected_behavior`, `actual_behavior`, `use_case`, `proposed_solution`, `impact`, `screenshot_url` have **no max_length**. Prod accepted a 1 MB description (verified); an attacker can bloat the DB. `screenshot_url` also has no URL validator (`javascript:` accepted) | ⬜ open |
@@ -573,6 +573,8 @@ async def get_attachment(filename: str, user: User = Depends(get_current_user), 
 
 Probe attachment + feedback ticket were deleted after testing.
 
+**✅ Fix applied** (`feedback.py:193-228`): endpoint now declares `user: User = Depends(get_current_user)` and `db: AsyncSession = Depends(get_db)`. Before returning the `FileResponse`, we ILIKE-scan `Feedback.attachments` for the exact `"filename": "<name>"` fragment to find the owning ticket; request is rejected 404 if unlinked, 403 if the caller is neither the ticket author nor admin/super_admin. Directory-traversal hardening (`Path(filename).name`) retained.
+
 ---
 
 ### 22. Stored DOM-XSS via third-party ATS HTML in JobDetailPage
@@ -612,6 +614,16 @@ dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(description.raw_text, {
 }) }}
 ```
 Also remove the backend `html_mod.unescape` at `jobs.py:276-278` — it's actively making things worse.
+
+**✅ Fix applied** (backend, no frontend dep needed): added `backend/app/utils/sanitize.py` with `sanitize_html()` built on BeautifulSoup (already a dep). Both `raw_text` return paths in `jobs.py` (the stored `JobDescription` branch *and* the `raw_json` fallback that follows `html_mod.unescape`) now pass their text through `sanitize_html()` before returning it to the frontend. The sanitizer:
+
+- **Hard-drops** `<script>`, `<style>`, `<iframe>`, `<embed>`, `<object>`, `<applet>`, `<link>`, `<meta>`, `<form>`, `<input>`, `<button>`, `<svg>`, `<noscript>`, etc. — along with their children.
+- **Unwraps** anything not in a conservative allowlist (`<p>`, `<br>`, `<ul>`, `<ol>`, `<li>`, `<a>`, `<strong>`, headings, tables, etc.) — keeps the text, drops the tag.
+- **Drops every `on*` attribute** (onclick, onload, onerror, …) and any attribute not in the allowlist.
+- **Drops `href` / `src`** whose scheme is not `http:`, `https:`, `mailto:`, `/`, or `#` (i.e. kills `javascript:`, `data:`, `vbscript:`, `file:`).
+- **Forces `<a>` tags** to `rel="noopener noreferrer nofollow"` + `target="_blank"`.
+
+Frontend `JobDetailPage.tsx` still uses `dangerouslySetInnerHTML`, but the input is now trusted-safe from the backend. Kept `html_mod.unescape()` — it runs *before* sanitization, so escaped payloads like `&lt;script&gt;` are decoded and then stripped by `sanitize_html()` in the same pass.
 
 ---
 
