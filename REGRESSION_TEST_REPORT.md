@@ -111,6 +111,10 @@ one place.
 | 51 | 🟡 | Review Queue | **No keyboard shortcuts on Review Queue despite it being a queue-of-one workflow.** `/review` shows one job at a time with a "1 of 20" counter and Accept / Reject / Skip buttons. Pressing `J`, `K`, `ArrowLeft`, `ArrowRight`, `Space`, `Enter`, or typing `a`/`r`/`s` does nothing — the counter stays at `1 of 20`. Users review hundreds of jobs; forcing a mouse click per decision is multiple seconds of wasted time per review | ⬜ open — `ReviewQueuePage.tsx`: add a `useEffect(() => { window.addEventListener('keydown', …) }, [])` with `J`/`ArrowRight` → next, `K`/`ArrowLeft` → prev, `A` → accept, `R` → reject, `S` → skip. Show a `?` cheat-sheet dialog. Guard when focus is inside an `<input>` / `<textarea>` (compare `e.target.tagName`). This is a common sales-ops pattern (Front, Missive, Gmail) |
 | 52 | 🟡 | A11y | **App-wide focus-ring coverage is very low.** Counted on four pages: `/role-clusters` 1 of 32 interactive elements carry `focus:ring` / `focus:outline` / `focus-visible` classes, `/review` 3 of 32, `/jobs` 2 of 27, `/settings` (after opening password form) 2 of 14. Keyboard-only users tabbing through the app lose track of focus on most controls. Icon-only buttons especially (sidebar sign-out, role-cluster action icons, feedback close-X) have no visible focus state at all | ⬜ open — two-part fix: (a) add a global `:focus-visible` rule in `index.css` so every interactive element gets a visible ring by default (`*:focus-visible { @apply outline-none ring-2 ring-primary-500 ring-offset-1; }`), then override per-component where the ring clashes with the design, (b) remove the handful of `outline-none` overrides that were added without a `focus-visible` replacement. Verification target: after the change, every button / link / input / select / textarea should show a ring when tabbed to |
 | 53 | 🔵 | Feedback / Data cleanup | **Feedback list response ships a ~1 MB description row to every caller.** `GET /api/v1/feedback` on prod returns one ticket whose `description` field is approximately 1,000,000 characters of filler text — a leftover from Round 2's Finding #25 probe (20,000-char submission was accepted; a later test submitted 1 MB). Finding #25's code fix caps descriptions at 8000 chars on new submissions but doesn't touch existing rows. The row is served in full to every `/feedback` list request; the React table CSS-truncates it with `truncate` but the DOM carries the full string → measurable TTFB / DOM-weight regression. Not a security issue, but a data hygiene one | ⬜ open — post-deploy cleanup: once the `app/close_legacy_duplicate_feedback.py` pattern proves safe, add a similar one-shot `app/trim_oversized_feedback.py` script that `UPDATE feedback SET description = LEFT(description, 8000) || ' [truncated legacy row]' WHERE LENGTH(description) > 8000` and the same for the other free-text columns bounded in Finding #25. Include a `--dry-run` flag. Alternative: server-side cap the field in the list serializer so list responses stay small even if cleanup is deferred |
+| 54 | 🟡 | Applications | **Applications page empty-state has no CTA and no explanation of how rows get created.** `/applications` with 0 rows renders `Total 0 · Applied 0 · Interview 0 · Offer 0` stat cards, 8 filter tabs, a table with `No applications found`, and no "Add Application" button anywhere. Users don't know whether apps appear automatically (from Review Queue accept?) or need manual entry. Dead-end until the user discovers the flow by accident | ⬜ open — `ApplicationsPage.tsx` empty-state: replace "No applications found" with an instructional block that links to the Review Queue and Jobs: *"No applications yet. Applications are created automatically when you apply to a job from its detail page, or mark a job as 'Applied' in the Review Queue."* Include `<Link to="/review">Open Review Queue</Link>` and `<Link to="/jobs?role_cluster=relevant">Browse Relevant Jobs</Link>` buttons |
+| 55 | 🟡 | Applications | **Applications stat cards cover only 4 of the 8 filter statuses.** Filter tabs: `All · Prepared · Submitted · Applied · Interview · Offer · Rejected · Withdrawn`. Stat cards: `Total · Applied · Interview · Offer`. The `Prepared` / `Submitted` (pre-submit states) and `Rejected` / `Withdrawn` (negative outcomes) buckets are invisible in the overview — users only see the happy path. A pipeline that's 80% rejected looks identical to a pipeline that's 80% in-progress until you click each tab | ⬜ open — `ApplicationsPage.tsx`: either (a) collapse the stat-cards into 5 (`Total · In Progress (Prepared+Submitted+Applied+Interview) · Outcomes (Offer+Rejected) · Withdrawn`) so the overview has meaningful aggregates, or (b) render a small progress/funnel visualization that sums all 8. Current 4-card layout hides half the state |
+| 56 | 🟡 | Pipeline | **Kanban cards are not clickable — no navigation to company detail from the pipeline.** On `/pipeline`, company names (`20four7VA`, `Cribl`, `Consensys`, `MoonPay`, `Wolfi (Chainguard)`, `Coreflight (Corelight)`, `Sophos`, `Canonical`, `name`) render as plain `<p class="text-sm font-semibold">`. The card container is a `<div>` with no `role` / `onclick` / `<a>` child. `document.querySelectorAll('main a').length === 0`. Clicking a card is a no-op. Users working the pipeline naturally want to click through to the Company detail (`/companies/{id}`) to review roles or enrich the row — no affordance to do that | ⬜ open — `PipelinePage.tsx` card body: wrap the heading in a `<Link to={`/companies/${card.company_id}`}>`, or make the card itself a link (`<Link>` wraps the whole card, `role="article"`). Keep the two stage-move buttons (Move previous / Move next) as `stopPropagation` so clicking them doesn't also fire the card click |
+| 57 | 🔵 | Pipeline / UX | **Kanban has no drag-and-drop; stage changes require per-card button clicks.** Each card has two icon-only buttons (`Move to previous stage`, `Move to next stage`) with `title` attribute (same `title` vs `aria-label` issue as Finding #45). Moving a card from `New Lead` → `Engaged` takes 4 forward-clicks per card. There are 10 cards in pipeline today, which stays manageable; at 50+ cards the friction shows. Not a functional bug but a common kanban affordance users will expect | ⬜ open (optional) — `PipelinePage.tsx`: add HTML5 drag-drop (`draggable="true"`, `onDragStart` / `onDragOver` / `onDrop` handlers) or adopt a small lib like `@dnd-kit/core`. Keep the existing arrow buttons as the accessible fallback — keyboard users can't drag. Emit the same `PATCH /api/v1/pipeline/{id} {stage}` on drop |
 
 ---
 
@@ -1656,6 +1660,187 @@ Alternative: cap the field in the `FeedbackOut` list serializer so list response
 
 #### Cleanup
 Read-only. The 1 MB row predates this session.
+
+---
+
+## 17. Round 4C — Applications + Pipeline Deep Audit (2026-04-15, even later)
+
+Third pass focused on pages I'd only spot-checked earlier: Applications, Answer Book "Add Entry" flow, and the Pipeline kanban board's interaction model. Findings #54–#57.
+
+### 54. Applications empty-state is a dead-end with no CTA
+**Severity:** 🟡 MEDIUM · **Area:** Applications / Onboarding
+
+#### What I saw
+`/applications` with 0 rows:
+
+```
+Applications
+Track your job applications
+
+[ 0 ] Total    [ 0 ] Applied    [ 0 ] Interview    [ 0 ] Offer
+
+All | Prepared | Submitted | Applied | Interview | Offer | Rejected | Withdrawn
+
+┌──────┬──────────┬──────────┬─────────┬────────┬──────┬─────────┐
+│ Job  │ Company  │ Platform │ Resume  │ Status │ Date │ Actions │
+├──────┴──────────┴──────────┴─────────┴────────┴──────┴─────────┤
+│                    No applications found                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+No `+ Add Application` button. No explanatory text. No link to the Review Queue, Jobs, or any other place where applications might originate. Probed:
+
+```js
+document.querySelectorAll('main a').length  // → 0
+[...document.querySelectorAll('button')].map(b => b.innerText.trim()).filter(t=>t)
+// → ['Sign out', 'All', 'Prepared', 'Submitted', 'Applied', 'Interview', 'Offer', 'Rejected', 'Withdrawn']
+```
+
+#### Why it matters
+A new user landing here sees an empty table and doesn't know how applications are created. Is it automatic when you mark a job "Applied" in the Review Queue? Is it a manual form somewhere? The Docs page mentions applications but doesn't fully explain the creation path either. Discoverability failure.
+
+#### Suggested fix
+`ApplicationsPage.tsx` empty-state: replace the bare "No applications found" with an instructional block:
+
+```tsx
+{rows.length === 0 && (
+  <div className="text-center py-12">
+    <h3 className="text-lg font-semibold">No applications yet</h3>
+    <p className="text-gray-600 mt-2 mb-4">
+      Applications are created automatically when you mark a job as
+      "Applied" in the Review Queue, or when you submit one from a
+      job's detail page.
+    </p>
+    <div className="flex gap-3 justify-center">
+      <Link to="/review" className="btn btn-primary">Open Review Queue</Link>
+      <Link to="/jobs?role_cluster=relevant" className="btn btn-secondary">Browse Relevant Jobs</Link>
+    </div>
+  </div>
+)}
+```
+
+If there's also a manual-entry path (Add Application button) it should live up in the page header, not just in the empty-state.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 55. Applications stat cards show only 4 of the 8 statuses
+**Severity:** 🟡 MEDIUM · **Area:** Applications / Overview
+
+#### What I saw
+Filter tabs: `All · Prepared · Submitted · Applied · Interview · Offer · Rejected · Withdrawn` (8 statuses).
+
+Stat cards at the top: `Total · Applied · Interview · Offer` (only 4).
+
+The four missing buckets (`Prepared`, `Submitted`, `Rejected`, `Withdrawn`) aren't summed anywhere in the overview. A user whose pipeline is 80% rejected sees the same `Total N` and cannot tell the rejection rate without tab-hopping.
+
+#### Why it matters
+Page is called "Track your job applications" but the overview deliberately omits the negative outcomes (Rejected / Withdrawn) and the pre-submit states (Prepared / Submitted). Misleading at a glance.
+
+#### Suggested fix
+Two options:
+- **(A)** Collapse into meaningful aggregates. 5 cards:
+  - `Total`
+  - `In Progress` = Prepared + Submitted + Applied + Interview
+  - `Offers` = Offer
+  - `Rejected` = Rejected
+  - `Withdrawn` = Withdrawn
+- **(B)** Replace the 4-card grid with a small stacked-bar funnel that shows all 8 buckets proportionally. Clicking a segment filters the table below.
+
+(A) is faster to ship; (B) is more informative.
+
+#### Cleanup
+Read-only.
+
+---
+
+### 56. Pipeline kanban cards aren't clickable; company names are plain text
+**Severity:** 🟡 MEDIUM · **Area:** Pipeline / Navigation
+
+#### What I saw
+On `/pipeline`, each card is a `<div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">` with:
+- a `<p>` for the company name (not a heading, not a link)
+- `<p>` tags for metrics
+- two icon-only `<button>` elements (`title="Move to previous stage"`, `title="Move to next stage"`)
+
+Probed:
+```js
+document.querySelectorAll('main a').length  // → 0
+card.onclick                                  // → false
+card.querySelector('a')                       // → null
+```
+
+Clicking anywhere on the card is a no-op (`textDelta: 0` after click, no modal, no nav).
+
+#### Why it matters
+The Pipeline is the sales team's daily landing page for triaging outreach. Every card represents a company they want to click into — to see open roles, enrich the record, check notes, whatever. No path from the card to the Company detail is a critical UX gap.
+
+Adjacent to Finding #35 (Dashboard job-preview rows also not clickable). Same underlying cause: the author shipped cards that *look* interactive but aren't.
+
+#### Suggested fix
+`PipelinePage.tsx` card body:
+
+```tsx
+<div className="rounded-lg border border-gray-200 bg-white p-3 shadow-sm relative">
+  <Link
+    to={`/companies/${card.company_id}`}
+    className="block -m-3 p-3 rounded-lg hover:bg-gray-50"
+  >
+    <p className="text-sm font-semibold text-gray-900 leading-tight">
+      {card.company_name}
+    </p>
+    <p className="text-xs text-gray-500 mt-1">{card.open_roles} open roles</p>
+    {/* … */}
+  </Link>
+
+  <div className="absolute top-2 right-2 flex gap-1">
+    <button
+      onClick={(e) => { e.stopPropagation(); moveToPrevStage(card); }}
+      title="Move to previous stage"
+      aria-label={`Move ${card.company_name} to previous stage`}
+    >
+      <ChevronLeft className="h-3 w-3" />
+    </button>
+    {/* and next */}
+  </div>
+</div>
+```
+
+Key: the two move buttons sit absolutely-positioned above the Link and call `e.stopPropagation()` so clicking them doesn't also fire the card link.
+
+#### Cleanup
+Read-only.
+
+---
+
+### 57. Pipeline has no drag-and-drop; stage changes are per-card button clicks
+**Severity:** 🔵 LOW (optional) · **Area:** Pipeline / UX polish
+
+#### What I saw
+Each pipeline card has exactly two stage-movement buttons:
+- Left-pointing icon, `title="Move to previous stage"`
+- Right-pointing icon, `title="Move to next stage"`
+
+Verified `draggable === false` on the card. No `onDragStart` / `onDragOver` / `onDrop` handlers attached. The stage columns are `role`-less `<div>`s.
+
+#### Why it matters
+Kanban boards without drag-drop feel slow. Moving a card from `New Lead` → `Engaged` requires 4 forward-clicks per card. At today's 10 cards this is fine. At 50+ cards it compounds.
+
+Not a functional bug — the buttons work — but a commonly-expected affordance.
+
+Also: the two buttons share the `title` vs `aria-label` pattern from Finding #45. Each per-card button announces as just "button" to AT with no context about which stage the user is moving to.
+
+#### Suggested fix
+Two-part:
+- **(A)** Add HTML5 drag-and-drop or `@dnd-kit/core`. On `drop`, emit the same `PATCH /api/v1/pipeline/{id} { stage: <new> }` that the buttons already emit. Keyboard-only users keep the buttons as fallback.
+- **(B)** Fix the accessibility labels while you're there: `aria-label={`Move ${company_name} to ${prevStageName}`}` gives screen readers an actionable announcement.
+
+This is flagged as 🔵 LOW because the current UI works for the current data volume; upgrade when stage-count-per-card exceeds ~20 cards / stage.
+
+#### Cleanup
+Read-only.
 
 ---
 
