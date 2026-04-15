@@ -17,6 +17,7 @@ from app.models.company import Company, CompanyATSBoard
 from app.models.job import Job, JobDescription
 from app.models.scan import ScanLog
 from app.utils.company_name import looks_like_junk_company_name
+from app.utils.job_description import extract_description
 from app.utils.scan_lock import release_scan_lock
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,62 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # posting cycles. Keep this constant (not a setting) — ops changes the
 # behavior via manual `is_active` toggles, not by re-tuning the knob.
 _STALE_BOARD_ZERO_SCAN_THRESHOLD = 5
+
+
+def _upsert_job_description(session: Session, job_id: uuid.UUID, html_content: str, text_content: str) -> None:
+    """Upsert a `JobDescription` row for the given `job_id`.
+
+    Regression finding 97: the scan pipeline was persisting `Job` rows
+    without ever writing the description text anywhere the ATS scorer
+    could read it. Result: the keyword-extraction step received an empty
+    string for 50%+ of rows, fell through to the role-cluster baseline,
+    and every infra job produced the same 18 matched/6 missing keyword
+    lists — so the scoring column collapsed to 4 distinct values.
+
+    Called from `_upsert_job` after the parent `Job` has been added /
+    updated in the session. For new jobs the `Job` row hasn't flushed
+    yet, but the FK will bind at the outer commit because both writes
+    live in the same session/transaction.
+
+    No-op if neither ``html_content`` nor ``text_content`` is populated —
+    we never clobber an existing populated row with empty strings, which
+    would happen on platforms where the description lives only in the
+    posting detail endpoint (not the list endpoint our fetchers hit).
+    """
+    if not html_content and not text_content:
+        return
+
+    existing = session.execute(
+        select(JobDescription).where(JobDescription.job_id == job_id)
+    ).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    word_count = len((text_content or "").split())
+
+    if existing:
+        # Idempotent — skip the write if nothing meaningful changed. Keeps
+        # `fetched_at` stable across scan cycles that re-hit the same
+        # unchanged posting and avoids no-op WAL traffic.
+        if (
+            existing.text_content == text_content
+            and existing.html_content == html_content
+        ):
+            return
+        existing.html_content = html_content
+        existing.text_content = text_content
+        existing.word_count = word_count
+        existing.fetched_at = now
+    else:
+        session.add(
+            JobDescription(
+                id=uuid.uuid4(),
+                job_id=job_id,
+                html_content=html_content,
+                text_content=text_content,
+                word_count=word_count,
+                fetched_at=now,
+            )
+        )
 
 
 def _update_board_health(board: CompanyATSBoard, stats: dict) -> None:
@@ -220,7 +277,8 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
             platform=board.platform,
             posted_at=existing.posted_at,
         )
-        return "updated"
+        job_id_for_desc = existing.id
+        action = "updated"
     else:
         posted_at = raw_job.get("posted_at")
         if isinstance(posted_at, str):
@@ -264,7 +322,32 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
             posted_at=posted_at,
         )
         session.add(job)
-        return "new"
+        job_id_for_desc = job.id
+        action = "new"
+
+    # Regression finding 97: populate JobDescription from the upstream
+    # raw_json payload. Before this hook the scan pipeline threw the
+    # description text away (fetchers kept it only inside `Job.raw_json`)
+    # and the ATS scoring path — which reads `JobDescription.text_content`
+    # — saw empty strings for >50% of rows. Kept here (rather than inside
+    # each fetcher) so per-platform field knowledge lives in one place
+    # (`app.utils.job_description`) and the scan logic stays generic.
+    try:
+        html_content, text_content = extract_description(
+            board.platform, raw_job.get("raw_json") or {}
+        )
+        _upsert_job_description(session, job_id_for_desc, html_content, text_content)
+    except Exception as exc:
+        # Description write failure must never abort a whole `_upsert_job`
+        # — the relevance-scoring + role-classification work above is what
+        # the scan is actually contracted to do. Log and move on; the
+        # nightly rescore / next scan will try again.
+        logger.warning(
+            "JobDescription upsert failed for %s/%s external_id=%s: %s",
+            board.platform, board.slug, external_id, exc,
+        )
+
+    return action
 
 
 def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict | None = None) -> dict:

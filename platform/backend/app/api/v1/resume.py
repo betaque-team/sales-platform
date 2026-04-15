@@ -135,6 +135,24 @@ async def upload_resume(
     await db.commit()
     await db.refresh(resume)
 
+    # Regression finding 96: kick off scoring automatically on upload.
+    # Before this hook, `status=ready` was the ONLY signal we gave back
+    # and the user had to find and click the manual "Rescore" button on
+    # the Resume Score page before any `ResumeScore` rows existed. For
+    # the 11 days prior to this fix, that meant a brand-new upload
+    # showed `jobs_scored=0` until someone noticed. Fire-and-forget: the
+    # task has its own transaction + delete-and-replace semantics, so a
+    # failed dispatch (redis down, worker offline) still leaves the
+    # `Resume` row valid and the nightly beat schedule
+    # (`rescore_all_active_resumes`) will catch up.
+    try:
+        from app.workers.tasks.resume_score_task import score_resume_task
+        score_resume_task.delay(str(resume.id))
+    except Exception:
+        # Deliberately swallowed: upload succeeded, scoring is a
+        # best-effort kicker. The nightly beat catches stragglers.
+        pass
+
     return {
         "id": str(resume.id),
         "label": resume.label,

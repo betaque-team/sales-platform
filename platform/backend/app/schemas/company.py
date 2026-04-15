@@ -71,6 +71,13 @@ class CompanyOut(BaseModel):
     updated_at: datetime
     ats_boards: list[ATSBoardOut] = []
     job_count: int = 0
+    # Regression finding 98: `relevant_job_count` was referenced on the
+    # frontend (CompaniesPage renders `{company.relevant_job_count ?? "?"}`)
+    # but was never populated or declared in the schema — so the list
+    # endpoint returned undefined for every row and the UI showed "?"
+    # across the table. Populated in `companies.py::list_companies` via
+    # a correlated subquery over `Job.role_cluster IN relevant_clusters`.
+    relevant_job_count: int = 0
     accepted_count: int = 0
     contact_count: int = 0
 
