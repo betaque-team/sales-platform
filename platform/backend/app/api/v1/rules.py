@@ -7,11 +7,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.rule import RoleRule
+from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.rule import RoleRuleOut, RoleRuleCreate, RoleRuleUpdate
 
 router = APIRouter(prefix="/rules", tags=["rules"])
+
+
+async def _valid_cluster_names(db: AsyncSession) -> set[str]:
+    """Return the set of cluster names that are currently configured.
+
+    Regression finding 63: POST/PATCH used to hardcode `{"infra", "security"}`,
+    which pre-dates the admin-configurable role-cluster UI. The live DB now
+    has three active clusters (`infra`, `qa`, `security`) and 509 jobs
+    already classified as `role_cluster="qa"`, so the hardcoded list
+    rejected valid data. Source of truth is `role_cluster_configs` — the
+    same table `/api/v1/role-clusters` reads — so any cluster an admin
+    adds becomes a valid rule target without code changes.
+    """
+    result = await db.execute(
+        select(RoleClusterConfig.name).where(RoleClusterConfig.is_active == True)  # noqa: E712
+    )
+    return {row[0] for row in result}
 
 
 @router.get("")
@@ -55,8 +73,12 @@ async def create_rule(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    if body.cluster not in ("infra", "security"):
-        raise HTTPException(status_code=400, detail="Cluster must be 'infra' or 'security'")
+    valid = await _valid_cluster_names(db)
+    if body.cluster not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cluster must be one of: {', '.join(sorted(valid)) or '(none configured)'}",
+        )
 
     rule = RoleRule(**body.model_dump())
     db.add(rule)
@@ -79,8 +101,13 @@ async def update_rule(
 
     update_data = body.model_dump(exclude_unset=True)
 
-    if "cluster" in update_data and update_data["cluster"] not in ("infra", "security"):
-        raise HTTPException(status_code=400, detail="Cluster must be 'infra' or 'security'")
+    if "cluster" in update_data:
+        valid = await _valid_cluster_names(db)
+        if update_data["cluster"] not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cluster must be one of: {', '.join(sorted(valid)) or '(none configured)'}",
+            )
 
     for field, value in update_data.items():
         setattr(rule, field, value)

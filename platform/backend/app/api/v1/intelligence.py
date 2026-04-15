@@ -149,18 +149,58 @@ async def skill_gaps(
 
 # ── Salary Intelligence ──────────────────────────────────────────────────────
 
+# Currency symbols → ISO code. Unambiguous symbols only — `$` is omitted
+# because it's used by USD / CAD / AUD / NZD / HKD / SGD / MXN and we can't
+# disambiguate from the symbol alone.
+_CURRENCY_SYMBOLS = {
+    "£": "GBP", "€": "EUR", "¥": "JPY",
+    "₹": "INR", "₽": "RUB", "₩": "KRW",
+    "₺": "TRY", "₪": "ILS", "₴": "UAH",
+}
+
+# ISO currency codes we look for. Checked with a word-boundary regex on the
+# lowercased salary string BEFORE space-stripping, so "INR 50000" matches
+# but a hypothetical substring like "usdcad" inside a longer word wouldn't.
+# Order in the regex alternation doesn't matter — only the first match is
+# used and they're all 3-letter codes.
+_CURRENCY_CODES = (
+    "usd", "gbp", "eur", "cad", "aud", "nzd", "sgd", "hkd",
+    "jpy", "inr", "cny", "krw", "zar", "brl", "mxn", "clp",
+    "chf", "pln", "czk", "huf", "ron", "bgn", "hrk", "try",
+    "dkk", "sek", "nok", "isk", "ils", "aed", "sar",
+)
+_CURRENCY_CODE_RE = re.compile(r"\b(" + "|".join(_CURRENCY_CODES) + r")\b")
+
+
 def _parse_salary(salary_str: str) -> dict | None:
-    """Parse salary string into structured data."""
+    """Parse salary string into structured data.
+
+    Regression finding 66: previously only GBP and EUR were detected; every
+    other currency (DKK / SEK / NOK / CAD / AUD / SGD / JPY / INR / …)
+    defaulted to `"USD"`. One live example, `"DKK 780000 - 960000"`, was
+    reported as $870,000 USD (~8× over the real ~$112k). We now detect a
+    broader ISO-code allow-list and the common currency symbols. The
+    aggregator in `salary_insights()` then excludes non-USD entries from
+    the USD-labelled rollups (avg / median / top-paying) rather than
+    converting — FX rates drift, and we'd rather be conservative than
+    wrong. Per-currency rollups are still available on demand.
+    """
     if not salary_str:
         return None
-    s = salary_str.lower().replace(",", "").replace(" ", "")
+    raw_lower = salary_str.lower()
+    s = raw_lower.replace(",", "").replace(" ", "")
 
-    # Detect currency
+    # Detect currency — ISO codes first (unambiguous word-boundary match
+    # against the un-stripped lowercased input), then symbol chars.
     currency = "USD"
-    if "£" in s or "gbp" in s:
-        currency = "GBP"
-    elif "€" in s or "eur" in s:
-        currency = "EUR"
+    code_match = _CURRENCY_CODE_RE.search(raw_lower)
+    if code_match:
+        currency = code_match.group(1).upper()
+    else:
+        for symbol, code in _CURRENCY_SYMBOLS.items():
+            if symbol in salary_str:
+                currency = code
+                break
 
     # Extract numbers
     numbers = re.findall(r'(\d+(?:\.\d+)?)', s)
@@ -195,14 +235,27 @@ def _parse_salary(salary_str: str) -> dict | None:
 async def salary_insights(
     role_cluster: str = "",
     geography: str = "",
+    include_other: bool = False,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Parse and aggregate salary data across all jobs with salary info."""
+    """Parse and aggregate salary data across all jobs with salary info.
+
+    Regression finding 67: the default used to aggregate *every* job with
+    a salary range, not just those in the user's target clusters. 95% of
+    the resulting `overall` stats came from `role_cluster="other"` rows
+    (875/917 in the live sample), making the "salary insights for your
+    target roles" framing of the Intelligence page misleading. Default is
+    now `relevance_score > 0` (same filter the Skill Gap and Jobs pages
+    apply) — pass `include_other=true` to get the old full-DB view, e.g.
+    for admin diagnostics.
+    """
     query = select(Job.salary_range, Job.role_cluster, Job.geography_bucket, Job.title, Company.name).join(
         Company, Job.company_id == Company.id
     ).where(Job.salary_range != "", Job.salary_range.isnot(None))
 
+    if not include_other:
+        query = query.where(Job.relevance_score > 0)
     if role_cluster:
         query = query.where(Job.role_cluster == role_cluster)
     if geography:
@@ -214,12 +267,21 @@ async def salary_insights(
     parsed = []
     by_cluster: dict[str, list] = {}
     by_geography: dict[str, list] = {}
+    non_usd_samples: list[dict] = []
 
     for salary_str, cluster, geo, title, company_name in rows:
         p = _parse_salary(salary_str)
         if not p or p["mid"] < 20000 or p["mid"] > 1000000:  # filter outliers
             continue
         entry = {**p, "role_cluster": cluster, "geography": geo, "title": title, "company": company_name, "raw": salary_str}
+        # Regression finding 66: only USD entries feed the USD-labelled
+        # rollups (by_cluster / by_geography / buckets / top_paying /
+        # overall avg-median). Non-USD rows go into a separate sample so
+        # they're visible to the caller but can't silently inflate the
+        # USD averages (DKK 870k being reported as $870k).
+        if p["currency"] != "USD":
+            non_usd_samples.append(entry)
+            continue
         parsed.append(entry)
         by_cluster.setdefault(cluster or "other", []).append(p["mid"])
         by_geography.setdefault(geo or "unspecified", []).append(p["mid"])
@@ -257,6 +319,14 @@ async def salary_insights(
         else:
             buckets["250k+"] += 1
 
+    # Regression finding 66: summarise non-USD entries so the caller can
+    # tell they exist without letting them pollute the USD stats above.
+    # Grouped by currency and capped per-group so a long list of JPY rows
+    # can't blow up the response size.
+    non_usd_by_currency: dict[str, list[dict]] = {}
+    for e in non_usd_samples:
+        non_usd_by_currency.setdefault(e["currency"], []).append(e)
+
     return {
         "overall": _stats(all_mids),
         "by_cluster": {k: _stats(v) for k, v in by_cluster.items()},
@@ -264,6 +334,13 @@ async def salary_insights(
         "distribution": [{"range": k, "count": v} for k, v in buckets.items()],
         "top_paying": sorted(parsed, key=lambda x: x["mid"], reverse=True)[:15],
         "total_with_salary": len(parsed),
+        "total_non_usd_excluded": len(non_usd_samples),
+        "non_usd_samples_by_currency": {
+            # Keep a handful of examples per currency so the UI can label
+            # a "DKK / EUR / GBP salaries not included" disclosure.
+            cur: sorted(entries, key=lambda x: x["mid"], reverse=True)[:5]
+            for cur, entries in non_usd_by_currency.items()
+        },
         "total_jobs": (await db.execute(select(func.count(Job.id)))).scalar() or 0,
     }
 
@@ -285,24 +362,48 @@ async def timing_intelligence(
     # `posted_at` matches `first_seen_at` to the second, because those
     # are rows where the ATS didn't return a posted date and the scanner
     # backfilled with NOW() at ingest time.
-    dow_result = await db.execute(text("""
+    #
+    # Regression finding 65: the per-second heuristic above was not tight
+    # enough — seed-run rows often diverged by a few seconds between
+    # `posted_at` and `first_seen_at` (scanner writes them sequentially
+    # in the same upsert), and Sunday still dominated 4.3× the next day.
+    # Two additional guards here:
+    #   (a) widen the per-second match to per-minute (`> 60`), catching
+    #       sub-minute scanner back-fills that slipped through.
+    #   (b) exclude any job whose `first_seen_at` falls inside a bulk
+    #       scan-log window (`new_jobs > 1000` — a scan that ingested
+    #       that much at once is almost certainly a seed/discovery run,
+    #       not a routine incremental poll). The NOT EXISTS subquery is
+    #       on an indexed column (`first_seen_at`) so the planner can
+    #       range-scan; at ~13k jobs this is fast.
+    _SEED_RUN_EXCLUSION = """
+        AND NOT EXISTS (
+            SELECT 1 FROM scan_logs s
+            WHERE s.new_jobs > 1000
+              AND jobs.first_seen_at BETWEEN s.started_at AND COALESCE(s.completed_at, s.started_at + INTERVAL '1 hour')
+        )
+    """
+
+    dow_result = await db.execute(text(f"""
         SELECT EXTRACT(DOW FROM posted_at) AS dow, COUNT(*) AS cnt
         FROM jobs
         WHERE posted_at IS NOT NULL
           AND posted_at >= NOW() - INTERVAL '90 days'
-          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1
+          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
+          {_SEED_RUN_EXCLUSION}
         GROUP BY dow ORDER BY dow
     """))
     days_of_week = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     posting_by_day = [{"day": days_of_week[int(r[0])], "count": r[1]} for r in dow_result]
 
     # Jobs posted by hour — same rationale as above.
-    hour_result = await db.execute(text("""
+    hour_result = await db.execute(text(f"""
         SELECT EXTRACT(HOUR FROM posted_at) AS hr, COUNT(*) AS cnt
         FROM jobs
         WHERE posted_at IS NOT NULL
           AND posted_at >= NOW() - INTERVAL '90 days'
-          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1
+          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
+          {_SEED_RUN_EXCLUSION}
         GROUP BY hr ORDER BY hr
     """))
     posting_by_hour = [{"hour": int(r[0]), "count": r[1]} for r in hour_result]
@@ -380,6 +481,22 @@ async def timing_intelligence(
 
 _COMMA_OR_PIPE = re.compile(r"[,|\t;]")
 
+# Regression finding 64 (extends finding 60): stop-word name filter
+# cross-referenced from `services/enrichment/internal_provider`. Kept in
+# lockstep with that set — if one grows, the other should too. Exists
+# here as a belt-and-suspenders layer in case a future ingest bug lets
+# stop-word "names" bypass the enrichment-time filter. Lowercased for
+# comparison.
+_NAME_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "both", "by",
+    "complex", "each", "for", "from", "help", "here", "how", "if",
+    "in", "is", "it", "its", "join", "just", "learn", "let", "more",
+    "motivated", "now", "of", "on", "or", "our", "read", "should",
+    "team", "that", "the", "their", "them", "they", "this", "to",
+    "us", "very", "was", "we", "were", "what", "when", "where",
+    "who", "with", "you", "your",
+})
+
 
 def _looks_like_corrupted_contact(first_name: str, last_name: str, title: str) -> bool:
     """Return True if this row looks like glued-together scraped strings."""
@@ -408,11 +525,48 @@ def _looks_like_corrupted_contact(first_name: str, last_name: str, title: str) -
     if len(parts) >= 3:
         return True
 
-    # Name fields composed of two capitalized tokens run together without
-    # a space ("PeerInsights", "BillingsVP") — cheap heuristic: first_name
-    # has 2+ uppercase letters not at index 0.
-    internal_caps = sum(1 for i, c in enumerate(fn) if i > 0 and c.isupper())
-    if internal_caps >= 2:
+    # Regression finding 64: extend the internal-caps check to BOTH name
+    # parts. Prior version only inspected `fn`, so `{first:"Wade",
+    # last:"BillingsVP"}` sailed through — "Wade" has 0 internal caps,
+    # and "BillingsVP" was never examined. Additionally, the threshold
+    # was `>= 2`, which missed single-cap corruptions like
+    # `{first:"Gartner", last:"PeerInsights"}` (the exact example in
+    # this function's docstring: "PeerInsights" has only 1 internal cap
+    # at position 4).
+    #
+    # Observation about real names with internal caps: Mc/Mac/De/La/Le/Di/
+    # Van/O' prefixes all place the internal cap at position ≤ 3 (short
+    # prefix + capital). A single internal cap at position ≥ 4 within a
+    # single alpha run is almost always two dictionary words glued
+    # together from a bad scrape. Two internal caps anywhere in the same
+    # alpha run is also corruption (BillingsVP, WallStreet).
+    #
+    # Split on non-alpha separators first so that hyphenated names
+    # ("Jean-Luc") and apostrophe names ("O'Connor") are evaluated
+    # sub-token by sub-token — the separator resets the "word start"
+    # position, just like whitespace would.
+    def _has_suspicious_caps(part: str) -> bool:
+        sub_tokens = re.split(r"[^A-Za-z]+", part)
+        for tok in sub_tokens:
+            if not tok:
+                continue
+            cap_positions = [i for i, c in enumerate(tok) if i > 0 and c.isupper()]
+            if len(cap_positions) >= 2:
+                return True
+            if len(cap_positions) == 1 and cap_positions[0] >= 4:
+                return True
+        return False
+
+    for part in (fn, ln):
+        if _has_suspicious_caps(part):
+            return True
+
+    # Regression finding 64: English stop-word tokens ("help", "you", "us"
+    # etc.) should never appear as a "name" — if one did, it came from the
+    # enrichment regex bug fixed under finding 60 and is noise for outreach.
+    # Kept here as a read-time safety net in case any future ingest path
+    # skips the new `_looks_like_real_name()` filter upstream.
+    if fn.lower() in _NAME_STOPWORDS or (ln and ln.lower() in _NAME_STOPWORDS):
         return True
 
     return False
