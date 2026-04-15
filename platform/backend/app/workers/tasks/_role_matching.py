@@ -7,17 +7,34 @@ import re
 # ---------------------------------------------------------------------------
 
 INFRA_KEYWORDS = [
-    "devops", "cloud", "infrastructure", "sre", "site reliability",
+    "devops", "infrastructure", "sre", "site reliability",
     "platform engineer", "platform engineering",
     "kubernetes", "k8s", "docker", "terraform", "ansible", "puppet", "chef",
+    # Regression finding 93: bare "aws" / "azure" / "gcp" are recognised
+    # via `_WORD_BOUNDARY_KEYWORDS` below so titles like
+    # "AWS Specialist", "Backend Engineer (AWS)", "Azure Developer"
+    # classify into infra instead of staying unclassified. The suffix
+    # forms below remain for clarity of intent but the word-boundary
+    # entries are what actually catch the previously-missed 44/95 rows.
+    "aws", "azure", "gcp",
     "aws engineer", "azure engineer", "gcp engineer",
+    "google cloud", "alibaba cloud", "oracle cloud",
     "linux", "systems engineer", "systems administrator", "sysadmin",
     "network engineer", "network administrator", "network operations",
     "reliability engineer", "release engineer",
     "monitoring", "observability",
     "ci/cd", "cicd", "build engineer", "build and release",
     "finops", "mlops", "dataops", "gitops", "devsecops",
+    # Regression finding 92: bare "cloud" matched "Cloud Sales
+    # Manager", "Marketing Cloud Architect" etc — 68 FPs (2.8% of
+    # infra cluster). The bare noun is removed; these compound
+    # forms (plus the "cloud engineer" / "cloud native engineer"
+    # below) preserve the legitimate matches. The general
+    # sales/marketing guard in `_is_excluded_from_infra()` catches
+    # the residual "Cloud Sales Architect" class of titles even
+    # when a legit compound (e.g. "cloud architect") is present.
     "cloud architect", "cloud operations", "cloud infrastructure",
+    "cloud engineer", "cloud native engineer",
     "infrastructure architect", "infrastructure automation",
     "site reliability", "production engineer",
     "datacenter", "data center",
@@ -28,24 +45,39 @@ INFRA_KEYWORDS = [
 ]
 
 SECURITY_KEYWORDS = [
-    "security", "devsecops", "soc", "compliance", "grc", "pentest",
+    "security", "devsecops", "soc", "grc", "pentest",
     "penetration", "incident response", "red team", "offensive",
     "cyber", "infosec", "information security",
     "vulnerability", "threat", "appsec", "application security",
     "cloud security", "network security",
     "identity", "iam", "access management",
-    "data protection", "privacy engineer", "privacy officer",
+    "data protection", "privacy engineer",
     "forensic", "malware", "blue team",
     "security architect", "security operations",
-    "security compliance", "security analyst",
-    "risk analyst", "risk engineer", "risk management",
+    # Regression finding 91: bare "compliance" matched tax / HR /
+    # legal / clinical / pharmaceutical compliance roles — 67 FPs
+    # across 1,883 security rows (3.6%). Replaced with explicit
+    # security-compliance compound forms. The residual ambiguous
+    # titles (e.g. "Compliance Analyst" with no other signal) are
+    # suppressed by the `_is_excluded_from_security()` negative
+    # filter below when the title also carries tax/legal/hr words.
+    "security compliance", "compliance engineer", "compliance analyst",
+    "it compliance", "cloud compliance",
+    "security analyst",
+    # Regression finding 91: bare "risk" family matched financial /
+    # operational risk roles. Require a security/cyber/it qualifier.
+    "security risk", "cyber risk", "it risk",
     "zero trust", "endpoint security",
     "siem", "soar", "edr", "xdr",
     "threat intelligence", "threat detection", "threat hunting",
     "security automation", "secops",
     "cryptography", "encryption",
     "fraud", "anti-fraud",
-    "governance", "audit",
+    # Regression finding 91: bare "governance" matched product /
+    # data governance PM roles; bare "audit" matched financial
+    # auditors. Qualified compounds only.
+    "data governance", "security governance", "it governance",
+    "security audit", "it audit", "cloud audit", "soc audit",
 ]
 
 QA_KEYWORDS = [
@@ -230,9 +262,51 @@ def _normalize(text: str) -> str:
 # Keywords that are short enough to cause substring false positives
 # (e.g. "soc" in "associate", "iam" in "claim", "edr" in "Pedro")
 # These must match as whole words only.
+#
+# Regression finding 93: `aws`, `azure`, `gcp` were previously only in
+# the compound forms "aws engineer", "azure engineer", "gcp engineer",
+# which missed "AWS Specialist" / "AWS Connect Developer" / "Backend
+# Engineer (AWS)" / "Azure Developer". Added here so the bare tokens
+# match but only as whole words — prevents "laws"/"ocpdraws" FPs.
 _WORD_BOUNDARY_KEYWORDS = frozenset([
-    "soc", "iam", "grc", "edr", "xdr", "soar", "siem", "audit",
+    "soc", "iam", "grc", "edr", "xdr", "soar", "siem",
     "qa", "sdet",
+    "aws", "azure", "gcp",
+])
+
+
+# Regression finding 91: tokens that disqualify a title from the
+# `security` cluster even if a security keyword matches. These are
+# the overlapping finance/legal/HR/clinical roles that historically
+# hit "compliance", "risk", "governance", "privacy", "audit". Order
+# is O(N) per match so keep this set small and focused.
+_SECURITY_NEGATIVE_TITLE_SIGNALS = frozenset([
+    # Finance / accounting
+    "tax", "trade compliance", "financial compliance",
+    # Legal / regulatory counsel
+    "counsel", "attorney", "lawyer", "paralegal",
+    "regulatory affairs", "regulatory counsel",
+    # Life sciences
+    "clinical", "pharmaceutical", "pharmacovigilance", "pharmacy",
+    # HR / people ops
+    "hr compliance", "people compliance", "labor compliance",
+    "human resources", "talent acquisition",
+])
+
+# Regression finding 92: tokens that disqualify a title from the
+# `infra` cluster. Mostly revenue/marketing org roles whose titles
+# happen to contain "cloud" / "systems" / "network". Also: hardware
+# and mechanical engineering where the word "systems" overmatches.
+_INFRA_NEGATIVE_TITLE_SIGNALS = frozenset([
+    # Revenue / marketing
+    "sales", "account executive", "account manager",
+    "marketing", "customer success", "business development",
+    "partner development", "go-to-market", "go to market",
+    "demand generation", "revenue operations",
+    "pre-sales", "pre sales", "presales", "solutions consultant",
+    # Hardware / mechanical — bare "systems engineer" FP class
+    "hardware", "mechanical", "electrical", "quality systems",
+    "semiconductor", "aerospace", "asic", "embedded hardware",
 ])
 
 
@@ -241,6 +315,31 @@ def _keyword_in_text(keyword: str, text: str) -> bool:
     if keyword in _WORD_BOUNDARY_KEYWORDS:
         return bool(re.search(r'\b' + re.escape(keyword) + r'\b', text))
     return keyword in text
+
+
+def _title_has_signal(text: str, signals: frozenset[str]) -> bool:
+    """Return True if any negative-signal token is present in `text`.
+
+    Uses the same substring-or-word-boundary semantics as
+    `_keyword_in_text`: short 2-3 char tokens would be unsafe here,
+    so the signal sets only contain ≥4-char tokens and we can use
+    plain `in` for the check.
+    """
+    return any(sig in text for sig in signals)
+
+
+def _is_excluded_from_security(norm_title: str) -> bool:
+    """Regression finding 91: disqualify known non-security titles
+    that happen to match a security keyword (mostly compliance-like).
+    """
+    return _title_has_signal(norm_title, _SECURITY_NEGATIVE_TITLE_SIGNALS)
+
+
+def _is_excluded_from_infra(norm_title: str) -> bool:
+    """Regression finding 92: disqualify cloud-sales / hardware
+    titles that hit an infra keyword.
+    """
+    return _title_has_signal(norm_title, _INFRA_NEGATIVE_TITLE_SIGNALS)
 
 
 def load_cluster_config_sync(session) -> dict:
@@ -287,8 +386,25 @@ def match_role_from_config(title: str, cluster_config: dict) -> dict:
             result["level"] = level
             break
 
+    # Regression findings 91 + 92: apply the same cluster-specific
+    # negative-signal guards here. The config system uses the cluster
+    # name verbatim, so `infra` and `security` get their tailored
+    # negative lists; any admin-added cluster (e.g. "data_science")
+    # passes through unguarded because we have no FP profile for it.
+    excluded_from_security = _is_excluded_from_security(norm)
+    excluded_from_infra = _is_excluded_from_infra(norm)
+
+    def _skip_cluster(cluster_name: str) -> bool:
+        if cluster_name == "infra":
+            return excluded_from_infra
+        if cluster_name == "security":
+            return excluded_from_security
+        return False
+
     # Try exact-ish matching against approved roles from each cluster
     for cluster_name, cfg in cluster_config.items():
+        if _skip_cluster(cluster_name):
+            continue
         for role in cfg["approved_roles"]:
             if _normalize(role) in norm:
                 result["matched_role"] = role
@@ -301,6 +417,8 @@ def match_role_from_config(title: str, cluster_config: dict) -> dict:
 
     # Fallback: keyword-based cluster detection
     for cluster_name, cfg in cluster_config.items():
+        if _skip_cluster(cluster_name):
+            continue
         for kw in cfg["keywords"]:
             if _keyword_in_text(kw, norm):
                 result["role_cluster"] = cluster_name
@@ -340,9 +458,23 @@ def match_role(title: str) -> dict:
             result["level"] = level
             break
 
+    # Regression findings 91 + 92: check negative-signal guards once
+    # per title. The approved-role loop below short-circuits on the
+    # first match, so we apply the same guards there too — e.g. a
+    # "Tax Compliance Analyst" title matches the approved role
+    # "Compliance Analyst" and would otherwise land in security.
+    excluded_from_security = _is_excluded_from_security(norm)
+    excluded_from_infra = _is_excluded_from_infra(norm)
+
     # Try exact-ish matching against approved role bases
     for role in INFRA_ROLES:
         if _normalize(role) in norm:
+            if excluded_from_infra:
+                # A cloud-sales title shouldn't match "Cloud Architect" even
+                # if the substring is present. Continue to subsequent
+                # clusters (unlikely to match) and finally fall through
+                # to unclassified.
+                break
             result["matched_role"] = role
             result["role_cluster"] = "infra"
             if result["level"]:
@@ -353,6 +485,8 @@ def match_role(title: str) -> dict:
 
     for role in SECURITY_ROLES:
         if _normalize(role) in norm:
+            if excluded_from_security:
+                break
             result["matched_role"] = role
             result["role_cluster"] = "security"
             if result["level"]:
@@ -372,17 +506,19 @@ def match_role(title: str) -> dict:
             return result
 
     # Fallback: keyword-based cluster detection
-    for kw in INFRA_KEYWORDS:
-        if _keyword_in_text(kw, norm):
-            result["role_cluster"] = "infra"
-            result["matched_role"] = title.strip()
-            return result
+    if not excluded_from_infra:
+        for kw in INFRA_KEYWORDS:
+            if _keyword_in_text(kw, norm):
+                result["role_cluster"] = "infra"
+                result["matched_role"] = title.strip()
+                return result
 
-    for kw in SECURITY_KEYWORDS:
-        if _keyword_in_text(kw, norm):
-            result["role_cluster"] = "security"
-            result["matched_role"] = title.strip()
-            return result
+    if not excluded_from_security:
+        for kw in SECURITY_KEYWORDS:
+            if _keyword_in_text(kw, norm):
+                result["role_cluster"] = "security"
+                result["matched_role"] = title.strip()
+                return result
 
     for kw in QA_KEYWORDS:
         if _keyword_in_text(kw, norm):
