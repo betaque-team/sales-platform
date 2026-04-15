@@ -120,6 +120,11 @@ one place.
 | 60 | 🟠 | Data Quality / Export | **`/api/v1/export/contacts` emits 445 (11.8%) garbage contact rows where `first_name` is an English stop-word.** Parsed the full 3,756-row CSV with a proper quoted-CSV parser. 445 rows have `first_name` in {"help","for","the","apply","learn","us","to","in","with","on","what","our","your","at"…}, of which 148 have BOTH `first_name` AND `last_name` as stop-words (e.g. `{company:"Abbott", first:"help", last:"you", title:"Recruiter / Hiring Contact"}`, `{company:"Airbnb", first:"us", last:"at", …}`, `{company:"AbbVie", first:"for", last:"the", …}`). All 445 have `source="job_description"`, all have `email=""`, `phone=""`, `linkedin_url=""` — **zero actionable contact info**. Every single one has `title="Recruiter / Hiring Contact"` (1,348 rows total, 36% of the whole export). The root cause is the `job_description` contact-extractor: a regex like `/contact ([A-Za-z]+) ([A-Za-z]+)/` is matching on phrases like *"contact us at…"*, *"help you apply"*, *"for the role"*, *"learn more about our team"* — two adjacent tokens after a trigger word are treated as `first_name last_name` with no English-word validation, no length check, and no case-sensitivity filter (proper names are capitalized; stop-words aren't). Result: sales team sees a contacts table bloated with noise and wastes review cycles triaging phantom "Recruiter" rows. Also: `phone` and `telegram_id` columns are exported but **never populated** (0 / 3756 rows). | ⬜ open — two fixes in `workers/tasks/` (wherever `contact extraction from job_description` lives, likely `enrichment_task.py` or similar): (a) reject any name token that is in a stop-word set (`STOPWORDS = {"help","here","for","the","a","an","in","at","on","of","to","with","and","or","is","are","was","were","be","been","by","from","as","if","it","its","their","them","they","you","us","we","our","your","what","who","where","when","how","this","that","very","just","should","now","each","both","complex","motivated","assigned"}`), (b) require the first character of `first_name` and `last_name` to be uppercase ASCII letter (real names are capitalized), (c) require length ≥ 2 and ≤ 20 chars. Backfill: one-shot `app/cleanup_stopword_contacts.py` that `DELETE FROM company_contacts WHERE source='job_description' AND (lower(first_name) IN (…stopwords…) OR first_name = '' OR length(first_name) < 2)`. Also remove `phone` + `telegram_id` columns from `CONTACT_CSV_COLUMNS` in `api/v1/export.py` until the enrichment pipeline actually populates them, or document them as "future use" in the export docs |
 | 61 | 🟠 | Auth / Data Exfiltration | **All three bulk-export endpoints gate on "logged in" only — any viewer can download the entire contacts/jobs/pipeline database.** Read `platform/backend/app/api/v1/export.py` directly: `/export/jobs`, `/export/pipeline`, and `/export/contacts` all have `user: User = Depends(get_current_user)` — no `require_role(…)`. Viewer (the lowest privilege tier) gets the same CSV as admin: 3,756-row / 640 KB contacts dump including `is_decision_maker`, `email`, `email_status`, and all outreach metadata. Fetched as admin on prod: `GET /api/v1/export/contacts` → 200, Content-Length ≈ 640,000 bytes, no pagination, no rate-limit. The `/companies` page shows a prominent "Export Contacts" button (`<a href={exportContactsUrl()}>`) to every logged-in role — `CompaniesPage.tsx` line 88 has no role-guard around the button. Consequence: **a single compromised viewer account (e.g. a contractor given read-only access for onboarding) can exfiltrate the entire prospect list in one HTTP GET.** No audit log entry is written for exports (no visible signal anywhere in `/monitoring`). Also: query has no `LIMIT`, no streaming-chunk size guard, no tenant filter — everything relies on single-tenant assumption | ⬜ open — three patches: (a) `api/v1/export.py`: replace `Depends(get_current_user)` with `Depends(require_role("admin"))` (or at minimum `require_role("reviewer")` if sales-team reviewers are a legitimate export audience — product decision). (b) Log every export in an `audit_log` table (who, when, which endpoint, how many rows returned, filters applied). (c) `CompaniesPage.tsx`: conditionally render the "Export Contacts" button only when `user.role === "admin"` (matches the backend role gate). Optional: add a per-user export rate limit (e.g. ≤ 3 full-table exports per hour) to slow down programmatic dumps |
 | 62 | 🔵 | Data / Export | **Export CSV has two columns that are always empty; confusing for consumers.** Fully parsed the live `/api/v1/export/contacts` CSV: `phone` has 0 / 3,756 values populated; `telegram_id` has 0 / 3,756 values populated. Column headers are present in the CSV and in `CONTACT_CSV_COLUMNS` in `api/v1/export.py`. Sales team pulling this into their CRM / spreadsheet sees two "dead" columns and has no signal about whether the data is *missing* (bug) or *never collected* (product scope). Related: `last_outreach_at` and `outreach_note` are also empty in the current sample but that's expected (no outreach activity yet) — those become meaningful once sales starts working the list. `phone`/`telegram_id` won't fill themselves | ⬜ open — two valid paths: (a) **wire up the enrichment pipeline** to populate `phone` and `telegram_id` for `role_email` and `website_scrape` sources (probably a Hunter.io / Apollo / Clearbit call), at which point the columns become useful, or (b) **remove the columns from the export** until they are populated — edit `CONTACT_CSV_COLUMNS` in `api/v1/export.py` to drop `phone` and `telegram_id`, and stop appending those values in the row builder. Least-work: option (b) now, option (a) when enrichment is added |
+| 63 | 🟡 | Admin / API Drift | **The `/api/v1/rules` admin API is orphaned AND its cluster whitelist is out of sync with `role_clusters_configs`.** Backend registers `rules.router` and exposes `GET/POST/PATCH/DELETE /api/v1/rules`, but there is no `RulesPage.tsx`, no `listRules/createRule` in `lib/api.ts`, no nav entry, and only ONE stale row exists in the DB (seeded `cluster="infra", base_role="infra"`). More critically, `POST /api/v1/rules` and `PATCH /api/v1/rules/{id}` hardcode `if body.cluster not in ("infra", "security"): raise HTTPException(400, "Cluster must be 'infra' or 'security'")` — but `/api/v1/role-clusters` currently returns 3 clusters (`infra`, `qa`, `security`) with `relevant_clusters=["infra","qa","security"]` and 509 jobs are already classified as `role_cluster="qa"`. Tried `POST /api/v1/rules {cluster:"qa", base_role:"qa", keywords:["qa engineer"]}` live → 400 "Cluster must be 'infra' or 'security'". So the Rules API *lies* about its supported domain, and any future admin trying to use it hits a dead end as soon as a custom cluster is added | ⬜ open — two paths: (a) **wire up a frontend** for `/rules` AND swap the hardcoded whitelist for a dynamic lookup against `role_cluster_configs.name` (so any active cluster is a valid rule target), OR (b) **delete the orphan** — remove `rules.router` from `router.py`, drop `models/rule.py` + `schemas/rule.py` + `api/v1/rules.py`, migrate the orphan seed row out. If the intent is "Role Clusters" absorbs this functionality, formalise that in CLAUDE.md and delete the ghost API |
+| 64 | 🟠 | Intelligence / Data Quality | **`_looks_like_corrupted_contact()` filter on `/api/v1/intelligence/networking` only inspects `first_name` for run-together capitals — misses the exact `{first:"Gartner", last:"PeerInsights"}` case its own docstring calls out.** Live call: `GET /api/v1/intelligence/networking` returns top suggestion `{name:"Gartner PeerInsights", title:"Wade BillingsVP, Technology Services, Instructure", is_decision_maker:true, email_status:"catch_all"}`. The filter reads: `internal_caps = sum(1 for i, c in enumerate(fn) if i > 0 and c.isupper()); if internal_caps >= 2: return True` — critically, `fn` is `first_name`, not `last_name`. "Gartner" has 0 internal caps so it passes; "PeerInsights" would fail the check but is never examined. Similarly `{first:"Wade", last:"BillingsVP"}` from the title pattern: `fn="Wade"` → 0 internal caps → passes. The title-length and 3-comma-segment checks later in the function would have caught *some* of these but apparently are either bypassed by prod deploy lag (the filter was added for regression #27 and may not be live yet — same deploy-staleness tracked as #32) or the current deployed filter lacks these checks entirely | ⬜ open — `api/v1/intelligence.py` `_looks_like_corrupted_contact()`: extend the `internal_caps` check to both `fn` AND `ln` (e.g. `for name in (fn, ln): if sum(...) >= 2: return True`). Also add the stop-word filter from Finding #60 here so rows like `{first:"help", last:"you"}` are caught (in case a future bug lets those bypass email_status filter on the general branch). Deploy and verify on prod that "Gartner PeerInsights" disappears from the first page of networking suggestions |
+| 65 | 🟡 | Intelligence / Data | **`/api/v1/intelligence/timing` still recommends "Sunday" as the best day to apply despite the per-second workaround from Finding #26.** Live counts:  Sunday 23,696 · Monday 6,496 · Tuesday 5,456 · Wednesday 4,803 · Thursday 3,020 · Friday 2,384 · Saturday 1,921. Sunday is 4.3× the next-highest day. Even with the query's filter `AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1` (intended to exclude seed-run rows where `posted_at==first_seen_at`), Sunday dominates — so either (a) the bulk seed wrote slightly-different values in both columns, defeating the equality check, or (b) some ATS batches genuinely post en-masse on Sunday (Greenhouse/Lever weekly batch jobs?). Result: the user-facing *"best_day"* recommendation is `"Sunday"`, which is empirically wrong for most user-driven posting workflows (HR teams post Tue/Wed/Thu mornings in North America). The "ideal apply window" text `"Apply within 24-48 hours of posting for best results"` is also static copy with no data backing | ⬜ open — tighten the filter: instead of comparing `posted_at vs first_seen_at` absolute seconds, exclude rows whose `first_seen_at` falls inside a *seed-run window* (look at the `scan_log` table for runs with `jobs_ingested > 1000` and exclude any job whose `first_seen_at` is within those run windows). Alternatively, look at `posted_at.time()` — if 80%+ of same-day jobs share the exact same second/minute, they're programmatically assigned, not truly posted. For the static recommendation copy, tie it to the top-3 `posting_by_hour` entries (`"Apply Mon–Wed 9-11am for X% higher callback rate"`) once enough accepted/rejected data exists |
+| 66 | 🟡 | Intelligence / Salary | **Salary parser in `_parse_salary()` recognises only £/GBP and €/EUR; everything else defaults to `"USD"` — so DKK / SEK / NOK / CAD / AUD / SGD / JPY salaries are mislabelled and skew the "top paying" list.** Live `/api/v1/intelligence/salary` top entry: `{company:"Pandektes", raw:"DKK 780000 - 960000", currency:"USD", mid:870000, title:"Senior Backend Engineer"}`. 780,000 DKK ≈ $112,000 USD — but the Intelligence dashboard displays it as $870,000 USD (~8× over-reported). Same for `{raw:"USD 750000 - 980000", company:"Haldren Group"}` where the raw value is almost certainly an upstream ATS bug (no "Commercial Manager, New Accounts" earns $870K), and `{raw:"DKK …"}` style rows. Source: `_parse_salary()` lines 158-163 — currency detection has only two branches (`"£"/"gbp"`, `"€"/"eur"`), `currency="USD"` default. The numbers are still treated as dollars in the mid/avg/median rollups, so the `overall.avg=$135,740` is inflated, and the `by_cluster.other.max=$870,000` is a Danish krone number misread as dollars | ⬜ open — extend the currency detection in `api/v1/intelligence.py` `_parse_salary()`:  `if "dkk" in s: currency="DKK"` and likewise for `sek, nok, cad, aud, nzd, sgd, hkd, jpy, inr, zar`. Either (a) convert everything to USD at display time using a static FX table committed to the repo (updated monthly), or (b) keep the native currency but **exclude non-USD rows from the "top paying" ranking** (show them in a separate panel grouped by currency). The current state of reporting a DKK salary as USD is actively misleading to the user |
+| 67 | 🔵 | Intelligence / Salary | **Salary insights are dominated by `role_cluster="other"` because the query has no relevance filter.** `/api/v1/intelligence/salary` response: `by_cluster: { other: 875 salaries, infra: 22, security: 10, qa: 10 }` — 95% of the displayed data is from jobs outside the user's target clusters. The Intelligence page is presented as "salary insights for your target roles", but the backend query is `select(Job.salary_range, ...) .where(Job.salary_range != "")` with NO `Job.relevance_score > 0` filter, NO role-cluster filter. Optional `role_cluster` and `geography` query params let the caller narrow, but the default response — which is what the UI fetches — aggregates all jobs. Consequence: the "overall" stats (`avg=$135,740`, `median=$110,000`) are dominated by unrelated roles | ⬜ open — two choices: (a) change the default in `salary_insights()` to filter `.where(Job.relevance_score > 0)` so the base `overall` stats reflect relevant roles, and add an explicit `?include_other=true` param for admins who want the full-DB view, OR (b) keep the default unchanged but have the frontend `IntelligencePage.tsx` always pass `?role_cluster=infra|security|qa` when showing salary stats. Option (a) is cleaner and matches Intelligence page framing |
 
 ---
 
@@ -2239,6 +2244,351 @@ CONTACT_CSV_COLUMNS = [
 **(b) Wire up enrichment:** add a Hunter.io / Apollo / Clearbit call in `workers/tasks/enrichment_task.py` that populates `phone` and `telegram_id` when available (telegram is unusual for B2B sales — consider dropping it entirely and substituting a different signal like Twitter/X handle or company-wide Slack Connect invite URL).
 
 Least-work path: (a) now, then (b) when enrichment scope is decided.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+## 19. Round 4G — Rules API + Intelligence endpoints
+
+Round 4G: two untouched backend surfaces — `/api/v1/rules` (orphan admin API) and the `/api/v1/intelligence/*` family (skill-gaps, salary, timing, networking). Five findings #63–#67.
+
+### 63. Rules API is orphaned; cluster whitelist hardcoded to two names while the product supports N
+**Severity:** 🟡 MEDIUM · **Area:** Admin / API Drift
+
+#### What I saw
+Frontend search:
+```
+grep -R 'listRules|createRule|RolesPage|RulesPage|/api/v1/rules' platform/frontend/src
+# → nothing
+```
+No page, no API-client function, no sidebar entry.
+
+Backend registration in `platform/backend/app/api/v1/router.py`:
+```python
+from app.api.v1 import (… rules, …)
+api_router.include_router(rules.router)     # ← still wired
+```
+
+Live probe as admin (`test-admin@reventlabs.com`):
+```
+GET  /api/v1/rules                          → 200 {total:1, items:[{cluster:"infra", base_role:"infra", keywords:[12 items], is_active:true}]}
+GET  /api/v1/rules?cluster=qa               → 200 {total:0, items:[]}
+GET  /api/v1/role-clusters                  → {items:[infra, qa, security], relevant_clusters:[infra,qa,security]}
+GET  /api/v1/jobs?role_cluster=qa           → {total:509}
+POST /api/v1/rules {cluster:"qa", base_role:"qa", keywords:["qa engineer"], is_active:true}
+  → 400 {"detail":"Cluster must be 'infra' or 'security'"}
+```
+
+Hardcoded whitelist in `api/v1/rules.py`:
+```python
+# lines 58-59 (POST) and 82-83 (PATCH)
+if body.cluster not in ("infra", "security"):
+    raise HTTPException(status_code=400, detail="Cluster must be 'infra' or 'security'")
+```
+
+#### Why it matters
+- The "QA / Testing / SDET" cluster (registered in the `role_cluster_configs` table, `sort_order=2`, `is_relevant=true`) is already driving 509 classified jobs. But the Rules API refuses to let any admin *configure* a rule for it — silently blocks at `POST /rules`.
+- The single existing row (`cluster=infra, base_role=infra, 12 keywords`) suggests this was an early pre-`role_cluster_configs` design that was partly replaced by the Role Clusters admin page but never fully retired.
+- Orphan APIs are attack surface: they stay reachable, they get audited as features that work, and future devs waste time building around them.
+
+#### Suggested fix
+Two valid paths; pick one:
+
+**(a) Retire the orphan:**
+```python
+# platform/backend/app/api/v1/router.py
+- from app.api.v1 import (… rules, …)
+- api_router.include_router(rules.router)
++ from app.api.v1 import (…)
+# delete api/v1/rules.py, models/rule.py, schemas/rule.py, and the alembic migration if any
+```
+Then document in CLAUDE.md: "Role-matching keywords live in `role_cluster_configs.keywords` only. The old `/api/v1/rules` API has been removed." Also drop the `role_rules` table in a migration and migrate the orphan row's keywords into the `infra` row of `role_cluster_configs.keywords` (they overlap mostly with what's already there).
+
+**(b) Revive it:** replace the hardcoded whitelist with a dynamic lookup:
+```python
+async def _valid_clusters(db: AsyncSession) -> set[str]:
+    result = await db.execute(select(RoleClusterConfig.name).where(RoleClusterConfig.is_active == True))
+    return {r[0] for r in result}
+
+async def create_rule(body: RoleRuleCreate, db: AsyncSession, user: User = Depends(require_role("admin"))):
+    valid = await _valid_clusters(db)
+    if body.cluster not in valid:
+        raise HTTPException(400, f"Cluster must be one of: {sorted(valid)}")
+    …
+```
+And add a `RulesPage.tsx` to make the API reachable.
+
+Option (a) is cleaner given that `role_cluster_configs` already handles keywords + approved roles.
+
+#### Cleanup
+Read-only probe except for one `POST /api/v1/rules {cluster:"qa",…}` attempt that was rejected with 400. No row created, no state changed.
+
+---
+
+### 64. Intelligence `/networking` filter only inspects `first_name` — misses `{first:"Gartner", last:"PeerInsights"}`
+**Severity:** 🟠 HIGH · **Area:** Intelligence / Data Quality
+
+#### What I saw
+Live response from `GET /api/v1/intelligence/networking`:
+
+```js
+suggestions[0] = {
+  name: "Gartner PeerInsights",
+  title: "Wade BillingsVP, Technology Services, Instructure",
+  company: "BugCrowd",
+  is_decision_maker: true,     // ← elevated priority
+  email_status: "catch_all",
+  ...
+}
+suggestions[1] = {name:"Ross McKerchar", title:"CISO, Sophos", company:"BugCrowd", is_decision_maker:true, ...}
+```
+
+"Ross McKerchar · CISO, Sophos" at BugCrowd is also suspicious — Ross McKerchar is Sophos's real CISO, not a BugCrowd contact. The title fragment `"CISO, Sophos"` is a strong hint that the scraper pulled a Sophos exec from a page that BugCrowd was citing and mis-attributed it.
+
+Source code `api/v1/intelligence.py` lines 381-418:
+```python
+def _looks_like_corrupted_contact(first_name, last_name, title):
+    fn = (first_name or "").strip()
+    ln = (last_name or "").strip()
+    tt = (title or "").strip()
+
+    if not fn: return True                              # ← rejects empty fn only
+    if _COMMA_OR_PIPE.search(fn) or _COMMA_OR_PIPE.search(ln): return True
+    if len(tt) > 120: return True
+    parts = [p.strip() for p in tt.split(",") if p.strip()]
+    if len(parts) >= 3: return True                     # ← "Wade BillingsVP, Technology Services, Instructure" → 3 → should reject
+
+    internal_caps = sum(1 for i, c in enumerate(fn) if i > 0 and c.isupper())
+    if internal_caps >= 2: return True                  # ← ONLY fn is checked
+
+    return False
+```
+
+Two problems:
+
+1. **The `internal_caps` check ignores `last_name`.** For the row `{first:"Gartner", last:"PeerInsights"}`, `fn="Gartner"` has 0 internal caps. `ln="PeerInsights"` has 2 (`P`, `I`) — but the code never examines `ln`. Passes.
+
+2. **If the `len(parts) >= 3` check were in the deployed build, `"Wade BillingsVP, Technology Services, Instructure"` would be rejected.** The row appearing in the response means either (a) prod is on pre-fix code (Finding #32 tracks deploy lag), or (b) the function was subtly changed during review — I couldn't determine which without shelling into prod. Either way, the user sees the corrupted row today.
+
+#### Why it matters
+- The first three "recommended contacts" for the user to reach out to include a fabricated name (`"Gartner PeerInsights"` is two page elements glued together) and a cross-company mis-attribution (`Ross McKerchar · CISO, Sophos` at BugCrowd).
+- Sales sends an email / LinkedIn ping to these "contacts" → bounce / confused reply / reputation damage.
+- `is_decision_maker: true` elevates these fake rows to the top of the list specifically because they look like exec titles.
+- Regression #27's stated goal was to hide exactly these rows from outreach; the filter as-written is incomplete.
+
+#### Suggested fix
+```python
+# api/v1/intelligence.py  _looks_like_corrupted_contact()
+# 1. Run internal_caps check on BOTH first_name AND last_name:
+for name in (fn, ln):
+    if sum(1 for i, c in enumerate(name) if i > 0 and c.isupper()) >= 2:
+        return True
+
+# 2. Add the stop-word filter from Finding #60:
+STOPWORDS = {"help","for","the","a","an","in","at","on","of","to","with","and","or",
+             "is","are","be","been","by","from","as","if","it","us","we","you","our",
+             "your","what","who","where","when","how","this","that","more","most",
+             "other","no","not","only","can","will","just","now","both","back",
+             "apply","learn","send","read","view","click","here"}
+if fn.lower() in STOPWORDS or ln.lower() in STOPWORDS:
+    return True
+
+# 3. Extend to title: if title ends with a company name fragment that is NOT
+#    this contact's company, likely mis-attributed:
+if tt and "," in tt:
+    last_seg = tt.rsplit(",", 1)[-1].strip()
+    # this needs the company context passed in — small refactor
+    if last_seg and last_seg.lower() != (company_name or "").lower() and len(last_seg.split()) <= 3:
+        return True   # "CISO, Sophos" when company_name="BugCrowd" → reject
+```
+
+Deploy and re-fetch `/api/v1/intelligence/networking`; first page should no longer contain `Gartner PeerInsights` or `Ross McKerchar … BugCrowd`.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 65. Intelligence `/timing` still recommends Sunday as "best_day" despite the per-second workaround
+**Severity:** 🟡 MEDIUM · **Area:** Intelligence / Data
+
+#### What I saw
+```
+GET /api/v1/intelligence/timing
+posting_by_day:
+  Sunday    23696
+  Monday     6496
+  Tuesday    5456
+  Wednesday  4803
+  Thursday   3020
+  Friday     2384
+  Saturday   1921
+recommendations.best_day: "Sunday"
+```
+
+Sunday is 4.3× the next-highest day. The query already applies the workaround from regression #26:
+```sql
+AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1
+```
+This filter is meant to drop the seed-import rows where `posted_at` was backfilled to equal `first_seen_at`. It's not enough — either the seed import set `posted_at` slightly different from `first_seen_at` (a few seconds of drift during bulk insert), or genuine Sunday ATS batch jobs actually dominate.
+
+#### Why it matters
+- The Intelligence page's `recommendations.best_day` is a direct action the user takes (schedule their outreach for Sunday). Wrong recommendation → real user harm.
+- "Ideal apply window" copy is static ("Apply within 24-48 hours of posting for best results") — not derived from data, but presented as if it is.
+
+#### Suggested fix
+Two-pronged:
+
+**1. Exclude seed-run windows via `scan_log`:**
+```python
+# api/v1/intelligence.py timing_intelligence()
+# Find recent large scan runs (seed-import style):
+big_runs = await db.execute(text("""
+    SELECT started_at, completed_at FROM scan_log
+    WHERE completed_at IS NOT NULL
+      AND jobs_ingested > 1000
+      AND started_at >= NOW() - INTERVAL '90 days'
+"""))
+exclusion_windows = [(r[0], r[1]) for r in big_runs]
+# ...then when counting posting_by_day, exclude jobs whose first_seen_at falls in any window.
+```
+
+**2. Guard the recommendation copy:** don't show `best_day` unless the top day is at least 1.3× the second-best (otherwise say "No clear pattern yet"). For the "ideal apply window" blurb, either tie it to actual interview-rate data or remove the copy — users treat confident-sounding product copy as data-backed.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 66. Salary parser defaults all non-GBP/EUR currencies to USD → DKK salaries appear at the top of "Top Paying"
+**Severity:** 🟡 MEDIUM · **Area:** Intelligence / Salary
+
+#### What I saw
+```
+GET /api/v1/intelligence/salary
+top_paying[0] = {
+  company: "Pandektes",
+  raw:     "DKK 780000 - 960000",
+  currency: "USD",                // ← wrong
+  mid:     870000,                // ← read as $870k
+  title:   "Senior Backend Engineer",
+  role_cluster: ""
+}
+top_paying[1..2] = both Haldren Group with raw "USD 750000 - 980000" → likely scrape artefact
+```
+
+780,000 DKK ≈ $112,000 USD · 960,000 DKK ≈ $138,000 USD. The Intelligence dashboard surfaces this as "$870,000 USD" and places it at the top of the "top paying" list — an 8× over-report.
+
+Source (`api/v1/intelligence.py` lines 158-163):
+```python
+currency = "USD"
+if "£" in s or "gbp" in s:
+    currency = "GBP"
+elif "€" in s or "eur" in s:
+    currency = "EUR"
+# everything else (DKK, SEK, NOK, CAD, AUD, NZD, SGD, HKD, JPY, INR, ZAR) → USD
+```
+No conversion to USD; whatever number appears in the string is treated as dollars in the aggregations.
+
+#### Why it matters
+- A Senior Backend Engineer at a Danish company shown as earning $870K → distorts the perceived market rate.
+- The `overall.avg=$135,740` is inflated by the same bug across many rows (a handful of 6-figure DKK/SEK rows skew the mean).
+- Users make salary-negotiation decisions based on this page.
+
+#### Suggested fix
+Step 1 — detect the currency:
+```python
+CURRENCY_TOKENS = {
+    "GBP": ("£", "gbp", "pound"),
+    "EUR": ("€", "eur"),
+    "DKK": ("dkk", "krone"),
+    "SEK": ("sek", "kr"),
+    "NOK": ("nok",),
+    "CAD": ("cad", "c$"),
+    "AUD": ("aud", "a$"),
+    "NZD": ("nzd",),
+    "SGD": ("sgd", "s$"),
+    "HKD": ("hkd", "hk$"),
+    "JPY": ("jpy", "¥", "yen"),
+    "INR": ("inr", "₹", "rupee"),
+    "ZAR": ("zar", "r"),
+}
+currency = "USD"
+for code, tokens in CURRENCY_TOKENS.items():
+    if any(tok in s for tok in tokens):
+        currency = code
+        break
+```
+
+Step 2 — convert, or bucket separately:
+```python
+# Option A: convert to USD at parse time using a committed FX table
+FX_TO_USD = {"USD":1.0, "GBP":1.27, "EUR":1.08, "DKK":0.145, "SEK":0.095, …}
+mid_usd = int(mid * FX_TO_USD.get(currency, 1.0))
+
+# Option B: keep native currency; exclude non-USD from the default "top paying" ranking
+if currency != "USD" and not include_all_currencies:
+    continue
+```
+
+For the `"USD 750000 - 980000"` Haldren rows — those are a scrape artefact. An upstream data-validation step should reject any salary > $600K/year for non-C-suite titles (or flag for manual review).
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 67. Salary insights default to all-jobs aggregation (95% `role_cluster="other"`) instead of relevant-jobs
+**Severity:** 🔵 LOW · **Area:** Intelligence / Salary
+
+#### What I saw
+```
+GET /api/v1/intelligence/salary
+by_cluster:
+  other:    875   // ← 95 %
+  infra:     22
+  security:  10
+  qa:        10
+overall.count: 917
+```
+Over 95% of the data behind the "overall" stats is from jobs outside the user's target role clusters.
+
+Source query (`api/v1/intelligence.py` line 202-205):
+```python
+query = select(Job.salary_range, Job.role_cluster, Job.geography_bucket, Job.title, Company.name).join(
+    Company, Job.company_id == Company.id
+).where(Job.salary_range != "", Job.salary_range.isnot(None))
+# no relevance_score filter; no role_cluster filter unless caller passes one
+```
+
+The frontend (`IntelligencePage.tsx`) calls this endpoint without any filter, so the returned numbers are "all jobs with a salary listed", not "jobs the user would actually apply to".
+
+#### Why it matters
+The Intelligence page is framed as "salary insights for your target roles". The stats displayed conflict with that framing — they're actually global DB averages dominated by unrelated roles (sales, marketing, finance, HR — none of which are in the infra/security/qa clusters).
+
+#### Suggested fix
+Pick one:
+
+**(a) Backend default:**
+```python
+# In salary_insights(), change the base query:
+query = select(...).where(
+    Job.salary_range != "",
+    Job.relevance_score > 0,   # ← add
+)
+```
+Add an opt-out param `?include_other=true` for admin/debug views.
+
+**(b) Frontend always filters:**
+```ts
+// IntelligencePage.tsx
+const { data } = useQuery(['salary', cluster], () =>
+  fetch(`/api/v1/intelligence/salary?role_cluster=${cluster || 'infra'}`).then(r => r.json())
+);
+```
+But this pushes scope to every caller; backend default is cleaner.
 
 #### Cleanup
 Read-only probe.
