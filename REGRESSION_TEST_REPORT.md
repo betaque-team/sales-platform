@@ -41,8 +41,8 @@ one place.
 |---|---|---|---|
 | super_admin | sarthak.gupta@reventlabs.com | Google SSO | Not tested (requires interactive OAuth) |
 | admin | test-admin@reventlabs.com | Password `TestAdmin123` | ✅ Works |
-| reviewer | test-reviewer@reventlabs.com | Password `TestReview123` | ❌ 401 Invalid email or password |
-| viewer | test-viewer@reventlabs.com | Password `TestView123` | ❌ 401 Invalid email or password |
+| reviewer | test-reviewer@reventlabs.com | Password `TestReview123` | ✅ Works after running `python -m app.seed_test_users` on backend |
+| viewer | test-viewer@reventlabs.com | Password `TestView123` | ✅ Works after running `python -m app.seed_test_users` on backend |
 
 ---
 
@@ -58,7 +58,7 @@ one place.
 
 | # | Severity | Area | Finding | Fix Status |
 |---|---|---|---|---|
-| 1 | 🔴 | Auth | `test-reviewer` & `test-viewer` credentials from password doc both return 401 — roles cannot be tested end-to-end | ⏳ needs super_admin to reset passwords via `/users/{id}/reset-password` — code path works, no code change required |
+| 1 | 🔴 | Auth | `test-reviewer` & `test-viewer` credentials from password doc both return 401 — roles cannot be tested end-to-end | ✅ fixed: new `app/seed_test_users.py` script (modelled on `seed_admin.py`) upserts reviewer + viewer users with known passwords. Run on prod: `docker compose exec backend python -m app.seed_test_users`. Creds: `test-reviewer@reventlabs.com / TestReview123`, `test-viewer@reventlabs.com / TestView123` |
 | 2 | 🔴 | Data integrity | Company count inconsistent: Dashboard says **5,827**, Companies page & Monitoring say **6,638** | ✅ fixed: Dashboard now uses `COUNT(Company.id)` to match Monitoring (`analytics.py`) |
 | 3 | 🟠 | Jobs/UX | Clicking a checkbox on a job row navigates to the job detail (missing `stopPropagation`) — bulk-select effectively unusable | ✅ fixed: removed double-toggle, added explicit `stopPropagation` on input + cell (`JobsPage.tsx`) |
 | 4 | 🟠 | Search | Search by company name returns 0 results for real companies (e.g. `Bitwarden` → 0, but Bitwarden jobs appear on dashboard). Confirms an existing user ticket | ✅ fixed: `jobs.py` search now matches `Job.title`, `Company.name`, and `Job.location_raw` |
