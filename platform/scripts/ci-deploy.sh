@@ -17,6 +17,14 @@
 #   rollback <TAG> [GHCR_USER] -- swap RELEASE_TAG to a prior tag, restart.
 #                                 Same optional GHCR_USER + stdin-token.
 #   status                     -- print compose ps + last-deploy.json
+#   install-script <NAME>      -- read a script body from stdin and install it
+#                                 atomically at /opt/sales-platform/scripts/
+#                                 <NAME>.sh (mode 0755). Used by the vm-ops
+#                                 workflow to self-sync vm-ops.sh on each run.
+#                                 NAME is whitelisted (vm-ops only).
+#   ops <ACTION>               -- exec /opt/sales-platform/scripts/vm-ops.sh
+#                                 with <ACTION>. vm-ops.sh enforces its own
+#                                 action whitelist.
 #
 # Design rules:
 #   - Tag must match ^[a-zA-Z0-9_.-]+$ (defeats shell injection)
@@ -294,6 +302,74 @@ action_rollback() {
 }
 
 # -----------------------------------------------------------------------------
+# install-script <NAME> — read a script body from stdin, install atomically at
+# /opt/sales-platform/scripts/<NAME>.sh (mode 0755, owner $USER).
+#
+# Hard whitelist of allowed names, so a compromised deploy key can't drop
+# arbitrary binaries in the scripts dir. The workflow pipes vm-ops.sh on
+# stdin and then issues `ops <action>`; this keeps the VM script in lockstep
+# with main without needing a separate secret / rsync / git checkout.
+# -----------------------------------------------------------------------------
+_INSTALL_SCRIPT_ALLOWLIST=("vm-ops")
+
+action_install_script() {
+  local name="$1"
+  [[ -n "$name" ]] || die "install-script: missing <NAME>"
+  [[ "$name" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "install-script: invalid name '$name'"
+
+  local allowed=0
+  local a
+  for a in "${_INSTALL_SCRIPT_ALLOWLIST[@]}"; do
+    [[ "$a" == "$name" ]] && allowed=1 && break
+  done
+  (( allowed )) || die "install-script: '$name' not in allowlist (${_INSTALL_SCRIPT_ALLOWLIST[*]})"
+
+  local target="$APP_DIR/scripts/$name.sh"
+  mkdir -p "$APP_DIR/scripts"
+
+  # Read the entire stdin into a tempfile in the same dir, then atomically
+  # rename. No arbitrary-length cap here beyond what ssh/stdin will deliver,
+  # but if it's huge something is wrong -- 256 KB is plenty for a bash script.
+  local tmp
+  tmp="$(mktemp "$APP_DIR/scripts/.${name}.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" RETURN
+
+  if ! head -c 262144 > "$tmp"; then
+    die "install-script: failed to read stdin"
+  fi
+  [[ -s "$tmp" ]] || die "install-script: empty stdin"
+
+  # Sanity: must start with a shebang so we never install a binary / junk
+  local first_line
+  IFS= read -r first_line < "$tmp" || true
+  [[ "$first_line" =~ ^#!/ ]] || die "install-script: body must begin with a shebang"
+
+  chmod 0755 "$tmp"
+  mv "$tmp" "$target"
+  trap - RETURN
+
+  local bytes
+  bytes="$(wc -c < "$target" | tr -d ' ')"
+  log "install-script: wrote $target (${bytes} bytes)"
+  echo "OK $target"
+}
+
+# -----------------------------------------------------------------------------
+# ops <ACTION> — hand off to vm-ops.sh for sysadmin-y one-shots (audit,
+# install-monitoring, docker-log-cap, etc). vm-ops.sh enforces its own
+# whitelist of actions; we just make sure it's present and executable.
+# -----------------------------------------------------------------------------
+action_ops() {
+  local op_action="$1"
+  [[ -n "$op_action" ]] || die "ops: missing <ACTION>"
+  local script="$APP_DIR/scripts/vm-ops.sh"
+  [[ -x "$script" ]] || die "ops: $script not installed — run 'install-script vm-ops' first"
+  log "ops: dispatching action='$op_action'"
+  exec "$script" "$op_action"
+}
+
+# -----------------------------------------------------------------------------
 # status
 # -----------------------------------------------------------------------------
 action_status() {
@@ -321,11 +397,14 @@ ARG1="${ARGS[1]:-}"
 ARG2="${ARGS[2]:-}"
 
 case "$ACTION" in
-  deploy)   action_deploy "$ARG1" "$ARG2" ;;
-  rollback) action_rollback "$ARG1" "$ARG2" ;;
-  status)   action_status ;;
+  deploy)         action_deploy "$ARG1" "$ARG2" ;;
+  rollback)       action_rollback "$ARG1" "$ARG2" ;;
+  status)         action_status ;;
+  install-script) action_install_script "$ARG1" ;;
+  ops)            action_ops "$ARG1" ;;
   *)
     echo "Usage: deploy <TAG> [GHCR_USER] | rollback <TAG> [GHCR_USER] | status" >&2
+    echo "       install-script <NAME>  | ops <ACTION>" >&2
     echo "Got: '$CMD'" >&2
     exit 1
     ;;

@@ -168,3 +168,13 @@ jobs:
           echo "| SHA | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Ref | \`${{ github.ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| URL | https://salesplatform.reventlabs.com |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wipe runner secrets
+        # Runner is ephemeral but scrub explicitly so a later-added step
+        # can't read leftover SSH keys / docker creds. Runs on success and
+        # failure alike.
+        if: always()
+        run: |
+          shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+          rm -f ~/.ssh/known_hosts
+          rm -rf ~/.docker

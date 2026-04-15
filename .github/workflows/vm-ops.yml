@@ -1,0 +1,169 @@
+# =============================================================================
+# VM Ops — approval-gated dispatcher for one-shot ops actions on the prod VM.
+#
+# Why this exists:
+#   - Running ad-hoc scripts "on the VM" used to mean sharing SSH access,
+#     which leaks blast radius every time someone new needs to check status
+#     or restart a service. This workflow keeps the deploy key on GitHub and
+#     exposes a curated set of actions instead.
+#
+# Guardrails (layered, belt + suspenders):
+#   - Manual dispatch only (no `push:` trigger).
+#   - Restricted to `main` via `if: github.ref == 'refs/heads/main'` on every job.
+#   - Uses `environment: production-ops`, which MUST be configured in
+#     repo settings with:
+#       * Required reviewers  → the person(s) who can approve
+#       * Deployment branches → "Selected branches" → `main` only
+#     See docs/VM_OPS.md for the one-time setup.
+#   - Forced-command SSH on the VM restricts the deploy key to a fixed set of
+#     actions (ci-deploy.sh dispatch).
+#   - vm-ops.sh enforces its own action allowlist (see its header).
+#
+# Self-sync:
+#   Each run pipes the current vm-ops.sh on stdin via ci-deploy.sh's
+#   `install-script vm-ops` (which atomically writes it to
+#   /opt/sales-platform/scripts/vm-ops.sh). Then we issue `ops <ACTION>`.
+#   Net effect: the version of vm-ops.sh that runs is always the one on main.
+#
+# Cleanup:
+#   Runners are ephemeral, but we still explicitly wipe ~/.ssh and ~/.docker
+#   in an `if: always()` step so a failed job can't leave artifacts that a
+#   later step in the same runner image reads.
+# =============================================================================
+name: VM Ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to run on the VM"
+        required: true
+        type: choice
+        options:
+          - health
+          - audit
+          - restart-backend
+          - restart-all
+          - docker-prune
+          - tail-deploy-log
+          - show-crontab
+        default: health
+      reason:
+        description: "Why are you running this? (audit trail — shown in summary)"
+        required: true
+        type: string
+
+concurrency:
+  # One ops action at a time — serialize with deploys/rollbacks too so we
+  # don't e.g. restart the backend mid-deploy.
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  vm-ops:
+    name: Run ${{ inputs.action }} on VM
+    runs-on: ubuntu-latest
+    # Hard gate: even if someone forgets the environment's branch policy,
+    # this blocks anything not on main.
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production-ops
+      url: https://salesplatform.reventlabs.com
+
+    steps:
+      - name: Checkout (for vm-ops.sh source)
+        uses: actions/checkout@v4
+
+      - name: Validate action (belt + suspenders over the dropdown)
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          case "$ACTION" in
+            health|audit|restart-backend|restart-all|docker-prune|tail-deploy-log|show-crontab) ;;
+            *) echo "::error::Unknown action: $ACTION"; exit 1 ;;
+          esac
+          echo "Action=$ACTION  Actor=${{ github.actor }}  SHA=${{ github.sha }}"
+          echo "Reason: ${{ inputs.reason }}"
+
+      - name: Set up SSH key
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOSTKEY: ${{ secrets.DEPLOY_HOSTKEY }}
+        run: |
+          mkdir -p ~/.ssh
+          umask 077
+          printf '%s' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "${HOSTKEY:-}" ]; then
+            printf '%s\n' "$HOSTKEY" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -t ed25519 -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+      - name: Sync vm-ops.sh to VM
+        # Pipes the committed script body over SSH stdin. ci-deploy.sh writes
+        # it atomically to /opt/sales-platform/scripts/vm-ops.sh.
+        run: |
+          if [ ! -f platform/scripts/vm-ops.sh ]; then
+            echo "::error::platform/scripts/vm-ops.sh not found in checkout"
+            exit 1
+          fi
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "install-script vm-ops" \
+              < platform/scripts/vm-ops.sh
+
+      - name: Run action
+        id: run
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          set -o pipefail
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "ops $ACTION" \
+              2>&1 | tee vm-ops.out
+
+      - name: Summary
+        if: always()
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          {
+            echo "### VM Ops — ${{ job.status }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Action | \`$ACTION\` |"
+            echo "| Actor | @${{ github.actor }} |"
+            echo "| Reason | ${{ inputs.reason }} |"
+            echo "| SHA | \`${{ github.sha }}\` |"
+            echo ""
+            echo "<details><summary>Output</summary>"
+            echo ""
+            echo '```'
+            # Cap output so a huge audit doesn't blow up the summary panel
+            head -c 60000 vm-ops.out 2>/dev/null || echo "(no output captured)"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wipe runner secrets
+        # Public runner is ephemeral (GH destroys the VM after the job), but
+        # we still explicitly scrub ~/.ssh and ~/.docker so any later step
+        # added to this job can't read leftover creds. Runs on success AND
+        # failure AND cancel.
+        if: always()
+        run: |
+          shred -u ~/.ssh/deploy_key 2>/dev/null || rm -f ~/.ssh/deploy_key
+          rm -f ~/.ssh/known_hosts
+          rm -rf ~/.docker
+          # Make sure nothing we wrote on disk survives
+          rm -f vm-ops.out
