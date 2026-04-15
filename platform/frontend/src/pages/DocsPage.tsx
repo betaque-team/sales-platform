@@ -214,7 +214,7 @@ export function DocsPage() {
               Then manually fill in anything the import missed: work authorization, salary expectations, availability, etc.
             </p>
             <p>
-              Categories to fill: <strong>Personal Info</strong>, <strong>Work Authorization</strong>,
+              Categories to fill: <strong>Personal Info</strong>, <strong>Work Authorization</strong>,{" "}
               <strong>Experience</strong>, <strong>Skills</strong>, <strong>Preferences</strong>.
             </p>
           </StepCard>
