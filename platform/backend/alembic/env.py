@@ -22,6 +22,7 @@ from app.models.scoring_signal import ScoringSignal  # noqa: F401
 from app.models.job_question import JobQuestion  # noqa: F401
 from app.models.company_contact import CompanyContact, JobContactRelevance  # noqa: F401
 from app.models.company_office import CompanyOffice  # noqa: F401
+from app.models.audit_log import AuditLog  # noqa: F401
 from app.database import Base
 
 config = context.config

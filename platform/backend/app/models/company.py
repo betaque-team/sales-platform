@@ -58,4 +58,24 @@ class CompanyATSBoard(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Regression finding 7 (stale-slug auto-deactivation half): these two
+    # columns drive the "after N consecutive clean-zero scans, flip
+    # is_active=False" behavior in `workers/tasks/scan_task.py`. The
+    # finding reported BambooHR/Jobvite/Recruitee boards that return 0
+    # jobs but stay marked active, inflating the "active boards" count
+    # on the Monitoring dashboard and wasting per-scan HTTP budget.
+    #
+    # Semantics:
+    #   - `consecutive_zero_scans` is reset to 0 on any scan that
+    #     returns >=1 job. It is left unchanged on a scan that raised
+    #     (fetcher error / Cloudflare 403 / transient network) so a
+    #     blip doesn't reset a genuinely-dead board's progress toward
+    #     deactivation. It is incremented only on clean empty returns.
+    #   - `deactivated_reason` is set when `is_active` flips to False
+    #     via this path (vs. manual admin toggle) so ops can
+    #     distinguish auto-deactivated stale slugs from manually-
+    #     paused ones. Empty string means "never auto-deactivated".
+    consecutive_zero_scans: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deactivated_reason: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+
     company: Mapped["Company"] = relationship(back_populates="ats_boards")

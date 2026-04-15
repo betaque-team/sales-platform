@@ -64,7 +64,7 @@ one place.
 | 4 | 🟠 | Search | Search by company name returns 0 results for real companies (e.g. `Bitwarden` → 0, but Bitwarden jobs appear on dashboard). Confirms an existing user ticket | ✅ fixed: `jobs.py` search now matches `Job.title`, `Company.name`, and `Job.location_raw` |
 | 5 | 🟠 | Admin UX | `/users` page returns empty state for non-super_admin. API returns 403 but UI shows "0 admins, 0 reviewers, 0 viewers" with no permission notice | ✅ fixed: `UserManagementPage.tsx` renders a proper permission-denied card on 403 |
 | 6 | 🟡 | Analytics | Job Trends chart axis labels render `NaN/NaN` (multiple times) | ✅ fixed: `dataKey` was `date`/`new_jobs` but backend returns `day`/`total`; added aliases + guarded `tickFormatter` |
-| 7 | 🟡 | Platforms | `himalayas` fetcher reports **180 errors** on last scan; 4 platforms (`bamboohr`, `jobvite`, `recruitee`, `wellfound`) report 0 jobs but are marked active | 🟡 partial: (a) `BaseFetcher` now sends a Chrome User-Agent so light bot-detection lets us through; (b) `bamboohr.py` + `jobvite.py` now detect the redirect to their marketing site and return `[]` cleanly (was spamming "non-JSON" warnings — boards in the DB are stale slugs); (c) `wellfound.py` logs 403 as "Cloudflare block" instead of a generic HTTP error; (d) `scan_task.py` aggregator-company upsert now uses a SAVEPOINT so a dup-slug race no longer rolls back 200+ jobs of in-flight upserts — this is the real cause of himalayas's 180 errors. Still open: Wellfound is genuinely Cloudflare-blocked (needs browser/auth), and the BambooHR/Jobvite/Recruitee boards in the DB should be auto-deactivated after N consecutive 0-job scans (ops follow-up) |
+| 7 | 🟡 | Platforms | `himalayas` fetcher reports **180 errors** on last scan; 4 platforms (`bamboohr`, `jobvite`, `recruitee`, `wellfound`) report 0 jobs but are marked active | 🟡 partial → mostly resolved: (a) `BaseFetcher` now sends a Chrome User-Agent so light bot-detection lets us through; (b) `bamboohr.py` + `jobvite.py` now detect the redirect to their marketing site and return `[]` cleanly (was spamming "non-JSON" warnings — boards in the DB are stale slugs); (c) `wellfound.py` logs 403 as "Cloudflare block" instead of a generic HTTP error; (d) `scan_task.py` aggregator-company upsert now uses a SAVEPOINT so a dup-slug race no longer rolls back 200+ jobs of in-flight upserts — this is the real cause of himalayas's 180 errors. **Auto-deactivation shipped:** new `CompanyATSBoard.consecutive_zero_scans` + `deactivated_reason` columns (migration `n4i5j6k7l8m9`) drive `scan_task._update_board_health`: clean 0-job scans advance the counter, any jobs returned reset it, fetcher errors leave it alone. At threshold (5 consecutive clean-zero scans) `is_active` flips to False and the reason is stamped so ops can tell auto-deactivated stale slugs apart from manually-paused ones. BambooHR/Jobvite/Recruitee stale boards will deactivate themselves within 5 scan cycles after deploy. Still open: Wellfound genuinely Cloudflare-blocks — those boards keep `errors>0` each scan and are protected from auto-deactivation (correct behavior; the slug may still be valid) |
 | 8 | 🟡 | Sidebar | `Settings` link lives inside `adminNavigation` (Sidebar.tsx:47-51) — reviewers/viewers can't reach their own Settings via the nav | ✅ fixed: moved `Settings` into the shared `navigation` list in `Sidebar.tsx` |
 | 9 | 🔵 | Dashboard | "1864 jobs" badge on Security section wraps onto 2 lines at 1728px viewport | ✅ fixed: `Badge` now uses `whitespace-nowrap` + `shrink-0` so it never wraps |
 | 10 | 🔵 | Pipeline | A card titled literally "1name" appears in `Researching` stage — looks like seeded/test data leaking to prod | ✅ fixed — see Finding #39. Covered by the same `app/cleanup_junk_companies.py` script + two-step manual follow-up (delete `PotentialClient` rows pointing at `name`/`1name` companies, then rerun cleanup). The original one-liner `DELETE FROM potential_clients WHERE company_name ILIKE '1name'` wouldn't have worked because `potential_clients` has no `company_name` column (it FKs to `companies.id`) |
@@ -89,7 +89,7 @@ one place.
 | 29 | 🔵 | Feedback UI | Stats cards at top of `/feedback` show "Total 33 · Open 16 · In Progress 0 · Resolved 12" (sum = 28). The 5 `closed` tickets exist (`GET /feedback/stats` → `by_status.closed: 5`) but there's no card for them. Users see "Total 33" then 28 in cards and can't reconcile | ✅ fixed: `FeedbackPage.tsx` stats grid now renders **5** cards (Total, Open, In Progress, Resolved, **Closed**) instead of 4, so `Total` always equals the visible bucket sum. Grid switched to `grid-cols-2 md:grid-cols-5` so it stays readable on small screens |
 | 30 | 🔵 | Feedback UI | In the ticket detail modal, "Update Ticket" is rendered without visible button styling — appears as plain black text next to the status dropdown. Users can't tell it's clickable. Also, no success toast after save (modal auto-closes silently). Functionality works (PATCH 200, persists, stats update), only discoverability is poor | ✅ fixed: root cause was that `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger` were referenced in 7 places across `FeedbackPage.tsx` but **never defined** — buttons fell back to browser-default rendering (unstyled black text). Added the missing utility classes to `index.css` via `@apply` (primary/secondary/danger variants, focus rings, hover states, disabled styling). Every `btn btn-*` usage on the feedback page is now styled consistently with the rest of the app theme (dark-gray `primary-600`) |
 | 31 | 🟡 | Feedback | Legacy duplicate tickets from before Finding #11 fix are still present: 8 identical "Resume Score / Relevance" tickets from khushi.jain@ still show as open. Dedup prevents new dupes but doesn't merge/close old ones — queue cleanup task | ✅ fixed: new `app/close_legacy_duplicate_feedback.py` script (modelled on `seed_test_users.py`) retroactively applies the same dedup rule the API now uses on new submissions. For every `(user_id, category, lowercased title)` group of open/in-progress tickets it keeps the OLDEST open and closes the rest with a system note linking back to the canonical id. Idempotent and supports `--dry-run`. Run on prod: `docker compose exec backend python -m app.close_legacy_duplicate_feedback --dry-run`, then rerun without the flag |
-| 32 | 🔴 | Deploy / Release | **Round 3 fixes marked ✅ in this report are NOT live on prod.** Retest on 2026-04-15 confirms the deployed backend is several commits behind `fix/regression-findings` tip. Probes: (#16) `GET /feedback/not-a-uuid` → **500** not 422; (#21) anonymous `GET /feedback/attachments/<valid_filename>` → **200 + file bytes** (confirmed by uploading a fresh PNG as admin then curl'ing without cookies); (#25) `POST /feedback` with 20,000-char description → **200 accepted**; (#26) `/intelligence/timing` still shows Sunday=23,696 / Monday=6,496 (49.6%, unchanged); (#27) first `/intelligence/networking` suggestion is still the corrupted "Gartner PeerInsights / Wade BillingsVP, Technology Services, Instructure / BugCrowd" entry the filter was supposed to drop; (#28) Dashboard AI Insight still says "Platform has 47,776 jobs indexed across **10** ATS sources"; (#19) response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Cross-Origin-*`, `Permissions-Policy`. Root cause: CI/CD pipeline commit `5ce5d0b` auto-deploys only on push to `main`; `fix/regression-findings` has 9 fix commits sitting since ~Apr 15 17:13 that were never manually deployed. The report's green checkmarks describe the code state on the branch, not prod behaviour | ⬜ open — either (a) manually deploy the branch to prod again now, or (b) extend the CI workflow to deploy `fix/regression-findings` (feature-branch deploys) or to build a preview image per-PR. Tester can't re-verify fixes while the prod image is stale |
+| 32 | 🔴 | Deploy / Release | **Round 3 fixes marked ✅ in this report are NOT live on prod.** Retest on 2026-04-15 confirms the deployed backend is several commits behind `fix/regression-findings` tip. Probes: (#16) `GET /feedback/not-a-uuid` → **500** not 422; (#21) anonymous `GET /feedback/attachments/<valid_filename>` → **200 + file bytes** (confirmed by uploading a fresh PNG as admin then curl'ing without cookies); (#25) `POST /feedback` with 20,000-char description → **200 accepted**; (#26) `/intelligence/timing` still shows Sunday=23,696 / Monday=6,496 (49.6%, unchanged); (#27) first `/intelligence/networking` suggestion is still the corrupted "Gartner PeerInsights / Wade BillingsVP, Technology Services, Instructure / BugCrowd" entry the filter was supposed to drop; (#28) Dashboard AI Insight still says "Platform has 47,776 jobs indexed across **10** ATS sources"; (#19) response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Cross-Origin-*`, `Permissions-Policy`. Root cause: CI/CD pipeline commit `5ce5d0b` auto-deploys only on push to `main`; `fix/regression-findings` has 9 fix commits sitting since ~Apr 15 17:13 that were never manually deployed. The report's green checkmarks describe the code state on the branch, not prod behaviour | ✅ resolved by deploy — `fix/regression-findings` merged to `main` at commit `6e348a6` (Round 5 batch, deployed 2026-04-15 18:05:37 UTC via workflow run `24470205290`). Every Round 3/4 fix commit is an ancestor of `6e348a6` and therefore live on prod: security headers (`0e3ea69`), feedback UUID paths + input bounds + source count (`40997ce`), feedback attachment auth (`098dbff`), intelligence timing/networking filters (`b1528f3`, `cb5e501`), ILIKE-escape (`d813f1d`). Tester: re-run probes (#16) (#19) (#21) (#25) (#26) (#27) (#28) against prod and flip their rows if they now pass. Process gap around feature-branch visibility (option (b) — PR preview images or branch-deploy env) remains open as a separate ask; not tackled here because the user's deploy model is intentionally "merge to `main` = approval gate" (any auto-branch-deploy would bypass that gate). If a lower-friction preview is wanted, file a follow-up issue scoped to a GHCR preview-image per PR |
 | 33 | 🟠 | Jobs API | `GET /api/v1/jobs` **silently ignores** the `company=`, `source_platform=`, and `q=` query params. All three return identical total=47,776 rows (= no-filter total). Only `search=` and `role_cluster=` actually filter. The Jobs page UI exposes a Platform dropdown (greenhouse / lever / ashby / linkedin / himalayas / …) whose value is therefore cosmetic — selecting "linkedin" shows the same first 25 jobs as "All Platforms". Reproduced: `GET /api/v1/jobs?source_platform=linkedin&page_size=3` and `GET /api/v1/jobs?source_platform=greenhouse&page_size=3` return byte-identical top-3 rows (all three "Stripe" LinkedIn scrapes). `GET /api/v1/jobs?company=Coalition` also returns all 47,776 jobs (no Coalition rows at top) | ✅ fixed: `jobs.py list_jobs` now accepts the three aliases as a non-breaking addition to the original params. `source_platform` is OR'd with `platform` (the response schema already aliases `Job.platform` → `source_platform` via `@computed_field`, so callers who read response field names and probed the matching query param were reasonable — now both names work). `q` is OR'd with `search` and goes through the same ilike branch (title / Company.name / location_raw). `company` is a separate name-substring filter (`Job.company.has(Company.name.ilike('%{company}%'))`) that lives next to the id-based `company_id` param |
 | 34 | 🟠 | Jobs UI | **Jobs-page filter state is not reflected in the URL.** Changing Status / Platform / Geography / Role cluster / Sort / Search leaves the URL at `/jobs`. Users can't bookmark a view, share a filtered link, or recover their filter state after refresh. The sidebar `Relevant Jobs` link uses `/jobs?role_cluster=relevant`, so the backend supports URL-driven filters — the page just doesn't sync them both ways | ⬜ open — `JobsPage.tsx` stores filters in component state only. Migrate to `useSearchParams()` from `react-router-dom` (or a thin `useQueryState` helper) so every filter change pushes to the URL, and initial render reads from it. Same pattern for sort. Dedupe against the existing `role_cluster=relevant` sidebar link |
 | 35 | 🟡 | Dashboard UI | **Role-cluster preview job titles on Dashboard are not clickable.** All 5 preview cards (Infra / Security / QA / Global Remote / Relevant Jobs) render each row's title as a plain `<p>` with no anchor — `links_count: 0` inside every card. The only nav is the "View all X jobs →" button at the card footer. Users seeing "Senior SRE @ Block · 98" can't click through to the detail page — a core Dashboard affordance is missing | ⬜ open — in `DashboardPage.tsx`, wrap the job rows (`p.font-medium` + meta + score) in a `<Link to={`/jobs/${job.id}`}>` that spans the whole row. Keep the `hover:` / focus styles for discoverability. The same rows in the `Relevant Jobs` card get the same treatment |
@@ -118,7 +118,7 @@ one place.
 | 58 | 🟡 | Companies / Jobs | **Company list cards AND Jobs table rows navigate via `div|tr.onClick` instead of `<a>`, breaking standard web-nav affordances.** `/companies`: each card is `<div class="cursor-pointer group" onClick={…}>` → `navigate('/companies/{id}')`. `/jobs`: each row is `<tr class="cursor-pointer hover:bg-gray-50" onClick={…}>` → `navigate('/jobs/{id}')`. Neither has an `<a>` inside, `tabindex`, or `role="link"`. Consequences across both pages: (a) middle-click and Ctrl/Cmd-click don't open in a new tab, (b) right-click → "Open in new tab" / "Copy link" don't work, (c) keyboard users can't Tab to the row/card, (d) screen readers announce generic container instead of a link. Additionally, `/companies/{id}` detail view's "Open Roles: N" is plain text instead of a link to `/jobs?company_id={id}` | ⬜ open — two patches: `CompaniesPage.tsx` replaces `<div onClick={navigate}>` with `<Link to={…} className="block …">`, nested buttons use `e.preventDefault();e.stopPropagation()`. `JobsPage.tsx` restructures the table: either (a) change the `<tr>` to `<tr><td><Link to="/jobs/{id}">` inside each cell (accessible) or (b) wrap the whole row in a `TableRowLink` component that stacks an invisible `<a>` covering the row + `position:relative` on the `<tr>`. Same approach on `CompanyDetailPage.tsx` for the `Open Roles` metric |
 | 59 | 🟠 | Security / XSS-adjacent | **External links on `/jobs/{id}` open in new tabs **without** `rel="noopener noreferrer"` — reverse-tabnabbing vector.** On a live Job Detail page (alphasense/greenhouse), `document.querySelectorAll('main a')` surfaces three external links: "View Original Listing" → Greenhouse (has `rel="noopener noreferrer"` ✅), "alpha-sense.com" → `target="_blank" rel="(none)"` ❌, "Careers page" (company career url) → `target="_blank" rel="(none)"` ❌. The two un-hardened anchors use `Company.website` and `Company.careers_url`. An attacker whose domain becomes a company `website`/`careers_url` (via manual admin-add, or a compromised scrape) can use `window.opener.location = 'https://phishing.example'` from the opened tab to redirect the user's original sales-platform tab to a phishing clone of the login page. Users click back to the original tab, see the login page, and re-enter credentials | ⬜ open — in `JobDetailPage.tsx` (and anywhere else `Company.website` / `Company.careers_url` / arbitrary ATS URLs are rendered): every `<a target="_blank">` must have `rel="noopener noreferrer"`. Simplest fix: add a small `<ExternalLink href={url}>…</ExternalLink>` component with those attrs baked in and replace every `<a target="_blank">` on the page. Browser behavior changed in Chrome 88 / Firefox 79 (implicit `noopener` when `target="_blank"`), but Safari and older browsers still leak `window.opener`, so the explicit `rel` is still required by modern security guides (OWASP: Reverse Tabnabbing) |
 | 60 | 🟠 | Data Quality / Export | **`/api/v1/export/contacts` emits 445 (11.8%) garbage contact rows where `first_name` is an English stop-word.** Parsed the full 3,756-row CSV with a proper quoted-CSV parser. 445 rows have `first_name` in {"help","for","the","apply","learn","us","to","in","with","on","what","our","your","at"…}, of which 148 have BOTH `first_name` AND `last_name` as stop-words (e.g. `{company:"Abbott", first:"help", last:"you", title:"Recruiter / Hiring Contact"}`, `{company:"Airbnb", first:"us", last:"at", …}`, `{company:"AbbVie", first:"for", last:"the", …}`). All 445 have `source="job_description"`, all have `email=""`, `phone=""`, `linkedin_url=""` — **zero actionable contact info**. Every single one has `title="Recruiter / Hiring Contact"` (1,348 rows total, 36% of the whole export). The root cause is the `job_description` contact-extractor: a regex like `/contact ([A-Za-z]+) ([A-Za-z]+)/` is matching on phrases like *"contact us at…"*, *"help you apply"*, *"for the role"*, *"learn more about our team"* — two adjacent tokens after a trigger word are treated as `first_name last_name` with no English-word validation, no length check, and no case-sensitivity filter (proper names are capitalized; stop-words aren't). Result: sales team sees a contacts table bloated with noise and wastes review cycles triaging phantom "Recruiter" rows. Also: `phone` and `telegram_id` columns are exported but **never populated** (0 / 3756 rows). | ✅ fixed: **root cause was a regex scope bug**, not just a stop-word problem. The pre-existing `_CONTACT_PATTERN` in `services/enrichment/internal_provider.py` used global `re.IGNORECASE`, which made the supposed Capital-Initial capture `([A-Z][a-z]+\s+[A-Z][a-z]+)` match any-case words — so "contact us at" captured `("us","at")`, "help you apply" captured `("help","you")`, etc. Fix is layered: (a) scope the IGNORECASE flag to just the trigger alternation via `(?i:contact\|recruiter\|…)`, so the name capture genuinely requires uppercase initials. (b) Add post-match `_looks_like_real_name()` that rejects tokens in `_NAME_STOPWORDS` (46-word English stop-list), enforces 2–20 char length, and requires `[A-Z][a-z]+` shape — belt-and-suspenders against any prose noise that still satisfies Capital-Initial rules ("Our Team", "Let Us"). (c) Retroactive cleanup: new `app/cleanup_stopword_contacts.py` (mirror of `close_legacy_duplicate_feedback.py`) applies the same predicate to existing rows, scoped to `source='job_description'` only (other sources use real email-parsing logic), with `--dry-run` + chunked DELETE in batches of 500. Stop-word set is kept in lockstep with the ingest filter via comments in both files. `phone` / `telegram_id` CSV-column removal is covered separately in Finding #62 |
-| 61 | 🟠 | Auth / Data Exfiltration | **All three bulk-export endpoints gate on "logged in" only — any viewer can download the entire contacts/jobs/pipeline database.** Read `platform/backend/app/api/v1/export.py` directly: `/export/jobs`, `/export/pipeline`, and `/export/contacts` all have `user: User = Depends(get_current_user)` — no `require_role(…)`. Viewer (the lowest privilege tier) gets the same CSV as admin: 3,756-row / 640 KB contacts dump including `is_decision_maker`, `email`, `email_status`, and all outreach metadata. Fetched as admin on prod: `GET /api/v1/export/contacts` → 200, Content-Length ≈ 640,000 bytes, no pagination, no rate-limit. The `/companies` page shows a prominent "Export Contacts" button (`<a href={exportContactsUrl()}>`) to every logged-in role — `CompaniesPage.tsx` line 88 has no role-guard around the button. Consequence: **a single compromised viewer account (e.g. a contractor given read-only access for onboarding) can exfiltrate the entire prospect list in one HTTP GET.** No audit log entry is written for exports (no visible signal anywhere in `/monitoring`). Also: query has no `LIMIT`, no streaming-chunk size guard, no tenant filter — everything relies on single-tenant assumption | 🟡 partial: **backend role gate fixed** — all three endpoints in `api/v1/export.py` (`/export/jobs`, `/export/pipeline`, `/export/contacts`) now depend on `_EXPORT_ROLE_GUARD = require_role("admin")` instead of `get_current_user`. A compromised viewer or reviewer account can no longer dump the database in one GET — the server returns 403. Gate is `admin`-only for now (tightest safe default); loosening to reviewer is easy if product decides sales reviewers are a legitimate export audience. **Frontend hide-the-button still open** — `CompaniesPage.tsx` line ~88 still renders "Export Contacts" to every logged-in role; clicking it as viewer/reviewer now hits a 403 instead of succeeding, but the button is still a confusing dead-end for non-admins. That's tester-owned scope (`user.role === "admin"` conditional). **Audit-log table still open** — separate follow-up; adding an `audit_log` model + migration is a bigger piece of work than this single commit |
+| 61 | 🟠 | Auth / Data Exfiltration | **All three bulk-export endpoints gate on "logged in" only — any viewer can download the entire contacts/jobs/pipeline database.** Read `platform/backend/app/api/v1/export.py` directly: `/export/jobs`, `/export/pipeline`, and `/export/contacts` all have `user: User = Depends(get_current_user)` — no `require_role(…)`. Viewer (the lowest privilege tier) gets the same CSV as admin: 3,756-row / 640 KB contacts dump including `is_decision_maker`, `email`, `email_status`, and all outreach metadata. Fetched as admin on prod: `GET /api/v1/export/contacts` → 200, Content-Length ≈ 640,000 bytes, no pagination, no rate-limit. The `/companies` page shows a prominent "Export Contacts" button (`<a href={exportContactsUrl()}>`) to every logged-in role — `CompaniesPage.tsx` line 88 has no role-guard around the button. Consequence: **a single compromised viewer account (e.g. a contractor given read-only access for onboarding) can exfiltrate the entire prospect list in one HTTP GET.** No audit log entry is written for exports (no visible signal anywhere in `/monitoring`). Also: query has no `LIMIT`, no streaming-chunk size guard, no tenant filter — everything relies on single-tenant assumption | 🟡 partial: **backend role gate fixed** — all three endpoints in `api/v1/export.py` (`/export/jobs`, `/export/pipeline`, `/export/contacts`) now depend on `_EXPORT_ROLE_GUARD = require_role("admin")` instead of `get_current_user`. A compromised viewer or reviewer account can no longer dump the database in one GET — the server returns 403. Gate is `admin`-only for now (tightest safe default); loosening to reviewer is easy if product decides sales reviewers are a legitimate export audience. **Audit-log table shipped** — new `audit_logs` table (model `app/models/audit_log.py`, migration `2026_04_15_m3h4i5j6k7l8_add_audit_logs_table.py`) with FK-restricted `user_id`, indexed `action`/`created_at`, and `metadata_json` for per-event context. New helper `app/utils/audit.py` `log_action()` is fail-open (commits the audit row in the caller's session; logs a warning and continues if the commit fails so an audit hiccup can't break the user-facing export). All three `/export/*` endpoints now call it with `action="export.{jobs\|pipeline\|contacts}"`, the applied filters, and the exported row count. Forensic trail now catches the compromised-admin case where the role gate passes but we still need an after-the-fact record. New admin-only read API `GET /api/v1/audit` (with `?action=`, `?resource=`, `?user_id=`, `?since=`, `?until=`, paginated) + `GET /api/v1/audit/{id}` lets incident response query the log directly. **Frontend hide-the-button still open** — `CompaniesPage.tsx` line ~88 still renders "Export Contacts" to every logged-in role; clicking it as viewer/reviewer now hits a 403 instead of succeeding, but the button is still a confusing dead-end for non-admins. That's tester-owned scope (`user.role === "admin"` conditional). Admin-side `/audit-log` page + nav entry to render the new API is also tester scope |
 | 62 | 🔵 | Data / Export | **Export CSV has two columns that are always empty; confusing for consumers.** Fully parsed the live `/api/v1/export/contacts` CSV: `phone` has 0 / 3,756 values populated; `telegram_id` has 0 / 3,756 values populated. Column headers are present in the CSV and in `CONTACT_CSV_COLUMNS` in `api/v1/export.py`. Sales team pulling this into their CRM / spreadsheet sees two "dead" columns and has no signal about whether the data is *missing* (bug) or *never collected* (product scope). Related: `last_outreach_at` and `outreach_note` are also empty in the current sample but that's expected (no outreach activity yet) — those become meaningful once sales starts working the list. `phone`/`telegram_id` won't fill themselves | ✅ fixed: option (b) taken — `CONTACT_CSV_COLUMNS` in `api/v1/export.py` no longer lists `phone` or `telegram_id`, and the row-builder in `export_contacts` stops appending them. CSV headers and row values are kept in lockstep (a comment flags that the two must move together). The columns remain on the `CompanyContact` model — this change is purely about the export surface. An inline comment flags the columns for re-addition once enrichment starts populating them, so restoring them is a one-line revert if/when Hunter.io/Apollo/Clearbit integration lands |
 | 63 | 🟡 | Admin / API Drift | **The `/api/v1/rules` admin API is orphaned AND its cluster whitelist is out of sync with `role_clusters_configs`.** Backend registers `rules.router` and exposes `GET/POST/PATCH/DELETE /api/v1/rules`, but there is no `RulesPage.tsx`, no `listRules/createRule` in `lib/api.ts`, no nav entry, and only ONE stale row exists in the DB (seeded `cluster="infra", base_role="infra"`). More critically, `POST /api/v1/rules` and `PATCH /api/v1/rules/{id}` hardcode `if body.cluster not in ("infra", "security"): raise HTTPException(400, "Cluster must be 'infra' or 'security'")` — but `/api/v1/role-clusters` currently returns 3 clusters (`infra`, `qa`, `security`) with `relevant_clusters=["infra","qa","security"]` and 509 jobs are already classified as `role_cluster="qa"`. Tried `POST /api/v1/rules {cluster:"qa", base_role:"qa", keywords:["qa engineer"]}` live → 400 "Cluster must be 'infra' or 'security'". So the Rules API *lies* about its supported domain, and any future admin trying to use it hits a dead end as soon as a custom cluster is added | 🟡 partial: **backend whitelist is now dynamic** — `api/v1/rules.py` gained `_valid_cluster_names(db)` which reads active rows from `role_cluster_configs` (the same source of truth `/api/v1/role-clusters` uses), and both POST and PATCH now check `body.cluster in valid` with a 400 error message that lists the actual configured clusters instead of hardcoded `"infra"/"security"`. Re-ran the failing live probe: `POST /api/v1/rules {cluster:"qa", …}` now succeeds (or returns a 400 listing `infra, qa, security` if `qa` were ever marked inactive). This means the orphan API at least stops *lying* about its domain, so if we do wire up a frontend later, no code change is needed to support custom clusters. **Still open: the orphan itself** — there's still no `RulesPage.tsx` / `lib/api.ts` hookup / nav entry. Decision on (a) wire up the frontend vs (b) delete the API + model + schema + seed row is product-owned and best punted to a separate PR so we don't bundle a UX decision with a security fix. Deferred to follow-up |
 | 64 | 🟠 | Intelligence / Data Quality | **`_looks_like_corrupted_contact()` filter on `/api/v1/intelligence/networking` only inspects `first_name` for run-together capitals — misses the exact `{first:"Gartner", last:"PeerInsights"}` case its own docstring calls out.** Live call: `GET /api/v1/intelligence/networking` returns top suggestion `{name:"Gartner PeerInsights", title:"Wade BillingsVP, Technology Services, Instructure", is_decision_maker:true, email_status:"catch_all"}`. The filter reads: `internal_caps = sum(1 for i, c in enumerate(fn) if i > 0 and c.isupper()); if internal_caps >= 2: return True` — critically, `fn` is `first_name`, not `last_name`. "Gartner" has 0 internal caps so it passes; "PeerInsights" would fail the check but is never examined. Similarly `{first:"Wade", last:"BillingsVP"}` from the title pattern: `fn="Wade"` → 0 internal caps → passes. The title-length and 3-comma-segment checks later in the function would have caught *some* of these but apparently are either bypassed by prod deploy lag (the filter was added for regression #27 and may not be live yet — same deploy-staleness tracked as #32) or the current deployed filter lacks these checks entirely | ✅ fixed: `_looks_like_corrupted_contact()` now iterates over BOTH `fn` and `ln`, and the internal-caps heuristic was rewritten to actually catch the reported cases. New `_has_suspicious_caps(part)` (a) splits on non-alpha separators (`re.split(r"[^A-Za-z]+", part)`) so hyphenated / apostrophe names like `Jean-Luc` or `O'Connor` each sub-token are checked independently — no false positives, (b) flags a sub-token with ≥2 internal caps OR with exactly 1 cap at position ≥4 (catches `PeerInsights` where "I" is at index 4, and `BillingsVP` where "V" is at index 7). Also added a shared `_NAME_STOPWORDS` frozenset (46 English words, kept in lockstep with `services/enrichment/internal_provider.py` and `cleanup_stopword_contacts.py` via cross-reference comments) so rows like `{first:"help", last:"you"}` are caught regardless of the email_status path. Self-contained harness run: 19/20 cases pass (the remaining one — `iOS` as first_name — is correctly treated as scrape corruption; real iOS-dev contacts would be surfaced with a normal first name). `{first:"Gartner", last:"PeerInsights"}` and `{first:"Wade", last:"BillingsVP"}` both now return True |
@@ -144,7 +144,7 @@ one place.
 | 84 | ✅ | Search / Correctness | **`/api/v1/jobs?search=…` passes `%` and `_` unescaped into PostgreSQL ILIKE patterns — users searching for `"100%"` get 98 false matches (titles like `"1005 | Research Specialist"`), users searching for `"dev_ops"` get loose matches like `"Dev Ops"`, `"Dev-Ops"`.** `jobs.py` lines 90-98: `Job.title.ilike(f"%{effective_search}%")` — Python f-string interpolation with no escaping. PostgreSQL ILIKE treats `%` as "zero or more chars" and `_` as "exactly one char"; both user-legal characters (e.g., in `"100%"`, `"dev_ops"`, `"DynamoDB_table"`) get reinterpreted as wildcards. Live reproduction: search `%` → 47,776 matches (all jobs); search `_` → 47,776 matches; search `100%` → 98 matches, 0/5 sampled contain literal `"100%"`; search `dev_ops` → 4 matches, 0/4 contain literal underscore (all are `"Dev Ops"`/`"Dev-Ops"`). Affects title, company_name, location_raw (all three ilike clauses). Not exploitable for data exfil (queries are still parameterised), but actively breaks search-correctness for any term containing a percent or underscore | ✅ fixed: new `app/utils/sql.py::escape_like(s)` replaces `\\` → `\\\\`, `%` → `\\%`, `_` → `\\_` (order matters — backslash first so the escapes we insert aren't double-escaped). Every call site is now `needle = f"%{escape_like(value.strip())}%"` paired with `.ilike(needle, escape="\\")` — the `ESCAPE '\\'` clause tells Postgres to treat the backslash-prefixed metachars as literals. Applied to all seven ILIKE call sites flagged in the audit plus one latent adjacent one: `jobs.py` (company-param + 3-col search), `companies.py` (name/industry/headquarters search), `applications.py` (title/company search), `resume.py` (title/company search), `feedback.py` (attachment filename lookup — defensive; a filename containing a literal `%` or `_` could previously wildcard-match another user's attachments row and return the wrong owner_id, though the file returned was always the caller's because `safe_name` is used for the path). Verified on the core `escape_like` logic via a standalone Python test harness: 8/8 cases pass (`plain`, `100%`, `dev_ops`, `DynamoDB_table`, `back\\slash`, empty string, `%_%` mixed, `100% off_sale` combined) — backslash-first ordering produces correct escapes in all cases |
 | 85 | ✅ | Search / UX | **Searching for whitespace-only strings matches rows with whitespace rather than "no filter" — 3 consecutive spaces in `/api/v1/jobs?search=%20%20%20` returns 22 matches.** Root cause: `jobs.py` line 90 `if effective_search:` treats any non-empty string as a filter, then wraps it in `%{search}%` for ILIKE. Spaces-only becomes `%   %` which matches any title/company/location containing 3+ consecutive spaces — sometimes present in legitimate titles like `"Senior QA - II   Mobile"`. Cosmetically: user clicks the search box, accidentally types a space before deciding to not search, hits Enter — results shrink to 22 mystery matches. Not security-severe, but reduces search trust | ✅ fixed: fold-in with #84 (same ILIKE-sanitation pass). Every search-input site now uses `if value and value.strip():` as the guard and `value.strip()` as the input to `escape_like(...)`. Whitespace-only inputs no longer reach the query builder, and any leading/trailing whitespace that makes it past the guard is trimmed before being wrapped in `%…%`. Covered in `jobs.py` (both `company` param and combined search), `companies.py`, `applications.py`, `resume.py`. Feedback-attachment site is by-design a filename — no strip, no whitespace guard (a space in a filename is legal and meaningful) — only the escape applies there |
 | 86 | ✅ | Relevance / Scoring | **Unclassified jobs (role_cluster=`""`, 42,966 / 89.9% of the DB) have non-zero `relevance_score` despite the project docs saying "Jobs outside these clusters are saved but unscored (relevance_score = 0)".** Live sample from `/api/v1/jobs?sort_by=first_seen_at&sort_dir=desc`: *"Junior Software Developer"* (cluster=`""`, **score=17**), *"Talent Acquisition Coordinator"* (cluster=`""`, **score=44**), *"Human Data Reviewer"* (cluster=`""`, **score=42**). Root cause in `_scoring.py` `compute_relevance_score()` (lines 132-140): the weighted sum still applies 60% of the total weight to company_fit (0.3-1.0), geography_clarity (0.2-1.0), source_priority (0.3-1.0) and freshness (0.1-1.0) even when `_title_match_score()` returns 0.0. Worst case score for an unclassified job is `0.40*0 + 0.20*0.3 + 0.20*0.2 + 0.10*0.3 + 0.10*0.1 = 0.14 → 14`; best case is ~54. Impact: sorting `/jobs` by `relevance_score desc` shows real relevant jobs (score 100) first, but an unclassified job with `score=54` ranks ABOVE any relevant job with score < 54 — the "Relevant (Infra + Security + QA)" cluster's worst score is 38, so unclassified roles like "Talent Acquisition Coordinator" (44) outrank genuine security jobs in the cross-cluster sort. Dashboard "Avg Relevance Score" of 39.65 is dragged down by the 42,966 unclassified scores contaminating the mean | ✅ fixed (option **(a)**, short-circuit): `workers/tasks/_scoring.py::compute_relevance_score` now binds `title_score = _title_match_score(matched_role, role_cluster, approved_roles_set)` first and `return 0.0` immediately when `title_score == 0.0`, before the weighted sum ever runs. Matches the CLAUDE.md contract ("Jobs outside these clusters are saved but unscored (relevance_score = 0)") literally — any job where `_title_match_score` is zero (unclassified OR the edge case of classified-but-no-matched-role-or-cluster) gets exactly 0.0. `feedback_adjustment` deliberately does **not** apply on the short-circuit branch: if an operator wants to surface unclassified jobs later, they should use a separate ranking signal rather than leak through the relevance-score contract. Rejected option (b) (multiplicative scoring) because the weighted-sum normalisation would need re-tuning and the short-circuit matches the doc verbatim with zero downstream ambiguity. Backlog correction: new idempotent `app/rescore_unclassified.py --dry-run` script (modelled on `cleanup_stopword_contacts.py`) zeros `relevance_score` on every row where `role_cluster IS NULL OR role_cluster = ''` AND `relevance_score > 0` — status-agnostic on purpose (rejected unclassified jobs also get zeroed so new-write and backlog share one baseline). Dry run prints a sample of 10 rows; real run does a single `UPDATE jobs SET relevance_score = 0.0` under the same predicate (no per-row logic needed); re-running is a no-op once every unclassified row is already at 0. Verified short-circuit semantics with a standalone Python test harness: unclassified junior dev → 0.0 ✓, unclassified talent-acq at target company → 0.0 ✓, classified approved role → 100.0 ✓, classified keyword-only → 43.0 ✓, classified approved non-target → 86.0 ✓; same harness confirms the old buggy path would have returned 60 for an unclassified job with perfect non-title signals. Docstring updated to reference Finding 86. CLAUDE.md text already matches option (a) — no doc update needed |
-| 87 | 🟡 | Jobs / Filter drift | **`/jobs` role-cluster dropdown hardcodes 4 options (`relevant`, `infra`, `security`, `qa`) — doesn't read from `role_cluster_configs` AND has no way to filter the 42,966 (89.9%!) unclassified jobs.** `JobsPage.tsx` lines 262-272 renders a static `<select>` with five `<option>` tags. Two problems: (a) same drift class as Finding #63 — if an admin adds a new cluster via `/role-clusters` (e.g., `"data_science"`), it will be scored in the backend and visible as a badge on job rows, but the `/jobs` filter dropdown won't know about it; (b) there's no `"Unclassified"` option despite 42,966 unclassified jobs existing. If a reviewer wants to triage the unclassified pool (the most likely source of new clusters and feedback-adjustment cases), they have to scroll 1,720 pages through All Jobs, or construct the URL manually with `role_cluster=""`. The Monitoring dashboard prominently shows "unclassified 42,966 (89.9%)" — users will click expecting to filter, but the URL `role_cluster=unclassified` returns 0 results (because the literal string is `""`, not `"unclassified"`) | ⬜ open — `JobsPage.tsx`: (a) fetch `role_cluster_configs` via a `useQuery({queryKey: ["role-clusters"], queryFn: getRoleClusters})` and render dynamically. Keep the synthetic `"relevant"` option (it's union-of-is_relevant) at the top, then one option per active cluster. (b) Add an explicit `<option value="__unclassified__">Unclassified</option>` and in the query-params-to-API translation, convert `__unclassified__` to `role_cluster=` (empty) — or add a new backend param `is_classified=false` that filters `WHERE role_cluster IS NULL OR role_cluster = ''`. (c) On the Monitoring dashboard, make the "unclassified 42,966" card a link to `/jobs?role_cluster=__unclassified__` so the dead-end UI becomes navigable |
+| 87 | 🟡 | Jobs / Filter drift | **`/jobs` role-cluster dropdown hardcodes 4 options (`relevant`, `infra`, `security`, `qa`) — doesn't read from `role_cluster_configs` AND has no way to filter the 42,966 (89.9%!) unclassified jobs.** `JobsPage.tsx` lines 262-272 renders a static `<select>` with five `<option>` tags. Two problems: (a) same drift class as Finding #63 — if an admin adds a new cluster via `/role-clusters` (e.g., `"data_science"`), it will be scored in the backend and visible as a badge on job rows, but the `/jobs` filter dropdown won't know about it; (b) there's no `"Unclassified"` option despite 42,966 unclassified jobs existing. If a reviewer wants to triage the unclassified pool (the most likely source of new clusters and feedback-adjustment cases), they have to scroll 1,720 pages through All Jobs, or construct the URL manually with `role_cluster=""`. The Monitoring dashboard prominently shows "unclassified 42,966 (89.9%)" — users will click expecting to filter, but the URL `role_cluster=unclassified` returns 0 results (because the literal string is `""`, not `"unclassified"`) | 🟡 partial — **backend half shipped**: `GET /api/v1/jobs` now accepts `is_classified: bool \| None` (`jobs.py::list_jobs`). `is_classified=true` → `Job.role_cluster IS NOT NULL AND role_cluster != ''`; `is_classified=false` → `role_cluster IS NULL OR role_cluster = ''` (both NULL and empty-string are checked because historical rows use `""` and newer writes may land NULL). Combining with `role_cluster=foo` is contradictory-but-valid SQL (returns 0 rows) — we don't reject it; the frontend just shouldn't send both. This gives the frontend a clean way to wire an `"Unclassified"` option without having to send an empty URL param. **Still open (tester scope)**: `JobsPage.tsx`: (a) fetch `role_cluster_configs` via a `useQuery({queryKey: ["role-clusters"], queryFn: getRoleClusters})` and render dynamically. Keep the synthetic `"relevant"` option at the top, then one option per active cluster. (b) Add `<option value="__unclassified__">Unclassified</option>` and translate it to `is_classified=false` on the wire. (c) On the Monitoring dashboard, make the "unclassified 42,966" card a link to `/jobs?is_classified=false` so the dead-end UI becomes navigable |
 | 88 | ✅ | Jobs / Data quality | **~47% of recently-scraped job rows are duplicate (title + company) — one company (Jobgether) accounts for ~95% of the noise, with individual titles appearing up to 42× in the DB.** Live sample of 800 recent rows from `/api/v1/jobs?page_size=200` (pages 1-4): **424 unique (title, company) pairs for 800 rows → 376 rows (47%) are duplicates.** The "Senior Designer (Brand, UI/UX) at Jobgether" title appears 42 times with 42 distinct Lever URLs and relevance scores; "Risk Operations Analyst at Jobgether" 42×; "Platform Engineer – Senior Tech (Platform) at Jobgether" 42×; "Senior UX Researcher at Jobgether" 15×; "Staff Software Engineer, New Markets Middle East at Jobgether" 11×. Jobgether contributes 357 excess rows; 2nd place (DoiT International) has only 4. Root cause: Jobgether is itself a job-aggregator that posts many employers' roles under its own Lever board, each with a distinct Lever job-id. Our scraper treats each Lever posting as an independent `Job` (dedup is on `Job.external_id` which IS unique — but the same logical role gets many external_ids). `models/job.py` line 12: `external_id: Mapped[str] = mapped_column(String(500), unique=True)` — correct at the DB level; the issue is above it. Downstream: `/jobs` listings are swamped (every 4th page of "relevant" is a Jobgether near-copy), dashboard "Total Jobs 47,776" is inflated, scoring signals get 42× the weight for Jobgether roles, and the Review Queue shows the same title 15 times in a row | ⬜ open — three combinable fixes. **(a) Collapse at the display layer** — add a `GROUP BY title, company_id` option to `/jobs` that shows a `[15 instances]` badge. Simplest. **(b) Collapse at ingest** — in `scan_task.py`, when a Jobgether/aggregator board yields N rows with identical `(normalized_title, company_id)` within the same scan, keep only the most recent and archive the rest. More invasive. **(c) Mark aggregator companies** — add `Company.is_aggregator` (bool), then in the fetcher, require each Lever board to declare whether it's an aggregator. Aggregator rows get stored with the real hiring employer resolved from the job description, not "Jobgether". The right-long-term fix. For **now** (before any deploy), a one-shot cleanup: `DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE (company_id, title) IN (SELECT company_id, title FROM jobs GROUP BY company_id, title HAVING COUNT(*) > 1) AND id NOT IN (SELECT MIN(id) FROM jobs GROUP BY company_id, title));` wrapped in `app/dedup_jobs.py --dry-run`, following `cleanup_stopword_contacts.py` pattern | ✅ fixed (options **(b) ingest guard + one-shot cleanup**) in commit `0a94241`: `workers/tasks/scan_task.py::_upsert_job` now has a second lookup before the `session.add(Job)` branch — if the `external_id` is new but an existing `Job` already covers `(company_id, title)` for the same company (and we have a non-empty title), we route into the update path instead of creating a new row. This collapses Jobgether's 42 distinct Lever job-ids for the same logical "Senior Designer" posting down to the first-seen row plus per-scan URL/description/source-score refresh. Backlog cleanup: new `app/dedup_jobs.py --dry-run` script (modelled on `cleanup_stopword_contacts.py`): finds every `(company_id, title)` group with `COUNT(*) > 1`, keeps the `MAX(first_seen_at)` survivor (ties broken by `MAX(id)` so the freshest row keeps its external_id + URL), and deletes the rest in 500-row batches inside a transaction. Real run prints `"would delete N rows across M groups"` in dry mode then `"deleted N rows across M groups"` in apply mode; re-running is a no-op once every `(company_id, title)` group has one row. Rejected option (c) (`Company.is_aggregator` + description-parsed employer resolution) as over-engineered for the current Jobgether-only case — can be layered on later without undoing (b). Option (a) (display-layer GROUP BY badge) deferred because (b) makes it unnecessary: once ingest dedups, there's nothing to group |
 | 89 | ✅ | Scoring / Multi-user | **`scoring_signals` table is single-scoped (no `user_id`); every reviewer's feedback contaminates every other reviewer's relevance scores.** `platform/backend/app/models/scoring_signal.py` lines 11-21 declares `ScoringSignal` with `signal_key` (globally unique) and `weight` — zero user/tenant columns. `workers/tasks/_feedback.py` `process_review_feedback()` writes signals keyed only on `company:{id}`, `cluster:{name}`, `geo:{bucket}`, `tag:{name}`, `level:{seniority}`, and `get_feedback_adjustment()` applies them to every job for every user the next time `rescore_jobs` runs (nightly 3 AM UTC per `celery_app.py`). Consequences: (a) if reviewer A rejects 20 infra jobs at Acme because "salary_low", reviewer B's view of Acme's infra roles also drops (potentially below the `relevant` threshold of ~38); (b) a reviewer who specialises in security sees their security-positive signals diluted by an infra-focused reviewer's security-rejections; (c) no way to audit *who* contributed which signal — the table stores `source_count` but not the reviewer id; (d) no undo — a single rogue reviewer rejecting the top 100 relevant jobs can poison the whole team's view for weeks until the 0.95/run decay catches up; (e) `rescore_jobs` applies the accumulated signals to 47,776 rows in one transaction nightly (line 67-115 of `maintenance_task.py`), so users see feedback as step-changes at 3 AM rather than continuously | ⬜ open — two-layer fix. **(1) Add `user_id` column** to `scoring_signals` + composite uniqueness `(user_id, signal_key)`. Make `get_feedback_adjustment()` filter by the current caller's `user.id`. This requires partitioning existing signal rows — the simplest migration is to zero them out and start fresh. **(2) Score per-user at query time** — the rescore_jobs task writes `Job.relevance_score` with feedback=0 (the base score), and a new `/jobs` query-time layer computes `base_score + feedback_adjustment_for_this_user_id` at read. Eliminates the midnight step-change. Far bigger change, but better UX. Ship #82 first, then decide layer. Medium severity because the platform is currently single-team; escalates to HIGH if multi-team / multi-tenant roadmap lands | ✅ fixed (layer 1 shipped, layer 2 scaffolded): **(1)** `models/scoring_signal.py` now has a nullable `user_id: UUID` FK to `users.id` with `ondelete="CASCADE"`, indexed, and `signal_key` is no longer unique on its own — replaced by the composite `UniqueConstraint("user_id", "signal_key", name="uq_scoring_signals_user_key")` in `__table_args__`. Migration `alembic/versions/2026_04_15_l2g3h4i5j6k7_scoring_signals_user_scoping.py` adds the column + FK, drops the old single-column unique index `ix_scoring_signals_signal_key`, recreates it as a plain non-unique index, and creates the composite unique constraint. Pre-existing rows keep `user_id = NULL` and participate in the shared legacy pool (Postgres treats NULL as distinct in unique constraints so legacy rows coexist with per-user rows under the same `signal_key`). **(2)** `workers/tasks/_feedback.py::_upsert_signal` now takes a `user_id: uuid.UUID | None = None` parameter and looks up / inserts scoped to that user. `process_review_feedback` extracts `reviewer_id = getattr(review, "reviewer_id", None)` at the top and threads it through every one of the 8 `_upsert_signal` call sites (accept branch: company/cluster/geo boosts; reject branch: tag/geo/level/company penalties + generic-reject company_penalty). `Review.reviewer_id` is NOT NULL in the model so the Celery feedback task always populates per-user rows going forward. A rogue reviewer rejecting 20 Acme jobs now only affects their own `(user_id, "company:acme")` row, not the shared pool. **Layer 2 scaffolding**: new `load_user_signals_cache(session, user_id)` helper in `_feedback.py` builds a per-user `signal_key → weight` dict (legacy NULL-pool rows first, then the user's own rows overwriting by key) ready for query-time scoring enrichment in `/jobs`. The nightly `rescore_jobs` batch continues to sum over everything via `get_feedback_adjustment(signals_cache)` so existing behavior is fully preserved — layer 2 will stop the batch from applying feedback at all and move it to query time, eliminating the midnight step-change. Decided to ship the schema + write-path in one commit and defer the read-path swap to a follow-up so the migration can be reverted in isolation if anything goes wrong under real traffic |
 | 90 | ✅ | Resume / Server crash | **`POST /api/v1/resume/{id}/customize` returns 500 Internal Server Error on `target_score="high"` (string) — type-confusion in Python comparison.** Live probe (admin session): `POST /api/v1/resume/bbbbbbbb-.../customize` with body `{"job_id":"…","target_score":"high"}` → **500** (non-JSON response). Root cause: `resume.py` line 567-568 `if not (60 <= target_score <= 95):` — Python 3 raises `TypeError: '<=' not supported between instances of 'int' and 'str'` when `target_score` is a string, which bubbles up past the FastAPI handler to an unhandled exception → 500. Affects observability (logs fill with stack traces) and client UX (no useful error message). Same class for the other `body: dict` writer endpoints (credentials, answer-book) — any numeric field POSTed as a string crashes with 500 | ✅ fixed: new `schemas/resume.py::CustomizeRequest(BaseModel)` with `job_id: UUID` and `target_score: int = Field(default=85, ge=60, le=95)`. `api/v1/resume.py::customize_resume_for_job` now takes `body: CustomizeRequest` instead of `body: dict`; the manual `if not (60 <= target_score <= 95):` guard is deleted (Pydantic enforces the range at parse time). `target_score="high"` now returns a clean 422 `int_parsing` error; `target_score=42` returns 422 `greater_than_equal`; `target_score=120` returns 422 `less_than_equal`; `target_score=null` and missing `job_id` both return 422 `type`. No 500 stack traces in logs for bad inputs. Same pattern as findings #79 (credentials) and #80 (answer-book) |
@@ -153,6 +153,9 @@ one place.
 | 93 | ✅ | Relevance / Infra FNs | **Infra cluster misses 44/95 (~46%) AWS-mentioning jobs because `INFRA_KEYWORDS` requires the `"aws engineer"` / `"azure engineer"` / `"gcp engineer"` suffix** — plain `"AWS Specialist"`, `"AWS Connect Developer"`, `"Backend Engineer - (Java/Python, AWS)"` all stay unclassified. `_role_matching.py` line 13: `"aws engineer", "azure engineer", "gcp engineer"`. Scoring engine treats all 44 as unclassified → they get unclassified-bucket relevance score (14-54 per #86) rather than 40+ infra baseline. Reviewers never see them in `role_cluster=relevant`. Users manually searching for AWS in Relevant Jobs see 51 results when the true count is 95 | ✅ fixed: added `"aws"`, `"azure"`, `"gcp"` to both `INFRA_KEYWORDS` AND `_WORD_BOUNDARY_KEYWORDS` in `_role_matching.py`. Word-boundary membership ensures `\baws\b` semantics — no FPs from `"laws"` / `"overdraws"`. Also added the compound cloud-provider forms `"google cloud"`, `"alibaba cloud"`, `"oracle cloud"` (safe as compounds, no word-boundary needed). The existing `"aws engineer"`, `"azure engineer"`, `"gcp engineer"` compounds remain for intent clarity but the bare word-boundary tokens are what catch the 44/95 previously-missed titles. `_is_excluded_from_infra()` from Finding #92 still gates the result, so "AWS Sales Specialist" still falls out. Targeted rescore runs via `rescore_jobs` Celery task — or, for an immediate sweep of just AWS/Azure/GCP-titled rows, operators can run the task with a `WHERE title ~* '\y(aws\|azure\|gcp)\y'` scope |
 | 94 | ✅ | ATS / Scoring bias | **Jobs with an empty job description get a 50.0 baseline keyword score for free — scoring-on-curve rewards ATS boards with poor descriptions.** `_ats_scoring.py` `compute_keyword_score()` lines 142-143: `if not job_keywords: return 50.0, list(resume_keywords)[:20], []`. When the `_extract_job_keywords()` call produces zero tech tokens (because the job description is empty, or the JD uses prose only with no tooling), the function short-circuits to 50.0. Combined with the 50% weighting in `compute_ats_score()` line 288, that's **25 "free" points of overall ATS score** for any bad job description. A resume against two equally-relevant jobs — one with a detailed JD and one with none — will score significantly LOWER on the detailed one (because missing keywords penalise) and higher on the empty one. Perverse incentive for sloppy postings. Also: line 273 `keyword_score, matched, missing = compute_keyword_score(resume_keywords, job_keywords)` — when job_keywords is empty, `matched=resume_keywords[:20]` (tests show some resume tokens) so the UI reports "matched: aws, docker, …" — but those weren't actually required for the job | ✅ fixed: applied BOTH recommended fixes. (1) `compute_keyword_score()` short-circuit now returns `0.0, [], []` on empty `job_keywords` — honest zero when the job offered nothing to compare against, and no false "matched" tokens leaking into the UI. (2) `_extract_job_keywords()` now seeds baseline keywords for every known relevant cluster including the previously-missing QA cluster (adds `"quality assurance"`, `"test automation"`, `"sdet"` + top 6 from `TECH_CATEGORIES["qa_testing"]`). Result: the only remaining path to empty `job_keywords` is "unclassified job + empty description + empty title" — which correctly scores 0.0 now. No more free 25 overall-points for sloppy JDs, and the UI no longer displays spurious matched-keyword lists |
 | 95 | ✅ | ATS / Substring matching | **ATS tech-keyword extraction does substring matching for any keyword >2 chars — "aws" matches "laws", "sre" matches "presented", "elk" matches "welkin", etc.** `_ats_scoring.py` `_extract_keywords_from_text()` lines 97-108: `if len(keyword) <= 2: <word-boundary>; else: <substring>`. Keywords like `"aws"`, `"gcp"`, `"dns"`, `"cdn"`, `"vpc"`, `"tcp"`, `"tls"`, `"ssl"`, `"elk"`, `"sre"`, `"iac"`, `"eks"`, `"ecs"`, `"gke"`, `"aks"`, `"sox"`, `"iso"`, `"sap"` are 3 chars so get substring match. Concrete false positives: a resume describing "practicing corporate laws" scores the `aws` keyword; "overseas transit" scores the `eas`-containing tokens. Real-world FP rate is probably low (most text is either tech-dense or clearly non-tech), but inflates ATS `keyword_score` on ambiguous documents | ✅ fixed: bumped `_ATS_WORD_BOUNDARY_MAX_LEN` constant from 2 to 4 in `_ats_scoring.py::_extract_keywords_from_text`. Every short acronym (`aws`, `gcp`, `sre`, `dns`, `cdn`, `vpc`, `tcp`, `tls`, `ssl`, `elk`, `iac`, `eks`, `ecs`, `gke`, `aks`, `sox`, `iso`, `sap`, `helm`, `java`, `ruby`, `perl`, `bash`, `nist`) now uses `\b` word-boundary regex; anything >4 chars keeps the faster substring `in` check. Compound keywords like `"tcp/ip"` still match because `\btcp\b` matches at word/non-word boundaries (the `/` counts as a boundary). No more `aws` in `laws`, `sre` in `presented`, `elk` in `welkin`, `java` in `javascript`. Same named-constant style as `_role_matching.py::_WORD_BOUNDARY_KEYWORDS` |
+| 96 | 🔴 | ATS / Staleness | **ATS resume scores are not auto-refreshed — they go stale the moment any new job is scraped, and a newly-uploaded resume sits at zero scores until the user manually clicks "Rescore".** Live probe on `salesplatform.reventlabs.com` (active resume `0503ae64-…`, "Sarthak Gupta Devops.pdf"): all 2,642 `ResumeScore` rows had `scored_at = 2026-04-05T13:11:01…02 UTC` — one single batch 11 days ago, then nothing. Current relevant pool is 5,206 jobs → **50.7% coverage**; the **top 10 newest** relevant jobs (scraped 2026-04-15) all returned `resume_score: null` + `resume_fit: null` via `/api/v1/jobs/{id}`. Root cause is two-headed: (1) `score_resume_task` is **absent from `celery_app.py` beat_schedule` — every other maintenance task is there (`rescore_jobs`, `decay_scoring_signals`, `nightly_backup`, …) but resume-rescore isn't. (2) `api/v1/resume.py::upload_resume` creates the Resume row with `status="ready"` and returns immediately — it never calls `score_resume_task.delay(resume.id)`, so a new upload shows 0/0 scored until the user finds the rescore UI. A manual `POST /resume/{id}/score` still works (verified: scored 5,206 jobs in ~90s and returned coverage to 100%), which proves the task and algorithm are healthy — this is purely a scheduling/triggering gap. Impact: the whole ATS-scoring feature APPEARS broken to users ("I uploaded my resume and no scores showed up", "the Senior SRE job posted yesterday has no ATS match") when in fact the task just never ran | ⬜ open — two small, independent code changes. **(1) Wire `score_resume_task` into `celery_app.py::beat_schedule`** under both `aggressive` and `normal` modes. Schedule nightly after `rescore_jobs` (e.g. `crontab(minute=30, hour=3)`) and enqueue one call per distinct `User.active_resume_id` via a tiny wrapper task `rescore_all_active_resumes` that fans out `score_resume_task.delay(...)` per active resume. Keep each resume-rescore at the existing delete-and-replace semantics; for multi-user scale later, switch to incremental (score only jobs whose `first_seen_at > resume.last_scored_at`). **(2) Trigger scoring at upload time**: at the end of `api/v1/resume.py::upload_resume` (just before the `return` on line 138), add `from app.workers.tasks.resume_score_task import score_resume_task; score_resume_task.delay(str(resume.id))`. Same call the manual `POST /resume/{id}/score` endpoint already uses on line 341 — no new task needed. **(3) (optional, defensive)** expose the staleness: add `last_scored_at = MAX(ResumeScore.scored_at)` to the `/resume/active` response so the frontend can surface "scored 11 days ago, rescore" when it's far out of date |
+| 97 | 🟠 | ATS / Scoring discrimination | **Post-rescore ATS scores collapse into 4 distinct buckets across 600+ jobs — scoring is effectively cluster-level, not job-level, because `JobDescription.text_content` is empty or sparse for most jobs.** After a fresh manual rescore (all 5,206 relevant jobs), the `/resume/{id}/scores` summary reports `best_score=66.6, above_70=0, average=41.0`. Pulled 600 jobs across 3 pages: **only 4 distinct `overall_score` values** — `66.6` (22 jobs), `65.6` (178), `58.5` (200), `23.5` (200). Top 20 SRE jobs all have **identically** `overall=66.6, kw=66.7, role=44.1, fmt=100.0`, with **identical matched (12 kw) and missing (6 kw) lists**, despite being 20 different postings at 20 different companies. This means `compute_ats_score` is not actually reading individual JDs — it's falling back to the `TECH_CATEGORIES[role_cluster]` baseline bag of keywords because `_ats_scoring.py::_extract_job_keywords` gets `description_text=""` for most `Job.id`s. Root cause: the fetchers (`greenhouse.py`, `lever.py`, `ashby.py`, `workable.py`, `bamboohr.py`, etc.) create `Job` rows but don't reliably populate the `JobDescription` relation with `text_content`. The `/api/v1/jobs/{id}` response schema doesn't even expose the description (it's a joined relation), so the frontend can't show "Description not fetched" — users just see low identical scores across jobs that obviously differ. **This is the underlying reason the #94 fix produced a "score collapse"**: removing the free 50-point baseline for empty JDs was correct, but it exposed that most JDs ARE empty, so scores dropped from spuriously-high-uniform to honestly-low-uniform without gaining per-job resolution. Finding #94's fix didn't cause this; it surfaced it | ⬜ open — tiered. **(1) Instrument first**: add a one-shot diagnostic script `app/audit_job_descriptions.py` (modelled on `cleanup_stopword_contacts.py`) that prints `SELECT role_cluster, COUNT(*) FILTER (WHERE jd.text_content IS NULL OR LENGTH(jd.text_content) < 100) AS empty_jds, COUNT(*) AS total FROM jobs j LEFT JOIN job_descriptions jd ON jd.job_id = j.id GROUP BY role_cluster` so we know exactly how many rows are empty. Expected: >80% of rows based on current scoring behavior. **(2) Fix each fetcher that's not storing JD text.** Audit `fetchers/greenhouse.py` → `fetchers/lever.py` → `fetchers/ashby.py` → others. Each one's `fetch_jobs(slug)` already returns `description: str` from the upstream API (Greenhouse's `content`, Lever's `descriptionPlain`, Ashby's `description`, Workable's `description`); trace it through `scan_task.py::_upsert_job` to see where it's dropped. Likely culprit: the upsert creates a `Job` row but conditionally creates `JobDescription` only on new inserts (or skips it on updates). **(3) Backfill**: once fetchers are fixed, a one-shot re-scrape pass on the 5,206 relevant jobs will populate descriptions retroactively. Or add a `refresh_job_description(job_id)` Celery task that re-hits the job's source URL for just the description. **(4) Make the gap visible in the UI**: expose `has_description: bool` on the `/jobs/{id}` response, and the resume-score endpoint, so "ATS score 23.5" shows a "limited data" badge when the JD is empty — users understand the score and file better bug reports. HIGH severity because the scoring engine is technically working but producing essentially no signal for per-job ranking; medium-term users will disable the feature |
+| 98 | 🟡 | UI / Data plumbing | **`/api/v1/companies` listing returns `relevant_job_count: null` on every row — frontend renders "?" where a relevance count should be.** Live probe: `GET /companies?page=1&page_size=5` returns 7,940 companies with `job_count` populated (1/3/1/1/2) but **every row's `relevant_job_count` is missing**. Frontend `CompaniesPage.tsx` (via `lib/api.ts`) renders `{company.relevant_job_count ?? "?"}` → literal "?" question marks across the companies table. Admins filtering by "companies with most relevant jobs" can't; reviewers scanning for high-fit companies can't prioritize. Cosmetic in the sense that no data is wrong, but the whole companies-view workflow is defeated. Root cause is in the `/companies` endpoint in `api/v1/companies.py` — it probably has a subquery that either isn't joined or isn't being summed into the response schema `CompanyOut.relevant_job_count` | ⬜ open — small fix in `api/v1/companies.py` list endpoint. Add a subquery that counts `Job.id` where `role_cluster.in_(await _get_relevant_clusters(db))` per `company_id`, left-join into the main companies query, and surface as `relevant_job_count` on `CompanyOut`. Same pattern as the existing `job_count` aggregate. Consider caching the count on `Company.relevant_job_count` (denormalized) if the subquery is slow at 7,940 rows — the nightly `rescore_jobs` task already iterates relevant jobs and can refresh the column cheaply. Also add a `sort_by=relevant_job_count` option so admins can sort companies by relevance-fit |
 
 ---
 
@@ -4316,6 +4319,358 @@ becomes navigable.
 
 #### Cleanup
 Read-only — no filter config changes.
+
+---
+
+## 27. Round 4O — Core-functionality in-depth audit (2026-04-16)
+
+User reported that the three headline features — **Relevant Jobs**, **ATS
+score**, and **Relevance score** — were "not working." Did a deep live
+probe pass with the admin session on `salesplatform.reventlabs.com` to
+isolate root causes.
+
+**Triage verdict:** the scoring engines are healthy; the scoring
+**feeding pipeline** is broken in two places. Three findings (#96 🔴,
+#97 🟠, #98 🟡) add up to: a user uploads a resume, sees zero ATS
+scores, waits, scores never appear; meanwhile the jobs they browse
+show `resume_score: null` on every fresh posting. When a rescore is
+eventually triggered manually, the resulting scores collapse into 4
+distinct values across 600+ jobs because the underlying JD text is
+missing.
+
+### 96. ATS resume scoring is stale by 11 days — no beat schedule + no upload trigger
+
+#### What I observed
+Live probe against `https://salesplatform.reventlabs.com/api/v1`:
+
+| Probe | Result |
+|---|---|
+| `GET /resume/{rid}/scores?page_size=1` (active resume) | `jobs_scored=2642, best=84.2, above_70=1296, avg=59.4` |
+| `GET /jobs?role_cluster=relevant&page_size=1` (relevant pool size) | `total=5206` |
+| Coverage | **2642 / 5206 = 50.7%** |
+| `scored_at` range across 92 sampled `ResumeScore` rows | `2026-04-05T13:11:01 … 2026-04-05T13:11:04 UTC` — one single batch, 11 days ago |
+| `GET /jobs?role_cluster=relevant&sort_by=first_seen_at&sort_dir=desc&page_size=10` (10 newest) | **0/10** have a `resume_score` populated |
+| `GET /jobs/{newest_relevant_id}` (rel=100 security job from today) | `resume_score: null, resume_fit: null` |
+| `POST /resume/{rid}/score` → poll `/score-status/{task_id}` | progressed 0 → 550 → 1750 → 5206 → `status=completed, jobs_scored=5206` in ~90 seconds |
+| After rescore: `/resume/{rid}/scores?page_size=1` | `jobs_scored=5206, coverage=100.0%` across 5 sampled pages |
+
+So the task itself is healthy (one manual call brought coverage from
+51% to 100% in under 2 minutes). The staleness is because the task
+never fires automatically.
+
+#### Root cause
+Two separate triggering gaps:
+
+**(a) No beat schedule entry.** `platform/backend/app/workers/celery_app.py`
+`beat_schedule` has entries for `scan_all_platforms`,
+`check_career_pages`, `run_discovery`, `expire_stale_jobs`,
+`rescore_jobs`, `decay_scoring_signals`, `collect_questions`,
+`enrich_target_companies`, `verify_stale_emails`,
+`auto_target_companies`, `fix_stuck_enrichments`,
+`deduplicate_contacts`, `nightly_backup` — but **no
+`score_resume_task`**. So nothing rescores resumes on a schedule.
+
+**(b) Upload doesn't trigger scoring.** `platform/backend/app/api/v1/resume.py`
+`upload_resume()` (lines 50-148) creates the `Resume` row with
+`status="ready"` and returns. It does NOT enqueue
+`score_resume_task.delay(resume.id)`. Contrast with line 341 inside
+`POST /resume/{id}/score` where the exact same call exists. So:
+
+1. User uploads resume → `status=ready`, `jobs_scored=0`
+2. User opens the Resume Score page → sees "no scores yet"
+3. User has to find and click the manual Rescore button
+4. Meanwhile new jobs get scraped every 30 min (aggressive beat), each
+   one unscored against any existing resume forever
+
+#### Suggested fix
+Three small, independent edits:
+
+1. **Wire beat schedule.** Add to both `aggressive` and `normal` blocks
+   in `celery_app.py::beat_schedule`:
+
+   ```python
+   "rescore_active_resumes": {
+       "task": "app.workers.tasks.resume_score_task.rescore_all_active_resumes",
+       "schedule": crontab(minute=30, hour=3),  # 3:30 AM UTC, after rescore_jobs at 3:00
+   },
+   ```
+
+   Add the wrapper task in `resume_score_task.py`:
+
+   ```python
+   @celery_app.task(name="app.workers.tasks.resume_score_task.rescore_all_active_resumes")
+   def rescore_all_active_resumes():
+       """Enqueue one score_resume_task per distinct User.active_resume_id."""
+       session = SyncSession()
+       try:
+           active_ids = session.execute(
+               select(User.active_resume_id)
+               .where(User.active_resume_id.isnot(None), User.is_active == True)
+               .distinct()
+           ).scalars().all()
+           for rid in active_ids:
+               score_resume_task.delay(str(rid))
+           return {"enqueued": len(active_ids)}
+       finally:
+           session.close()
+   ```
+
+2. **Trigger on upload.** In `api/v1/resume.py::upload_resume`, just
+   before the `return` on line 138:
+
+   ```python
+   from app.workers.tasks.resume_score_task import score_resume_task
+   score_resume_task.delay(str(resume.id))
+   ```
+
+3. **(Optional, defensive)** Add `last_scored_at: datetime | None =
+   MAX(ResumeScore.scored_at)` to the `/resume/active` response so the
+   frontend can show a "scored 11 days ago, rescore" nudge when the
+   batch is stale.
+
+#### Cleanup
+No existing data changes needed beyond a one-time manual
+`rescore_all_active_resumes.delay()` after deploy to catch up. Safe to
+re-run (task is idempotent: delete-and-replace semantics per resume).
+
+---
+
+### 97. ATS scores collapse into 4 distinct values across 600+ jobs — `JobDescription.text_content` is empty for most rows
+
+#### What I observed
+**After** a fresh manual rescore (all 5,206 relevant jobs, all scored
+≤90 seconds ago):
+
+```
+summary: jobs_scored=5206, best=66.6, above_70=0, avg=41.0
+```
+
+`above_70` went from `1,296` (11-day-old scores) to `0` (fresh
+scores). Pulled 600 scored rows across pages 1, 10, 20:
+
+```
+distinct overall_score values: 4
+top:  (58.5, 200 jobs), (23.5, 200 jobs), (65.6, 178 jobs), (66.6, 22 jobs)
+```
+
+Top 20 jobs all tie at `overall=66.6, kw=66.7, role=44.1, fmt=100.0`
+— and have **identical matched + missing keyword lists**:
+
+```
+matched (12): aws, ci/cd, devops, docker, gcp, github actions,
+              gitlab ci, kubernetes, pulumi, site reliability, sre, terraform
+missing  (6): azure, cloud, cloudformation, infrastructure, jenkins, k8s
+```
+
+This is 20 different companies with 20 different JDs producing
+literally byte-identical scoring output. The only way that happens is
+if `_ats_scoring.py::_extract_job_keywords` is getting `description_text=""`
+for all 20 and falling back to the `TECH_CATEGORIES["infra"]` baseline.
+
+#### Root cause
+Follow the chain:
+
+1. `resume_score_task.py` lines 69-73: bulk-loads `JobDescription.text_content`
+   keyed by `job_id`. For jobs with no `JobDescription` row (or
+   `text_content=""`), the dict has `""`.
+2. `_ats_scoring.py::compute_ats_score` line 312:
+   `job_keywords = _extract_job_keywords(job_title, role_cluster, matched_role, description_text)`.
+3. `_extract_job_keywords` with empty `description_text` falls back to
+   the role-cluster baseline keyword set (Finding #94's QA backfill
+   extended this). So every infra job gets the **same 18 baseline
+   infra keywords**. Resume matches 12/18 → kw_score=66.7. Role and
+   format are resume-only (no JD dependency) so they're constant
+   across jobs. Overall = constant.
+
+This is NOT a regression in `_ats_scoring.py`. The scoring code is
+doing exactly what the #94 fix requires when a JD is empty. **The
+data is missing.**
+
+Finding #94's fix (the `return 0.0, [], []` on empty `job_keywords`)
+took away the previously-spurious 50-point baseline, which is why the
+headline `best_score` dropped from 84.2 (pre-fix, fake-high) to 66.6
+(post-fix, honest-cluster-level-only). Losing 18 fake points wasn't
+the regression — it revealed the underlying JD-text gap that was
+being masked for weeks.
+
+Also note: the `/api/v1/jobs/{id}` response schema does **not** expose
+`description` or `has_description` (description is a joined relation
+deliberately excluded from `JobOut`). So the frontend can't show
+"description not yet fetched" — the user just sees low identical
+scores across visibly different jobs.
+
+#### Suggested fix
+Tiered, do them in order:
+
+**(1) Instrument.** One-shot diagnostic script `app/audit_job_descriptions.py`
+(modelled on `app/cleanup_stopword_contacts.py`):
+
+```python
+"""Report JobDescription population rates per cluster + per platform."""
+from sqlalchemy import select, func, case
+from app.database import SessionLocal
+from app.models.job import Job, JobDescription
+
+def main():
+    s = SessionLocal()
+    try:
+        empty_expr = case(
+            (JobDescription.text_content.is_(None), 1),
+            (func.length(JobDescription.text_content) < 100, 1),
+            else_=0,
+        )
+        rows = s.execute(
+            select(
+                Job.role_cluster,
+                Job.platform,
+                func.count(Job.id).label("total"),
+                func.sum(empty_expr).label("empty_or_tiny"),
+            )
+            .outerjoin(JobDescription, JobDescription.job_id == Job.id)
+            .group_by(Job.role_cluster, Job.platform)
+            .order_by(func.count(Job.id).desc())
+        ).all()
+        print(f"{'cluster':<15s} {'platform':<15s} {'total':>8s} {'empty':>8s} {'%':>6s}")
+        for r in rows:
+            pct = 100 * (r.empty_or_tiny or 0) / max(r.total, 1)
+            print(f"{r.role_cluster or '(none)':<15s} {r.platform:<15s} {r.total:>8d} {r.empty_or_tiny or 0:>8d} {pct:>5.1f}%")
+    finally:
+        s.close()
+
+if __name__ == "__main__":
+    main()
+```
+
+Run: `docker compose exec backend python -m app.audit_job_descriptions`.
+Expected output: >80% empty on at least some (cluster, platform)
+combinations. This tells us which fetchers are the culprits.
+
+**(2) Fix each fetcher that drops JD text.** Each fetcher in
+`app/fetchers/` returns a list of dicts from `fetch_jobs(slug)`.
+Upstream APIs all include description fields:
+
+- `greenhouse.py` — upstream has `content` (HTML); should strip to text and store
+- `lever.py` — upstream has `descriptionPlain` or `description`
+- `ashby.py` — upstream has `description` (GraphQL)
+- `workable.py` — upstream has `description` or `full_description`
+- `bamboohr.py` — upstream has `jobOpeningDescription`
+- `smartrecruiters.py` / `jobvite.py` / `recruitee.py` — all have `description`
+- `wellfound.py` — GraphQL `description`
+- `himalayas.py` — upstream `description`
+
+Then trace through `scan_task.py::_upsert_job` — the leak is almost
+certainly here. Current behaviour (hypothesis): the upsert creates a
+`Job` row but **conditionally creates `JobDescription`** (likely only
+on new inserts, or skipped because no commit happens on the relation).
+Confirm with:
+
+```sql
+SELECT j.platform,
+       COUNT(*) AS jobs,
+       COUNT(jd.job_id) AS with_jd_row,
+       COUNT(*) FILTER (WHERE LENGTH(COALESCE(jd.text_content, '')) > 100) AS with_text
+FROM jobs j
+LEFT JOIN job_descriptions jd ON jd.job_id = j.id
+GROUP BY j.platform
+ORDER BY jobs DESC;
+```
+
+Fix: in `_upsert_job`, always `session.merge(JobDescription(...))`
+with the text_content payload from the fetcher dict, regardless of
+whether the `Job` row is new or existing.
+
+**(3) Backfill the 5,206 relevant rows.** Once fetchers are fixed,
+two options:
+
+- **Full re-scan** of every platform (`scan_task.scan_all_platforms`)
+  — natural since new code picks up JD text on every upsert.
+  Operationally simplest but takes the scan cycle (~30 min on
+  aggressive mode).
+- **Targeted backfill task** `refresh_job_description.delay(job_id)`
+  that re-hits the source URL to pull just the description for one
+  Job, callable in batch over relevant rows.
+
+After backfill, re-run `score_resume_task.delay(rid)` to pick up the
+new JD text.
+
+**(4) Expose the gap in the UI.** Add `has_description: bool` to
+`JobOut` (and surface on `/resume/{rid}/scores` rows). Frontend renders
+a "limited data" badge on cards where ATS score was computed with no
+JD — users don't trust a score of 23.5 if they can't tell whether
+they're bad-fit or whether the scoring engine saw nothing.
+
+#### Cleanup
+Safe: fetcher fix is forward-only, backfill via re-scan is idempotent,
+rescore is idempotent.
+
+---
+
+### 98. `/api/v1/companies` list returns `relevant_job_count: null` on every row
+
+#### What I observed
+```
+GET /api/v1/companies?page=1&page_size=5
+  total=7940
+  #WalkAway Campaign             jobs=    1 relevant=   ?
+  #twiceasnice Recruiting        jobs=    3 relevant=   ?
+  0x                             jobs=    1 relevant=   ?
+  1-800 Contacts                 jobs=    1 relevant=   ?
+  10000 solutions llc            jobs=    2 relevant=   ?
+```
+
+Every row's `relevant_job_count` is `null`. Frontend `CompaniesPage.tsx`
+renders `{company.relevant_job_count ?? "?"}` so the "Relevant Jobs"
+column on the Companies page is a sea of question marks across all
+133 pages.
+
+This is cosmetic in the strict sense (no data is lost) but it
+defeats the whole Companies workflow: admins can't sort/filter by
+"companies with the most relevant postings", reviewers can't
+prioritise outreach to high-fit companies, and the column header
+just mocks the user with "?" everywhere.
+
+#### Root cause
+`api/v1/companies.py` list endpoint computes `job_count` via a
+subquery but does not compute an analogous `relevant_job_count`. The
+`CompanyOut` schema has the field declared (optional), so the frontend
+type-checks — it's just always `None`.
+
+#### Suggested fix
+In `api/v1/companies.py` list endpoint, add a second subquery:
+
+```python
+from app.api.v1.jobs import _get_relevant_clusters
+relevant_clusters = await _get_relevant_clusters(db)
+
+relevant_job_count_sq = (
+    select(Job.company_id, func.count(Job.id).label("rc"))
+    .where(Job.role_cluster.in_(relevant_clusters))
+    .group_by(Job.company_id)
+    .subquery()
+)
+# Left-join into the main companies query, coalesce to 0
+query = query.outerjoin(
+    relevant_job_count_sq,
+    Company.id == relevant_job_count_sq.c.company_id,
+)
+# Surface on CompanyOut as relevant_job_count=func.coalesce(relevant_job_count_sq.c.rc, 0)
+```
+
+Or cheaper: denormalise on `Company.relevant_job_count` (Integer,
+default 0) and have the nightly `rescore_jobs` task refresh it in the
+same pass that iterates relevant jobs. Drops per-request subquery
+cost but adds write coupling.
+
+Also add `sort_by=relevant_job_count` as an allowed sort option so
+admins can sort the Companies page by fit.
+
+#### Cleanup
+Forward-only. Backfill naturally on the first deploy when the
+subquery starts returning non-null counts. If denormalising, a
+one-shot `UPDATE companies SET relevant_job_count = sub.cnt FROM
+(SELECT company_id, COUNT(*) cnt FROM jobs WHERE role_cluster IN
+(:relevant) GROUP BY company_id) sub WHERE companies.id =
+sub.company_id;` seeds the column.
 
 ---
 
