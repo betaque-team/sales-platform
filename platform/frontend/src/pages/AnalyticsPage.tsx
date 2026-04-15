@@ -231,7 +231,18 @@ export function AnalyticsPage() {
                       fontSize: "13px",
                     }}
                   />
-                  <Legend />
+                  {/* Regression finding 48: default <Legend /> rendered
+                      the three series labels as one concatenated run
+                      ("New JobsAcceptedRejected") because Tailwind's
+                      preflight resets the default margins Recharts relies
+                      on to space `<li>` items. Supplying a wrapperStyle
+                      with an explicit horizontal gap and a formatter that
+                      pads the text restores readable separation without
+                      replacing the component. */}
+                  <Legend
+                    wrapperStyle={{ paddingTop: 8, display: "flex", justifyContent: "center", gap: 16 }}
+                    formatter={(v) => <span style={{ marginLeft: 4, marginRight: 4 }}>{v}</span>}
+                  />
                   <Line
                     type="monotone"
                     dataKey="total"
