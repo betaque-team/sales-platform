@@ -12,6 +12,7 @@ from app.workers.celery_app import celery_app
 from app.workers.tasks._db import SyncSession
 from app.models.discovery import DiscoveryRun, DiscoveredCompany
 from app.models.company import Company, CompanyATSBoard
+from app.utils.scan_lock import release_scan_lock
 
 logger = logging.getLogger(__name__)
 
@@ -450,3 +451,8 @@ def discover_and_add_boards(self):
         raise self.retry(exc=e, countdown=300)
     finally:
         session.close()
+        # Finding 82: release the discovery lock acquired by
+        # POST /platforms/scan/discover. 2-hour TTL safety valve
+        # covers the slow-probe case; explicit release handles the
+        # normal (successful / failed / retried) path.
+        release_scan_lock("discover")

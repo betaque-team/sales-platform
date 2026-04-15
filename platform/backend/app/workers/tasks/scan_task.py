@@ -17,6 +17,7 @@ from app.models.company import Company, CompanyATSBoard
 from app.models.job import Job, JobDescription
 from app.models.scan import ScanLog
 from app.utils.company_name import looks_like_junk_company_name
+from app.utils.scan_lock import release_scan_lock
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +359,10 @@ def scan_all_platforms(self):
         raise self.retry(exc=e, countdown=60)
     finally:
         session.close()
+        # Finding 82: release the Redis concurrency lock acquired by
+        # POST /platforms/scan/all. Runs on success, failure, and retry
+        # so back-to-back scans are possible once this one finishes.
+        release_scan_lock("all")
 
 
 @celery_app.task(name="app.workers.tasks.scan_task.scan_platform", bind=True, max_retries=2)
@@ -424,6 +429,9 @@ def scan_platform(self, platform_name: str):
         raise self.retry(exc=e, countdown=60)
     finally:
         session.close()
+        # Finding 82: release the per-platform lock. Scoped by name so
+        # different platforms can scan in parallel.
+        release_scan_lock(f"platform:{platform_name}")
 
 
 @celery_app.task(name="app.workers.tasks.scan_task.scan_single_board", bind=True, max_retries=2)
@@ -479,6 +487,10 @@ def scan_single_board(self, board_id: str):
         raise self.retry(exc=e, countdown=60)
     finally:
         session.close()
+        # Finding 82: release the per-board lock. Short 5-min TTL means
+        # even if this finally is bypassed (process kill), the lock
+        # self-heals quickly.
+        release_scan_lock(f"board:{board_id}")
 
 
 @celery_app.task(name="app.workers.tasks.scan_task.scan_single_company", bind=True, max_retries=2)
