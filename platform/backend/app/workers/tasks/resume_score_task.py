@@ -13,6 +13,7 @@ from app.models.resume import Resume, ResumeScore
 from app.models.job import Job, JobDescription
 from app.models.role_config import RoleClusterConfig
 from app.models.user import User
+from app.utils.job_description import extract_description
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,28 @@ def score_resume_task(self, resume_id: str):
 
         # Score each job
         scored = 0
+        fallback_used = 0
         for i, job in enumerate(jobs):
             desc_text = descriptions.get(job.id, "")
+
+            # Regression finding 97: historical rows are missing a
+            # JobDescription row entirely (the scan pipeline never wrote
+            # them — fixed prospectively by the scan_task edit in this
+            # commit). Until the next scan cycle re-upserts those rows,
+            # fall back to extracting text straight from Job.raw_json so
+            # resume scoring actually has something to keyword-match
+            # against. Without this, the first run after deploy would
+            # still produce the "4 distinct values across 600+ jobs"
+            # failure mode. The fallback cost is one `extract_description`
+            # call per empty row — same per-platform key mapping used by
+            # the scan task, so results are consistent.
+            if not desc_text:
+                _, fallback_text = extract_description(
+                    job.platform or "", job.raw_json or {}
+                )
+                if fallback_text:
+                    desc_text = fallback_text
+                    fallback_used += 1
 
             result = compute_ats_score(
                 resume_text=resume.text_content,
@@ -110,7 +131,11 @@ def score_resume_task(self, resume_id: str):
                 session.flush()
 
         session.commit()
-        return {"jobs_scored": scored, "total": total}
+        logger.info(
+            "score_resume_task: resume=%s total=%d scored=%d raw_json_fallback=%d",
+            resume_id, total, scored, fallback_used,
+        )
+        return {"jobs_scored": scored, "total": total, "raw_json_fallback": fallback_used}
 
     except Exception as exc:
         session.rollback()
