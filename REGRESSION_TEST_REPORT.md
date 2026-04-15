@@ -115,6 +115,7 @@ one place.
 | 55 | 🟡 | Applications | **Applications stat cards cover only 4 of the 8 filter statuses.** Filter tabs: `All · Prepared · Submitted · Applied · Interview · Offer · Rejected · Withdrawn`. Stat cards: `Total · Applied · Interview · Offer`. The `Prepared` / `Submitted` (pre-submit states) and `Rejected` / `Withdrawn` (negative outcomes) buckets are invisible in the overview — users only see the happy path. A pipeline that's 80% rejected looks identical to a pipeline that's 80% in-progress until you click each tab | ⬜ open — `ApplicationsPage.tsx`: either (a) collapse the stat-cards into 5 (`Total · In Progress (Prepared+Submitted+Applied+Interview) · Outcomes (Offer+Rejected) · Withdrawn`) so the overview has meaningful aggregates, or (b) render a small progress/funnel visualization that sums all 8. Current 4-card layout hides half the state |
 | 56 | 🟡 | Pipeline | **Kanban cards are not clickable — no navigation to company detail from the pipeline.** On `/pipeline`, company names (`20four7VA`, `Cribl`, `Consensys`, `MoonPay`, `Wolfi (Chainguard)`, `Coreflight (Corelight)`, `Sophos`, `Canonical`, `name`) render as plain `<p class="text-sm font-semibold">`. The card container is a `<div>` with no `role` / `onclick` / `<a>` child. `document.querySelectorAll('main a').length === 0`. Clicking a card is a no-op. Users working the pipeline naturally want to click through to the Company detail (`/companies/{id}`) to review roles or enrich the row — no affordance to do that | ⬜ open — `PipelinePage.tsx` card body: wrap the heading in a `<Link to={`/companies/${card.company_id}`}>`, or make the card itself a link (`<Link>` wraps the whole card, `role="article"`). Keep the two stage-move buttons (Move previous / Move next) as `stopPropagation` so clicking them doesn't also fire the card click |
 | 57 | 🔵 | Pipeline / UX | **Kanban has no drag-and-drop; stage changes require per-card button clicks.** Each card has two icon-only buttons (`Move to previous stage`, `Move to next stage`) with `title` attribute (same `title` vs `aria-label` issue as Finding #45). Moving a card from `New Lead` → `Engaged` takes 4 forward-clicks per card. There are 10 cards in pipeline today, which stays manageable; at 50+ cards the friction shows. Not a functional bug but a common kanban affordance users will expect | ⬜ open (optional) — `PipelinePage.tsx`: add HTML5 drag-drop (`draggable="true"`, `onDragStart` / `onDragOver` / `onDrop` handlers) or adopt a small lib like `@dnd-kit/core`. Keep the existing arrow buttons as the accessible fallback — keyboard users can't drag. Emit the same `PATCH /api/v1/pipeline/{id} {stage}` on drop |
+| 58 | 🟡 | Companies | **Company list cards navigate via `div.onClick` instead of `<a>`, breaking standard web-nav affordances; company-detail "Open Roles" is plain text.** On `/companies`, each card is a `<div class="... cursor-pointer group" onClick={…}>` that calls `navigate('/companies/{id}')` — no `<a>` anywhere. Consequences: (a) middle-click and Ctrl/Cmd-click don't open in a new tab, (b) right-click → "Open in new tab" / "Copy link" don't work, (c) keyboard users can't Tab to the card (no `tabindex`), (d) screen readers announce the card as a generic `<div>` not a link. On the company-detail page (`/companies/{id}`) the "Open Roles: 1" metric is plain text — it should link to `/jobs?company_id={id}` so the user can see which roles | ⬜ open — `CompaniesPage.tsx`: replace `<div onClick={() => navigate(path)}>` with `<Link to={path} className="… block">`. If the card has interior controls (the `Pipeline` button), make it `<Link>` with interior buttons calling `e.preventDefault(); e.stopPropagation()`. On `CompanyDetailPage.tsx`, wrap `Open Roles: {n}` in `<Link to={`/jobs?company_id=${company.id}`}>{n} open role{n===1?'':'s'}</Link>` |
 
 ---
 
@@ -1841,6 +1842,72 @@ This is flagged as 🔵 LOW because the current UI works for the current data vo
 
 #### Cleanup
 Read-only.
+
+---
+
+### 58. Company cards use `div.onClick` instead of `<a>`; detail "Open Roles" isn't a link
+**Severity:** 🟡 MEDIUM · **Area:** Companies / Navigation semantics
+
+#### What I saw
+Probed the first card on `/companies`:
+
+```js
+cardClass: "rounded-xl border border-gray-200 bg-white shadow-sm p-6
+            hover:border-primary-300 hover:shadow-md transition-all
+            cursor-pointer group"
+cardInnerHref: null         // no <a> inside
+cardHasOnClick: true        // JS handler present
+cardTag: "DIV"
+```
+
+Clicked the card, location changed to `/companies/425297bc-…`. So navigation works — but via a JS `onClick` instead of a real anchor.
+
+On the resulting `/companies/{id}` detail page: `document.querySelectorAll('main a').length === 0`. The "Open Roles: 1" metric is a plain `<span>` — no link to the matching jobs filtered by this company.
+
+#### Why it matters
+`<div onClick>` masquerading as a link breaks every standard web-nav expectation:
+
+- Middle-click or Cmd/Ctrl-click doesn't open the target in a new tab (users expect to triage companies in tabs).
+- Right-click → "Open link in new tab" / "Copy link address" don't appear in the menu — the div isn't recognised as a link.
+- Keyboard users can't Tab to the card (no `tabindex`, no `role="link"`). Space / Enter does nothing.
+- Screen readers announce "clickable, …" at best; often just the card text with no interactive affordance.
+
+On the detail page, "Open Roles: 1" telling the user there's a role but not letting them click to see it is a dead-end similar to Finding #56.
+
+#### Suggested fix
+`CompaniesPage.tsx`:
+```tsx
+// Before:
+<div onClick={() => navigate(`/companies/${c.id}`)} className="cursor-pointer …">
+  <h3>{c.name}</h3>
+  …
+  <button onClick={onPipelineClick}>Pipeline</button>
+</div>
+
+// After:
+<Link to={`/companies/${c.id}`} className="block rounded-xl border … hover:border-primary-300">
+  <h3>{c.name}</h3>
+  …
+  <button
+    onClick={(e) => { e.preventDefault(); e.stopPropagation(); onPipelineClick(); }}
+  >Pipeline</button>
+</Link>
+```
+
+`CompanyDetailPage.tsx` overview grid:
+```tsx
+<div>
+  <span className="text-sm text-gray-500">Open Roles</span>
+  <Link to={`/jobs?company_id=${company.id}`} className="text-2xl font-semibold hover:underline">
+    {company.open_roles.toLocaleString()}
+  </Link>
+</div>
+```
+
+Same applies to "Enriched", "Accepted", etc. if any of those have a corresponding filtered view.
+
+#### Cleanup
+Read-only. Clicking the first card navigated to the detail page; hitting Back returned to the list. No mutations.
 
 ---
 
