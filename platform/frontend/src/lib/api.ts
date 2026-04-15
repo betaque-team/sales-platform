@@ -384,6 +384,10 @@ export async function getSystemHealth(): Promise<any> {
   return request<any>("/monitoring");
 }
 
+export async function getVmHealth(): Promise<import("./types").VmMetrics> {
+  return request<import("./types").VmMetrics>("/monitoring/vm");
+}
+
 // Resume
 export async function uploadResume(file: File, label?: string): Promise<Resume> {
   const formData = new FormData();

@@ -46,4 +46,3 @@ services:
   certbot:
     profiles:
       - disabled
-

@@ -21,8 +21,10 @@ import {
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
+import { VmHealthPanel } from "@/components/VmHealthPanel";
 import {
   getSystemHealth,
+  getVmHealth,
   triggerFullScan,
   triggerPlatformScanByName,
   triggerDiscoveryScan,
@@ -117,6 +119,15 @@ export function MonitoringPage() {
     queryKey: ["monitoring"],
     queryFn: getSystemHealth,
     refetchInterval: 30000,
+  });
+
+  // VM host-metrics (live, polls every 30s). If the backend can't read the
+  // host snapshot (dev/CI), the panel renders a graceful "unavailable" card.
+  const { data: vmData } = useQuery({
+    queryKey: ["monitoring-vm"],
+    queryFn: getVmHealth,
+    refetchInterval: 30000,
+    retry: false,
   });
 
   const [activeScan, setActiveScan] = useState<{
@@ -225,6 +236,10 @@ export function MonitoringPage() {
           Uptime: {formatUptime(d.uptime_seconds)}
         </span>
       </div>
+
+      {/* VM host monitoring + Oracle Always-Free guardrails (top of page so the
+          banner is the first thing seen when something drifts toward billing) */}
+      <VmHealthPanel data={vmData} />
 
       {/* Scan Controls */}
       <Card>
