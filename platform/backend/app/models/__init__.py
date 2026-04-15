@@ -17,6 +17,7 @@ from app.models.company_contact import CompanyContact, JobContactRelevance
 from app.models.company_office import CompanyOffice
 from app.models.feedback import Feedback
 from app.models.pipeline_stage import PipelineStage
+from app.models.audit_log import AuditLog
 
 __all__ = [
     "User", "Company", "CompanyATSBoard", "Job", "JobDescription",
@@ -28,4 +29,5 @@ __all__ = [
     "CompanyContact", "JobContactRelevance", "CompanyOffice",
     "Feedback",
     "PipelineStage",
+    "AuditLog",
 ]

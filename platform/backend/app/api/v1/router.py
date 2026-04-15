@@ -5,7 +5,7 @@ from app.api.v1 import (
     auth, jobs, reviews, pipeline, analytics,
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
-    alerts, cover_letter, interview_prep, intelligence,
+    alerts, cover_letter, interview_prep, intelligence, audit,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -33,3 +33,4 @@ api_router.include_router(alerts.router)
 api_router.include_router(cover_letter.router)
 api_router.include_router(interview_prep.router)
 api_router.include_router(intelligence.router)
+api_router.include_router(audit.router)

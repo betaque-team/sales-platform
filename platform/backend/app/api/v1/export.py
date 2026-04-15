@@ -2,7 +2,7 @@
 
 import csv
 import io
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.models.company_contact import CompanyContact
 from app.models.pipeline import PotentialClient
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
+from app.utils.audit import log_action
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -24,7 +25,22 @@ router = APIRouter(prefix="/export", tags=["export"])
 # Gate on admin until product decides whether reviewers should also get
 # export access; easier to loosen later than to claw data back after a
 # compromised viewer account has already dumped it.
+#
+# Second-half of the defense (same finding): every successful export
+# now writes an `audit_logs` row via `log_action` below. Role-gate
+# blocks the casual-viewer case; audit log catches the compromised-
+# admin case where the role-gate passes but we want a forensic trail.
 _EXPORT_ROLE_GUARD = require_role("admin")
+
+
+def _prune_none(d: dict) -> dict:
+    """Return a copy of `d` with None values removed.
+
+    Used to keep audit-log `metadata_json.filters` tight — we only
+    record filters that the caller actually applied, so the row is
+    self-describing and not cluttered with default-None slots.
+    """
+    return {k: v for k, v in d.items() if v is not None}
 
 JOB_CSV_COLUMNS = [
     "company", "title", "url", "platform", "remote_scope",
@@ -61,6 +77,7 @@ def _iter_csv(rows: list[list[str]], columns: list[str]):
 
 @router.get("/jobs")
 async def export_jobs(
+    request: Request,
     status: str | None = None,
     platform: str | None = None,
     geography_bucket: str | None = None,
@@ -105,6 +122,24 @@ async def export_jobs(
             str(j.first_seen_at),
         ])
 
+    # Audit trail for finding 61. Written BEFORE the StreamingResponse
+    # so the row is durable even if the client disconnects mid-stream.
+    await log_action(
+        db, user,
+        action="export.jobs",
+        resource="jobs",
+        request=request,
+        metadata={
+            "row_count": len(rows),
+            "filters": _prune_none({
+                "status": status,
+                "platform": platform,
+                "geography_bucket": geography_bucket,
+                "role_cluster": role_cluster,
+            }),
+        },
+    )
+
     return StreamingResponse(
         _iter_csv(rows, JOB_CSV_COLUMNS),
         media_type="text/csv",
@@ -114,6 +149,7 @@ async def export_jobs(
 
 @router.get("/pipeline")
 async def export_pipeline(
+    request: Request,
     stage: str | None = None,
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
@@ -144,6 +180,18 @@ async def export_pipeline(
             str(c.created_at),
         ])
 
+    # Audit trail for finding 61.
+    await log_action(
+        db, user,
+        action="export.pipeline",
+        resource="pipeline",
+        request=request,
+        metadata={
+            "row_count": len(rows),
+            "filters": _prune_none({"stage": stage}),
+        },
+    )
+
     return StreamingResponse(
         _iter_csv(rows, PIPELINE_CSV_COLUMNS),
         media_type="text/csv",
@@ -168,6 +216,7 @@ CONTACT_CSV_COLUMNS = [
 
 @router.get("/contacts")
 async def export_contacts(
+    request: Request,
     role_category: str | None = None,
     outreach_status: str | None = None,
     has_email: bool | None = None,
@@ -218,6 +267,25 @@ async def export_contacts(
             str(contact.confidence_score),
             str(contact.created_at),
         ])
+
+    # Audit trail for finding 61. Contacts is the most sensitive of
+    # the three exports (3756-row prospect list with email/outreach
+    # metadata) — the primary reason the finding was filed.
+    await log_action(
+        db, user,
+        action="export.contacts",
+        resource="contacts",
+        request=request,
+        metadata={
+            "row_count": len(rows),
+            "filters": _prune_none({
+                "role_category": role_category,
+                "outreach_status": outreach_status,
+                "has_email": has_email,
+                "is_decision_maker": is_decision_maker,
+            }),
+        },
+    )
 
     return StreamingResponse(
         _iter_csv(rows, CONTACT_CSV_COLUMNS),
