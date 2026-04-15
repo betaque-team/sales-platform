@@ -1,6 +1,25 @@
 from pydantic import BaseModel, computed_field
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
+
+
+# Regression finding 99: before this tuple existed, `BulkActionRequest.action`
+# and `JobStatusUpdate.status` were typed `str` with a throwaway comment,
+# which let an admin persist any garbage string (`"BOGUS_STATUS_XYZ"`,
+# `"reset"`, typos). 25 prod rows already landed in a bogus `"reset"`
+# state and quietly fell off `?status=new` queries, under-counting the
+# review queue. Kept as a module-level tuple so the API layer and the
+# cleanup script (`app.cleanup_job_status`) share one source of truth.
+JOB_STATUS_VALUES = (
+    "new",
+    "under_review",
+    "accepted",
+    "rejected",
+    "hidden",
+    "archived",
+)
+JobStatusLiteral = Literal["new", "under_review", "accepted", "rejected", "hidden", "archived"]
 
 
 class JobOut(BaseModel):
@@ -79,9 +98,12 @@ class JobDescriptionOut(BaseModel):
 
 
 class JobStatusUpdate(BaseModel):
-    status: str
+    # Restricted to the documented status vocabulary (see JOB_STATUS_VALUES).
+    # FastAPI returns a 422 with the allowed values if a client sends
+    # something else — no more silent persistence of typos / unknown states.
+    status: JobStatusLiteral
 
 
 class BulkActionRequest(BaseModel):
     job_ids: list[UUID]
-    action: str  # accepted | rejected | archived
+    action: JobStatusLiteral
