@@ -11,10 +11,19 @@ import {
   Box,
   GitCommit,
   Info,
+  Activity,
+  Flame,
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
-import type { VmMetrics, VmMetricsAvailable, VmGuardrail } from "@/lib/types";
+import type {
+  VmMetrics,
+  VmMetricsAvailable,
+  VmGuardrail,
+  VmContainerStat,
+  VmTopProcess,
+  VmMount,
+} from "@/lib/types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -199,6 +208,168 @@ function ContainerList({ containers }: { containers: VmMetricsAvailable["contain
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function ContainerStatsCard({ stats }: { stats: VmContainerStat[] }) {
+  if (!stats || stats.length === 0) return null;
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <Activity className="h-4 w-4 text-gray-400" />
+        <span className="text-xs font-semibold text-gray-500">Per-container resources</span>
+        <span className="text-xs text-gray-400">(docker stats)</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-100 text-left text-gray-500">
+              <th className="pb-1.5 pr-3 font-semibold">Container</th>
+              <th className="pb-1.5 pr-3 font-semibold">CPU</th>
+              <th className="pb-1.5 pr-3 font-semibold">Memory</th>
+              <th className="pb-1.5 pr-3 font-semibold">Net I/O</th>
+              <th className="pb-1.5 font-semibold">Block I/O</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((c) => {
+              const memTone = c.memory_percent >= 90 ? "text-red-700" : c.memory_percent >= 75 ? "text-amber-700" : "text-gray-700";
+              const cpuTone = c.cpu_percent >= 90 ? "text-red-700" : c.cpu_percent >= 60 ? "text-amber-700" : "text-gray-700";
+              return (
+                <tr key={c.name} className="border-b border-gray-50 last:border-0">
+                  <td className="py-1.5 pr-3 font-mono text-gray-800">{c.name}</td>
+                  <td className={`py-1.5 pr-3 font-semibold ${cpuTone}`}>{c.cpu_percent.toFixed(1)}%</td>
+                  <td className={`py-1.5 pr-3 font-semibold ${memTone}`}>
+                    {c.memory_percent.toFixed(1)}%
+                    <span className="ml-1 font-normal text-gray-400">{c.memory_usage}</span>
+                  </td>
+                  <td className="py-1.5 pr-3 font-mono text-gray-600">{c.net_io}</td>
+                  <td className="py-1.5 font-mono text-gray-600">{c.block_io}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function TopProcessesTable({ title, procs }: { title: string; procs: VmTopProcess[] }) {
+  if (!procs || procs.length === 0) return null;
+  return (
+    <div>
+      <p className="mb-1.5 text-xs font-semibold text-gray-500">{title}</p>
+      <div className="space-y-1">
+        {procs.map((p) => (
+          <div
+            key={`${p.pid}-${p.command}`}
+            className="flex items-center justify-between rounded border border-gray-100 bg-gray-50 px-2.5 py-1 text-xs"
+          >
+            <span className="truncate font-mono text-gray-700">
+              <span className="text-gray-400">#{p.pid}</span> {p.command}
+              <span className="ml-1 text-gray-400">({p.user})</span>
+            </span>
+            <span className="shrink-0 pl-2 font-semibold text-gray-800">
+              {p.cpu_percent.toFixed(1)}% · {p.memory_percent.toFixed(1)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DiskDeepDive({
+  mounts,
+  inodeTotal,
+  inodeUsed,
+  inodeUsedPercent,
+  breakdown,
+}: {
+  mounts?: VmMount[];
+  inodeTotal?: number;
+  inodeUsed?: number;
+  inodeUsedPercent?: number;
+  breakdown?: { docker_bytes: number | null; backups_bytes: number | null; logs_bytes: number | null };
+}) {
+  const hasMounts = (mounts?.length ?? 0) > 0;
+  const hasInode = inodeUsedPercent !== undefined;
+  const hasBreakdown = breakdown && (
+    breakdown.docker_bytes !== null || breakdown.backups_bytes !== null || breakdown.logs_bytes !== null
+  );
+  if (!hasMounts && !hasInode && !hasBreakdown) return null;
+  return (
+    <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <HardDrive className="h-4 w-4 text-gray-400" />
+        <span className="text-xs font-semibold text-gray-500">Storage deep-dive</span>
+      </div>
+
+      {hasInode && (
+        <div className="mb-3">
+          <UsageBar
+            label="Inodes (disk full even when bytes aren't)"
+            used={inodeUsed ?? 0}
+            total={inodeTotal ?? 1}
+            formatValue={(v) => v.toLocaleString()}
+            severity={
+              (inodeUsedPercent ?? 0) >= 95 ? "critical"
+              : (inodeUsedPercent ?? 0) >= 80 ? "warn"
+              : "ok"
+            }
+          />
+        </div>
+      )}
+
+      {hasMounts && (
+        <div className="mb-3">
+          <p className="mb-1.5 text-xs font-semibold text-gray-500">Mounts</p>
+          <div className="space-y-1.5">
+            {mounts!.map((m) => (
+              <div
+                key={m.mount}
+                className="flex items-center justify-between rounded border border-gray-100 bg-white px-2.5 py-1 text-xs"
+              >
+                <span className="truncate font-mono text-gray-700">{m.mount}</span>
+                <span className="shrink-0 pl-2 text-gray-600">
+                  {formatBytes(m.used_bytes)} / {formatBytes(m.total_bytes)}
+                  <span className={`ml-1.5 font-semibold ${
+                    m.used_percent >= 95 ? "text-red-700"
+                    : m.used_percent >= 85 ? "text-amber-700"
+                    : "text-gray-800"
+                  }`}>
+                    {m.used_percent.toFixed(0)}%
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasBreakdown && (
+        <div>
+          <p className="mb-1.5 text-xs font-semibold text-gray-500">By directory</p>
+          <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
+            <BreakdownTile label="/var/lib/docker" bytes={breakdown!.docker_bytes} />
+            <BreakdownTile label="/opt/.../backups" bytes={breakdown!.backups_bytes} />
+            <BreakdownTile label="/var/log" bytes={breakdown!.logs_bytes} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BreakdownTile({ label, bytes }: { label: string; bytes: number | null }) {
+  return (
+    <div className="rounded border border-gray-100 bg-white px-2.5 py-1.5 text-xs">
+      <p className="truncate text-gray-500" title={label}>{label}</p>
+      <p className="font-semibold text-gray-800">
+        {bytes !== null ? formatBytes(bytes) : <span className="text-gray-400">—</span>}
+      </p>
     </div>
   );
 }
@@ -389,6 +560,45 @@ export function VmHealthPanel({ data }: { data: VmMetrics | undefined }) {
             )}
           </div>
         </div>
+
+        {/* ── Per-container resources (docker stats) ── */}
+        {d.container_stats?.length > 0 && (
+          <div className="mb-5">
+            <ContainerStatsCard stats={d.container_stats} />
+          </div>
+        )}
+
+        {/* ── Top processes (CPU + memory hogs) ── */}
+        {(d.top_processes?.by_cpu?.length > 0 || d.top_processes?.by_memory?.length > 0) && (
+          <div className="mb-5 rounded-lg border border-gray-100 bg-gray-50 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <Flame className="h-4 w-4 text-gray-400" />
+              <span className="text-xs font-semibold text-gray-500">Top processes</span>
+              {d.oom_kills_1h > 0 && (
+                <Badge variant="danger" className="ml-auto">
+                  {d.oom_kills_1h} OOM kill{d.oom_kills_1h === 1 ? "" : "s"} in last 1h
+                </Badge>
+              )}
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <TopProcessesTable title="By CPU" procs={d.top_processes.by_cpu} />
+              <TopProcessesTable title="By memory" procs={d.top_processes.by_memory} />
+            </div>
+          </div>
+        )}
+
+        {/* ── Storage deep-dive (inodes, all mounts, directory breakdown) ── */}
+        {(d.disk.mounts || d.disk.inode_used_percent !== undefined || d.disk.breakdown) && (
+          <div className="mb-5">
+            <DiskDeepDive
+              mounts={d.disk.mounts}
+              inodeTotal={d.disk.inode_total}
+              inodeUsed={d.disk.inode_used}
+              inodeUsedPercent={d.disk.inode_used_percent}
+              breakdown={d.disk.breakdown}
+            />
+          </div>
+        )}
 
         {/* ── Containers + Network ── */}
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">

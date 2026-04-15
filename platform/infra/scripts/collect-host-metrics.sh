@@ -96,6 +96,42 @@ disk_total="${df_root%%,*}"; rest="${df_root#*,}"
 disk_used="${rest%%,*}";     disk_avail="${rest#*,}"
 disk_total="${disk_total:-0}"; disk_used="${disk_used:-0}"; disk_avail="${disk_avail:-0}"
 
+# Inode usage on root — rare but deadly (disk shows free space but no new files)
+inode_line=$(df -i / 2>/dev/null | awk 'NR==2 {print $2","$3","$5}')
+inode_total="${inode_line%%,*}"; rest="${inode_line#*,}"
+inode_used="${rest%%,*}";        inode_used_pct_raw="${rest#*,}"
+inode_total="${inode_total:-0}"; inode_used="${inode_used:-0}"
+inode_used_pct="${inode_used_pct_raw%%%*}"   # strip trailing %
+inode_used_pct="${inode_used_pct:-0}"
+
+# All non-virtual mounts (for free-tier cap tracking across any attached
+# block volumes). Filters tmpfs/devtmpfs/overlay/squashfs so we only see
+# real storage that counts against the 200 GB Oracle Always-Free cap.
+mounts_tmp=$(mktemp); trap 'rm -f "$mounts_tmp" "${tmp_if:-}"' EXIT
+df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x none 2>/dev/null \
+  | awk 'NR>1 && NF>=6 {
+      used_pct=$5; gsub(/%/, "", used_pct);
+      printf "{\"mount\":\"%s\",\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"used_percent\":%s}\n", $6,$2,$3,$4,used_pct
+    }' > "$mounts_tmp"
+mounts_json="[]"
+[[ -s "$mounts_tmp" ]] && mounts_json=$(jq -s '.' "$mounts_tmp" 2>/dev/null || echo "[]")
+
+# Disk breakdown (time-bounded — du can be slow on huge trees).
+# Returns bare int (bytes) or literal `null` safe for JSON.
+path_size_bytes() {
+  local p="$1"
+  if [[ -d "$p" ]]; then
+    local v
+    v=$(timeout 10 du -sb "$p" 2>/dev/null | awk '{print $1}')
+    [[ -n "$v" ]] && echo "$v" || echo "null"
+  else
+    echo "null"
+  fi
+}
+du_docker=$(path_size_bytes /var/lib/docker)
+du_backups=$(path_size_bytes "${BACKUPS_DIR}")
+du_logs=$(path_size_bytes /var/log)
+
 # ── Cloudflared ──────────────────────────────────────────────────────────────
 cf_pid=$(pgrep -x cloudflared 2>/dev/null | head -1 || true)
 cf_running="false"
@@ -143,6 +179,55 @@ if command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
         status: .Status,
         started_at: .CreatedAt
       })' 2>/dev/null || echo "[]")
+fi
+
+# ── Per-container resources (docker stats) ───────────────────────────────────
+# docker stats --no-stream takes a single snapshot; shows running containers
+# only. Raw values are strings like "123MiB / 1GiB"; backend parses them.
+# timeout 10 guards against docker daemon hangs (would otherwise stall cron).
+container_stats_json="[]"
+if command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  ds_raw=$(timeout 10 docker stats --no-stream --format '{{json .}}' 2>/dev/null || true)
+  if [[ -n "$ds_raw" ]]; then
+    container_stats_json=$(echo "$ds_raw" | jq -s 'map({
+        name: .Name,
+        cpu_percent: ((.CPUPerc | rtrimstr("%") | tonumber?) // 0),
+        memory_percent: ((.MemPerc | rtrimstr("%") | tonumber?) // 0),
+        memory_usage: .MemUsage,
+        net_io: .NetIO,
+        block_io: .BlockIO,
+        pids: ((.PIDs | tonumber?) // 0)
+      })' 2>/dev/null || echo "[]")
+  fi
+fi
+
+# ── Top processes by CPU + memory (5 hogs each) ─────────────────────────────
+# Surfaces the "what's hot right now" view when something drifts. `ps comm=`
+# prints just the executable basename; full cmdline is in /proc/<pid>/cmdline
+# if you need more — kept short for UI.
+build_top_procs() {
+  local sort_key="$1"  # -pcpu or -pmem
+  ps -eo pid,user,pcpu,pmem,comm --sort="$sort_key" --no-headers 2>/dev/null \
+    | head -5 \
+    | awk '{
+        # escape backslashes + quotes in comm (column 5)
+        cmd=$5; gsub(/\\/, "\\\\", cmd); gsub(/"/, "\\\"", cmd);
+        printf "{\"pid\":%s,\"user\":\"%s\",\"cpu_percent\":%s,\"memory_percent\":%s,\"command\":\"%s\"}\n", $1, $2, $3, $4, cmd
+      }' \
+    | jq -s '.' 2>/dev/null || echo "[]"
+}
+top_cpu_json=$(build_top_procs -pcpu)
+top_mem_json=$(build_top_procs -pmem)
+
+# ── OOM kills in the last hour (journalctl kernel log) ───────────────────────
+# Detects `oom-kill` or `Killed process <pid>` emitted by the Linux OOM killer.
+# Zero on a healthy system; anything > 0 = memory pressure event worth a look.
+oom_kills_1h=0
+if command -v journalctl >/dev/null 2>&1; then
+  oom_kills_1h=$(journalctl -k --since "1 hour ago" --no-pager 2>/dev/null \
+    | grep -Eic "(killed process|oom-kill)" || echo 0)
+  # guard against grep returning no-match exit code tainting the value
+  [[ "$oom_kills_1h" =~ ^[0-9]+$ ]] || oom_kills_1h=0
 fi
 
 # ── Last deploy ──────────────────────────────────────────────────────────────
@@ -196,8 +281,23 @@ cat > "$TMP" <<EOF
     "mount": "/",
     "total_bytes": ${disk_total},
     "used_bytes": ${disk_used},
-    "available_bytes": ${disk_avail}
+    "available_bytes": ${disk_avail},
+    "inode_total": ${inode_total},
+    "inode_used": ${inode_used},
+    "inode_used_percent": ${inode_used_pct},
+    "mounts": ${mounts_json},
+    "breakdown": {
+      "docker_bytes": ${du_docker},
+      "backups_bytes": ${du_backups},
+      "logs_bytes": ${du_logs}
+    }
   },
+  "container_stats": ${container_stats_json},
+  "top_processes": {
+    "by_cpu": ${top_cpu_json},
+    "by_memory": ${top_mem_json}
+  },
+  "oom_kills_1h": ${oom_kills_1h},
   "cloudflared": {
     "running": ${cf_running},
     "pid": ${cf_pid_json},

@@ -155,15 +155,24 @@ severity (`critical`, `warn`, `info`) and the overall status is the max.
 |---|---|---|
 | `keepalive` | critical | no `keepalive: burst completed` in journal in 13h (two missed runs) |
 | `keepalive` | warn | > 7h since last run (one missed run) |
-| `disk_free_tier` | critical | block storage used > 95% of 200 GB cap |
-| `disk_free_tier` | warn | block storage used > 80% of 200 GB cap |
-| `disk_fs` | critical | root filesystem > 95% full (different from free-tier cap) |
-| `egress` | critical | projected monthly tx > 95% of 10 TB cap |
-| `egress` | warn | projected monthly tx > 80% of 10 TB cap |
+| `disk_free_tier` | critical | block storage used (sum of all mounts) > 95% of 200 GB cap |
+| `disk_free_tier` | warn | block storage used (sum of all mounts) > 80% of 200 GB cap |
+| `disk_fs` | critical | root filesystem > 95% full (separate from free-tier cap) |
+| `mount:*` | critical / warn | any non-root mount > 95% / > 85% full |
+| `inodes` | critical / warn | inode usage > 95% / > 80% (disk has space but no new files) |
+| `oom_kills` | critical | kernel OOM killer fired in the last hour (memory pressure event) |
+| `container_mem:*` | warn | any running container at ≥ 90% of its memory limit (OOM imminent) |
+| `egress` | critical / warn | projected monthly tx > 95% / > 80% of 10 TB cap |
 | `cloudflared` | critical | tunnel process not running (site unreachable) |
 | `cloudflared_connections` | warn | tunnel has < 2 edge connections (HA pair expects 4) |
 | `container:*` | critical | any container in a non-running state |
 | `metrics_snapshot` | warn | snapshot file older than 5 min (cron failing) |
+
+### What the panel surfaces beyond the banner
+
+- **Per-container resources** (`docker stats`): live CPU%, mem% + raw usage ("465MiB / 1024MiB"), net I/O, block I/O, PID count per container.
+- **Top 5 processes by CPU + top 5 by memory**: catches a runaway worker or a stuck cron. Also shows OOM-kill count if any.
+- **Storage deep-dive**: inode bar, all mount points with per-mount fill %, and `/var/lib/docker` + backups + `/var/log` byte breakdown.
 
 Egress projection assumes uniform traffic since boot — pessimistic during
 traffic spikes, reasonable as a floor. After 30 days of uptime the projection

@@ -794,6 +794,32 @@ export interface VmContainer {
   started_at: string;
 }
 
+export interface VmContainerStat {
+  name: string;
+  cpu_percent: number;
+  memory_percent: number;
+  memory_usage: string;  // raw "123MiB / 1GiB" from docker stats
+  net_io: string;        // raw "1.5MB / 2.3MB"
+  block_io: string;      // raw "100kB / 0B"
+  pids: number;
+}
+
+export interface VmTopProcess {
+  pid: number;
+  user: string;
+  cpu_percent: number;
+  memory_percent: number;
+  command: string;
+}
+
+export interface VmMount {
+  mount: string;
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+  used_percent: number;
+}
+
 export interface VmLastDeploy {
   release: string;
   previous: string | null;
@@ -846,6 +872,15 @@ export interface VmMetricsAvailable {
     available_bytes: number;
     used_percent: number;
     free_tier_used_percent: number;
+    inode_total?: number;
+    inode_used?: number;
+    inode_used_percent?: number;
+    mounts?: VmMount[];
+    breakdown?: {
+      docker_bytes: number | null;
+      backups_bytes: number | null;
+      logs_bytes: number | null;
+    };
   };
   cloudflared: {
     running: boolean;
@@ -858,6 +893,12 @@ export interface VmMetricsAvailable {
     seconds_since: number | null;
   };
   containers: VmContainer[];
+  container_stats: VmContainerStat[];
+  top_processes: {
+    by_cpu: VmTopProcess[];
+    by_memory: VmTopProcess[];
+  };
+  oom_kills_1h: number;
   last_deploy: VmLastDeploy | null;
   backups: {
     count: number;

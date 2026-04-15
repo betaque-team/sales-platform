@@ -38,6 +38,11 @@ _EGRESS_PCT_CRIT = 95.0
 _KEEPALIVE_AGE_WARN_SECONDS = 7 * 3600   # expected every 6h; 7h = missed run
 _KEEPALIVE_AGE_CRIT_SECONDS = 13 * 3600  # two missed runs
 _CONTAINER_HEALTHY_STATES = {"running"}
+_INODE_PCT_WARN = 80.0
+_INODE_PCT_CRIT = 95.0
+_MOUNT_PCT_WARN = 85.0
+_MOUNT_PCT_CRIT = 95.0
+_CONTAINER_MEM_PCT_WARN = 90.0   # running container vs its memory limit
 
 
 def _read_host_metrics() -> dict[str, Any]:
@@ -122,33 +127,96 @@ def _evaluate_guardrails(snapshot: dict[str, Any]) -> list[dict[str, str]]:
             "message": f"Keepalive last ran {ka_seconds // 3600}h ago (expected every 6h). Check cron.",
         })
 
-    # ── disk vs free-tier cap ─────────────────────────────────────────────
+    # ── disk vs free-tier cap (sums ALL block-storage mounts, not just /) ──
     disk = snapshot.get("disk") or {}
-    total = disk.get("total_bytes") or 0
-    used = disk.get("used_bytes") or 0
-    if total:
-        used_pct = used * 100 / total
-        free_tier_pct = used * 100 / (FREE_TIER["max_disk_gb"] * 1024**3)
+    mounts = disk.get("mounts") or []
+    # If the collector populated `mounts`, trust that as the canonical sum of
+    # all block-storage (docker volumes, attached block vols, etc.).
+    # Otherwise fall back to the root-fs figure so we degrade gracefully.
+    total_used = sum((m.get("used_bytes") or 0) for m in mounts) if mounts else (disk.get("used_bytes") or 0)
+    root_total = disk.get("total_bytes") or 0
+    root_used = disk.get("used_bytes") or 0
+    if root_total or total_used:
+        free_tier_pct = total_used * 100 / (FREE_TIER["max_disk_gb"] * 1024**3)
         if free_tier_pct >= _DISK_PCT_CRIT:
             alerts.append({
                 "name": "disk_free_tier",
                 "severity": "critical",
                 "message": (
-                    f"Disk usage is {free_tier_pct:.1f}% of the 200 GB free-tier cap. "
-                    "Any additional block storage will be billed."
+                    f"Block storage usage is {free_tier_pct:.1f}% of the 200 GB free-tier cap. "
+                    "Any additional storage will be billed."
                 ),
             })
         elif free_tier_pct >= _DISK_PCT_WARN:
             alerts.append({
                 "name": "disk_free_tier",
                 "severity": "warn",
-                "message": f"Disk usage is {free_tier_pct:.1f}% of the 200 GB free-tier cap. Consider pruning backups/images.",
+                "message": f"Block storage usage is {free_tier_pct:.1f}% of the 200 GB free-tier cap. Consider pruning backups/images.",
             })
-        elif used_pct >= _DISK_PCT_CRIT:
+        if root_total:
+            root_used_pct = root_used * 100 / root_total
+            if root_used_pct >= _DISK_PCT_CRIT:
+                alerts.append({
+                    "name": "disk_fs",
+                    "severity": "critical",
+                    "message": f"Root filesystem is {root_used_pct:.1f}% full. Free up space or the VM will stop writing.",
+                })
+
+    # ── per-mount fill warnings (separate mounts can fill independently) ──
+    for m in mounts:
+        mnt = m.get("mount") or "?"
+        used_pct = m.get("used_percent") or 0
+        if mnt == "/":
+            continue  # already covered above
+        if used_pct >= _MOUNT_PCT_CRIT:
             alerts.append({
-                "name": "disk_fs",
+                "name": f"mount:{mnt}",
                 "severity": "critical",
-                "message": f"Root filesystem is {used_pct:.1f}% full. Free up space or the VM will stop writing.",
+                "message": f"Mount {mnt} is {used_pct:.0f}% full.",
+            })
+        elif used_pct >= _MOUNT_PCT_WARN:
+            alerts.append({
+                "name": f"mount:{mnt}",
+                "severity": "warn",
+                "message": f"Mount {mnt} is {used_pct:.0f}% full.",
+            })
+
+    # ── inode exhaustion (disk has space, can't create files) ────────────
+    inode_pct = disk.get("inode_used_percent")
+    if inode_pct is not None:
+        if inode_pct >= _INODE_PCT_CRIT:
+            alerts.append({
+                "name": "inodes",
+                "severity": "critical",
+                "message": f"Inode usage is {inode_pct:.0f}% — disk has space but no new files can be created.",
+            })
+        elif inode_pct >= _INODE_PCT_WARN:
+            alerts.append({
+                "name": "inodes",
+                "severity": "warn",
+                "message": f"Inode usage is {inode_pct:.0f}% — watch for small-file growth.",
+            })
+
+    # ── OOM kills in the last hour (kernel killed a process for mem pressure) ──
+    oom_kills = snapshot.get("oom_kills_1h") or 0
+    if oom_kills > 0:
+        alerts.append({
+            "name": "oom_kills",
+            "severity": "critical",
+            "message": f"{oom_kills} OOM kill(s) in the last hour — containers are running out of memory.",
+        })
+
+    # ── per-container memory pressure (approaching its limit) ─────────────
+    for cs in snapshot.get("container_stats") or []:
+        pct = cs.get("memory_percent")
+        if pct is not None and pct >= _CONTAINER_MEM_PCT_WARN:
+            alerts.append({
+                "name": f"container_mem:{cs.get('name', '?')}",
+                "severity": "warn",
+                "message": (
+                    f"Container {cs.get('name', '?')} is at {pct:.0f}% of its memory "
+                    f"limit ({cs.get('memory_usage', '?')}). OOM kill is imminent."
+                ),
             })
 
     # ── egress vs free-tier cap ───────────────────────────────────────────
@@ -223,8 +291,11 @@ def get_vm_metrics() -> dict[str, Any]:
         round((disk.get("used_bytes", 0) * 100) / disk["total_bytes"], 1)
         if disk.get("total_bytes") else 0.0
     )
-    disk_free_tier_pct = (
-        round((disk.get("used_bytes", 0) * 100) / (FREE_TIER["max_disk_gb"] * 1024**3), 1)
+    # Sum across all mounts for the free-tier cap (root-only if no mounts list).
+    mounts = disk.get("mounts") or []
+    total_block_used = sum((m.get("used_bytes") or 0) for m in mounts) if mounts else (disk.get("used_bytes") or 0)
+    disk_free_tier_pct = round(
+        (total_block_used * 100) / (FREE_TIER["max_disk_gb"] * 1024**3), 1
     )
 
     network = snapshot.get("network") or {}
@@ -272,6 +343,9 @@ def get_vm_metrics() -> dict[str, Any]:
         "cloudflared": snapshot.get("cloudflared") or {},
         "keepalive": snapshot.get("keepalive") or {},
         "containers": snapshot.get("containers") or [],
+        "container_stats": snapshot.get("container_stats") or [],
+        "top_processes": snapshot.get("top_processes") or {"by_cpu": [], "by_memory": []},
+        "oom_kills_1h": snapshot.get("oom_kills_1h") or 0,
         "last_deploy": snapshot.get("last_deploy"),
         "backups": snapshot.get("backups") or {},
         "free_tier": FREE_TIER,
