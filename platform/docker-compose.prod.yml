@@ -76,8 +76,14 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - BACKUP_DIR=/app/backups
       - BACKUP_KEEP_LAST=${BACKUP_KEEP_LAST:-14}
+      # VM host-metrics snapshot (written by /usr/local/bin/collect-host-metrics.sh
+      # on the VM; see docs/VM_MONITORING.md). Absence is handled gracefully.
+      - HOST_METRICS_PATH=/host/metrics.json
     volumes:
       - backups:/app/backups
+      # Host-side metrics snapshot, read-only. The host file MUST exist before
+      # compose starts — run the collector once manually (see VM_MONITORING.md).
+      - /opt/sales-platform/host-metrics.json:/host/metrics.json:ro
     networks:
       - internal
     ports:

@@ -1,4 +1,4 @@
-"""Admin monitoring API endpoints — system health, storage, uptime."""
+"""Admin monitoring API endpoints — system health, storage, uptime, VM."""
 
 import time
 from datetime import datetime, timezone, timedelta
@@ -14,6 +14,7 @@ from app.models.scan import ScanLog
 from app.models.user import User
 from app.models.review import Review
 from app.api.deps import get_current_user, require_role
+from app.services.host_stats import get_vm_metrics
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
@@ -152,6 +153,17 @@ async def get_system_health(
             "last_scan_source": last_scan.source if last_scan else None,
         },
     }
+
+
+@router.get("/vm", dependencies=[Depends(require_role("admin"))])
+async def get_vm_health():
+    """VM host-level metrics + Oracle Always-Free guardrails (admin only).
+
+    Data is sourced from a JSON snapshot written by the host collector
+    (`/usr/local/bin/collect-host-metrics.sh`, cron every 1 min). If the
+    snapshot file is absent (dev, CI), the response has `available: False`.
+    """
+    return get_vm_metrics()
 
 
 @router.post("/backup", dependencies=[Depends(require_role("admin"))])
