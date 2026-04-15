@@ -97,6 +97,20 @@ one place.
 | 37 | 🟡 | Data / Companies | **Companies page is polluted with LinkedIn-scrape artifacts that aren't real companies.** Alphabetical top entries: `#WalkAway Campaign`, `#twiceasnice Recruiting`, `0x`, `1-800 Contacts`, `10000 solutions llc`, `100ms`. The first two are LinkedIn hashtags harvested as "company names", `1-800 Contacts` is a retail brand, numerics like `10000 solutions llc` are staffing agencies. Dashboard says `6639 companies` but many hundreds are junk rows that dilute search, target, and pipeline signals. Similarly, `Stripe` as returned from LinkedIn has three attached "jobs" with empty `raw_text` and LinkedIn-scrape titles (`Human Data Reviewer - Fully Remote`, `Junior Software Developer`, `Billing Analyst`) that no reasonable person thinks are really Stripe roles — yet the Jobs list orders by relevance and surfaces these at the top of the "Stripe" company view | ✅ fixed: three-part change, all centralized through `app/utils/company_name.py::looks_like_junk_company_name` so ingest-time and cleanup paths can't drift out of sync. (a) Helper flags: hashtag-prefixed names (`#WalkAway Campaign`), purely numeric, staffing-agency regex (`\brecruiting\b`, `\bstaffing\b`, `\btalent partners\b`, `\d+ solutions llc`, etc.), and scratch/test names (lowercase-alpha-only ≤5 chars — catches `name`, `1name`, `abc`). Conservative enough that `IBM`, `3M`, `1-800 Flowers`, `Stripe`, `Apple` all pass. (b) Ingest guard: `scan_task.py` aggregator upsert now skips jobs whose extracted company name fails the check (`stats.skipped_jobs++`) instead of creating the junk Company row. (c) Admin guard: `platforms.py POST /platforms/boards` returns 400 with an explanatory message before creating a Company, so manual adds can't reintroduce the same junk. (d) Retroactive cleanup: new `app/cleanup_junk_companies.py` (modelled on `close_legacy_duplicate_feedback.py`) runs the same helper across existing Company rows and deletes them with `--dry-run` support. Safety: skips rows linked to a `PotentialClient` entry (surface the name, let the operator decide); nulls out `CareerPageWatch.company_id` references; relies on ORM/FK cascade for the rest (ATS boards, contacts, offices, jobs → descriptions/reviews/scores). Usage: `docker compose exec backend python -m app.cleanup_junk_companies --dry-run`, then rerun without the flag |
 | 38 | 🟡 | Responsive UX | **Sidebar is always 256 px wide and doesn't collapse on narrow viewports.** At a 614 px viewport (Chrome's practical minimum window) the sidebar still occupies 42% of the visible width, leaving ~358 px for content. `<main>` develops horizontal overflow (`scrollWidth 363 > clientWidth 352`) and 103 child elements have overflow / truncation at this size. No hamburger / toggle button exists anywhere. Tablet-sized viewports (768-1024 px) work but feel cramped because the 256 px fixed sidebar isn't proportional | ⬜ open — `components/Sidebar.tsx` + `components/Layout.tsx`: add a mobile breakpoint (`md:`-gated visible, hidden below) and a hamburger trigger in the top bar that toggles a full-screen drawer. Lots of Tailwind examples; key is that the sidebar becomes `hidden lg:flex` and the trigger button becomes `lg:hidden`. Close the drawer on route change |
 | 39 | 🔵 | Pipeline | A pipeline card literally titled **`name`** (no company, no metadata — looks typed-in test data) still sits in the `Researching` stage with `123 open roles, 1 accepted, Last job: Apr 13, 2026`. Finding #10 flagged a similar "1name" row and is still listed ⬜ open; this appears to be a second stray entry. Confusing on a prod Pipeline board | ✅ fixed (with manual follow-up): the `name` / `1name` strings are caught by the `_SCRATCH_NAME_RE` branch of `looks_like_junk_company_name` (`^[a-z0-9]{1,5}$`, lowercase-alpha-only ≤5 chars — real short names like `IBM` / `3M` / `HP` are uppercase or contain digits+letters). Root cause: `potential_clients` FKs to `companies.id` (not a `company_name` column), so the raw SQL `DELETE FROM potential_clients WHERE company_name ILIKE 'name'` the earlier recommendation suggested wouldn't run. The new `app/cleanup_junk_companies.py` script flags these Companies but **skips them with a warning** because they have `PotentialClient` rows attached — that safety check refuses to silently nuke anything that a human might have staged as a deal. For `name` / `1name` specifically those PotentialClients are obvious test data (no notes, auto-counted metrics) so the operator deletes them manually first: `DELETE FROM potential_clients WHERE company_id IN (SELECT id FROM companies WHERE name IN ('name','1name'));` then reruns the cleanup script, which then deletes the Company rows (cascading to ATS boards, jobs, descriptions, scores, etc.) |
+| 40 | 🟠 | Credentials | **The Credentials empty-state directs users to a UI element that doesn't exist.** `/credentials` with no active resume says: *"No active resume selected — Use the resume switcher in the header to select a persona before managing credentials."* The app's `<header>` contains only the tenant name + "No resume uploaded" plain text. No `<select>`, no button, no dropdown, no element with `class*="resume-switcher"`, no `aria-label*="resume"` anywhere in the DOM. The user has no affordance to proceed — dead-end copy | ⬜ open — either (a) add the promised resume-persona switcher to `components/Header.tsx` (a `<select>` populated from `/api/v1/resume/list` with `PATCH /api/v1/resume/{id}/set-active` on change), or (b) fix the copy on `CredentialsPage.tsx` to point at the existing switcher which lives on `/resume-score` (e.g. *"Go to Resume Score and mark a persona active before returning here"* plus a `<Link to="/resume-score">`) |
+| 41 | 🟡 | Docs | **All "Go to X" instructions in `/docs` are plain text, not navigation links.** `document.querySelectorAll('main a').length === 0`. The guide repeatedly says *"Go to Resume Score in the sidebar"*, *"Go to Credentials"*, *"Go to Relevant Jobs or the Review Queue"* — each is a dead `<span>` with no anchor. Users have to hunt the sidebar. The checklist format ("1. Upload Your Resume", "2. Build Your Answer Book", etc.) strongly implies clickable step-through nav | ⬜ open — `DocsPage.tsx`: replace the bare nouns in the setup checklist with `<Link to="/resume-score">Resume Score</Link>`, `<Link to="/credentials">Credentials</Link>`, `<Link to="/answer-book">Answer Book</Link>`, `<Link to="/jobs?role_cluster=relevant">Relevant Jobs</Link>`, `<Link to="/review">Review Queue</Link>`, `<Link to="/pipeline">Pipeline</Link>`, `<Link to="/analytics">Analytics</Link>`. Every place the copy says "Go to …" should be a link |
+| 42 | 🔵 | Docs | **Typo in setup checklist: `Work Authorization,Experience` (missing space after comma).** Exact string in `/docs` step 2 "Build Your Answer Book" — *"Categories to fill: Personal Info, Work Authorization,Experience, Skills, Preferences."* The comma-space grammar is consistent elsewhere in the list; this one slipped | ⬜ open — `DocsPage.tsx`, fix string to `"Work Authorization, Experience"` (add the missing space). One-char diff |
+| 43 | 🟠 | A11y / Auth | **Settings → Change Password form has multiple a11y and password-manager failures.** All 3 inputs (`Current Password`, `New Password`, `Confirm New Password`) render as `<input type="password" required>` with **no `id`, no `name`, no `autocomplete`, no `aria-label`**. The 3 `<label>` elements have no `for=""` attribute. Consequences: (a) clicking a visible label does not focus its input, (b) screen readers have no programmatic label association, (c) browser password managers (1Password, LastPass, Chrome autofill, Bitwarden) cannot recognise current-vs-new and will not auto-save or suggest passwords. New-password `minlength="6"` is below OWASP (8) and NIST SP 800-63B (8 min, 15 recommended). No complexity/pattern enforcement | ⬜ open — `SettingsPage.tsx` password form: give each `<input>` an `id` (e.g. `id="current-password"`), link the `<label>` via `htmlFor`, add `autocomplete="current-password"` on field 1 and `autocomplete="new-password"` on fields 2 and 3 (this is the documented signal password managers listen for), raise `minLength` to 8, optionally add a `pattern` or zxcvbn meter. Server side the `auth.py change_password` should enforce the same minimum |
+| 44 | 🟠 | A11y | **Feedback "+ New Ticket" form: every input unlabeled at the DOM level; Priority is a fake radio group.** After picking "Bug Report", 7 inputs render (1 `type=text`, 5 `<textarea>`, 1 `type=file`); **none have `id`, `name`, `aria-label`, `aria-required`, or `aria-invalid`**. The 8 visible `<label>` elements all have `htmlFor=""` — visual only. Priority (Critical/High/Medium/Low) is 4 `<button type="button">` with no `role="radiogroup"`, no `role="radio"`, no `aria-pressed`. Selected state is conveyed only by Tailwind color classes — zero semantic signal to AT. Title input has `maxlength="200"` but no visible counter | ⬜ open — `FeedbackPage.tsx` form section: (a) generate stable ids and wire `<label htmlFor>` for each input/textarea, (b) add `name` attributes so the form is HTTP-submittable as a fallback, (c) wrap the 4 Priority buttons in a `<div role="radiogroup" aria-label="Priority">` and give each button `role="radio" aria-checked={selected}` (or switch to native `<input type="radio">` + styled labels, which gets arrow-key navigation between options for free) |
+| 45 | 🟡 | A11y | **Role Clusters page: 12 of 14 icon-only buttons use `title` instead of `aria-label`.** Per-cluster actions (`Remove from relevant` ★, `Deactivate` toggle, `Edit` pencil, `Delete` trash) are `<button>` with an SVG child and a `title` attribute; no `aria-label`. `title` is visible on hover for sighted mouse users but screen readers do not announce it consistently (JAWS reads it only in certain modes, VoiceOver rarely). The "Add Cluster" button is fine (has visible text); sidebar Sign out button is fine (has `title` but is low-severity) | ⬜ open — `RoleClustersPage.tsx`: replace `title="Edit"` / `title="Delete"` / `title="Deactivate"` / `title="Remove from relevant"` with `aria-label="Edit {cluster.name}"` etc., keep `title` as a tooltip. Including the cluster name in the label disambiguates announcements when a screen reader sweeps the page (otherwise AT hears "edit, edit, edit, edit" three times) |
+| 46 | 🔵 | A11y / UX | **Role Clusters Edit and Add forms: no placeholders, no Esc-to-close.** Clicking a cluster's pencil opens an inline form with 3 fields (Display Name, Keywords, Approved Roles), all rendered with `placeholder=""`. The user sees empty boxes with no hint about expected format (comma-separated? newline-separated? freeform?). Pressing `Esc` does not close the form; only the "Cancel" button does. Because this is inline (not a modal) there is no backdrop, which is fine, but the form has no `role="form"` either so AT users have no region boundary | ⬜ open — `RoleClustersPage.tsx` edit/add form: add placeholders like *"e.g. cloud, kubernetes, terraform (comma-separated)"* to the two list fields, add an `onKeyDown` handler at the form root that cancels on `Escape` (matches user expectation even though it's inline), and wrap in `<section role="region" aria-label="Edit cluster">` for AT landmark nav |
+| 47 | 🔵 | Platforms | **Inactive platforms render the job count as an empty string instead of "0".** `/platforms` grid: greenhouse / lever / ashby / workable / himalayas / smartrecruiters / linkedin display their counts with thousand separators (e.g. `11,466 jobs`). `bamboohr`, `jobvite`, `recruitee`, `wellfound`, and `weworkremotely` render the count slot as blank whitespace — no `0`, no `0 jobs`, no em-dash. Looks like the page crashed mid-render for those rows, but it's actually just a missing fallback | ⬜ open — `PlatformsPage.tsx` per-platform card: change `{count.toLocaleString()} jobs` to `{(count ?? 0).toLocaleString()} jobs` (or explicitly `{count > 0 ? … : "0 jobs"}`). Same idea as Finding #36 — consistent zero rendering |
+| 48 | 🔵 | Analytics | **Chart legend labels are concatenated with no separators: `New JobsAcceptedRejected`.** The Analytics page "Jobs over time" stacked chart legend text reads `New JobsAcceptedRejected` as one run — three series labels glued together. Looks like a `{labels.join('')}` where it should be `{labels.join(' · ')}` or separate `<span>` nodes. Readable with effort once you know the series, but reads as a bug at a glance | ⬜ open — `AnalyticsPage.tsx` legend render: either use recharts' built-in `<Legend />` (it handles spacing), or if this is a custom legend make each label its own element (`<li>` or `<span>` with `mr-2`) |
+| 49 | 🔵 | Analytics | **Analytics "Total Jobs" card shows `47776` with no thousand separator.** Same number on Platforms page stat card shows `47,776` (correct). Platforms and Monitoring stat-card sections already call `.toLocaleString()`; Analytics / Dashboard / Companies / Intelligence / Pipeline / scan-by-platform grid do not. Cross-page formatting drift makes the same count look like two different numbers depending on where the user is | ⬜ open — same root fix as Finding #36 (centralize a `formatCount()` helper). Specifically on Analytics this affects `Total Jobs`, `Total Companies`, `Avg Relevance`, and the chart tooltip values |
+| 50 | 🔵 | Analytics | **`Avg Relevance Score` differs between Dashboard and Analytics because of inconsistent rounding.** Dashboard top card renders `39.65`; Analytics stat card renders `40`. Same backend value, different display (`Math.round` vs `.toFixed(2)`). At 39.65 → 40 the discrepancy looks like stale data; users reconcile by debating which page is "right" | ⬜ open — pick one precision (recommend `.toFixed(1)` → `39.7`, which matches how the role-cluster score bars render) and apply it in both `DashboardPage.tsx` and `AnalyticsPage.tsx`. Future pages pull from the same `formatScore()` helper |
+| 51 | 🟡 | Review Queue | **No keyboard shortcuts on Review Queue despite it being a queue-of-one workflow.** `/review` shows one job at a time with a "1 of 20" counter and Accept / Reject / Skip buttons. Pressing `J`, `K`, `ArrowLeft`, `ArrowRight`, `Space`, `Enter`, or typing `a`/`r`/`s` does nothing — the counter stays at `1 of 20`. Users review hundreds of jobs; forcing a mouse click per decision is multiple seconds of wasted time per review | ⬜ open — `ReviewQueuePage.tsx`: add a `useEffect(() => { window.addEventListener('keydown', …) }, [])` with `J`/`ArrowRight` → next, `K`/`ArrowLeft` → prev, `A` → accept, `R` → reject, `S` → skip. Show a `?` cheat-sheet dialog. Guard when focus is inside an `<input>` / `<textarea>` (compare `e.target.tagName`). This is a common sales-ops pattern (Front, Missive, Gmail) |
+| 52 | 🟡 | A11y | **App-wide focus-ring coverage is very low.** Counted on four pages: `/role-clusters` 1 of 32 interactive elements carry `focus:ring` / `focus:outline` / `focus-visible` classes, `/review` 3 of 32, `/jobs` 2 of 27, `/settings` (after opening password form) 2 of 14. Keyboard-only users tabbing through the app lose track of focus on most controls. Icon-only buttons especially (sidebar sign-out, role-cluster action icons, feedback close-X) have no visible focus state at all | ⬜ open — two-part fix: (a) add a global `:focus-visible` rule in `index.css` so every interactive element gets a visible ring by default (`*:focus-visible { @apply outline-none ring-2 ring-primary-500 ring-offset-1; }`), then override per-component where the ring clashes with the design, (b) remove the handful of `outline-none` overrides that were added without a `focus-visible` replacement. Verification target: after the change, every button / link / input / select / textarea should show a ring when tabbed to |
+| 53 | 🔵 | Feedback / Data cleanup | **Feedback list response ships a ~1 MB description row to every caller.** `GET /api/v1/feedback` on prod returns one ticket whose `description` field is approximately 1,000,000 characters of filler text — a leftover from Round 2's Finding #25 probe (20,000-char submission was accepted; a later test submitted 1 MB). Finding #25's code fix caps descriptions at 8000 chars on new submissions but doesn't touch existing rows. The row is served in full to every `/feedback` list request; the React table CSS-truncates it with `truncate` but the DOM carries the full string → measurable TTFB / DOM-weight regression. Not a security issue, but a data hygiene one | ⬜ open — post-deploy cleanup: once the `app/close_legacy_duplicate_feedback.py` pattern proves safe, add a similar one-shot `app/trim_oversized_feedback.py` script that `UPDATE feedback SET description = LEFT(description, 8000) || ' [truncated legacy row]' WHERE LENGTH(description) > 8000` and the same for the other free-text columns bounded in Finding #25. Include a `--dry-run` flag. Alternative: server-side cap the field in the list serializer so list responses stay small even if cleanup is deferred |
 
 ---
 
@@ -1138,6 +1152,510 @@ Or fold it into a `cleanup_junk_companies.py` script (see Finding #37) that has 
 
 #### Cleanup
 Read-only probe.
+
+---
+
+## 16. Round 4B — Forms, A11y & Admin-Page Deep Audit (2026-04-15, later)
+
+Second pass of Round 4 focused on forms (Settings password, Feedback new-ticket, Role Clusters edit/add), admin pages (Role Clusters, User Management, Docs, Credentials empty-state), and a global a11y/UX sweep (focus-ring coverage, keyboard shortcuts, `<label for>` / `aria-label` hygiene, icon-only button labelling). Findings #40–#53.
+
+### 40. Credentials page directs users to a UI control that doesn't exist
+**Severity:** 🟠 HIGH · **Area:** Credentials / Broken copy
+
+#### What I saw
+`/credentials` with no active resume renders:
+
+```
+Platform Credentials
+Manage your ATS platform login credentials per resume persona.
+
+No active resume selected
+Use the resume switcher in the header to select a persona before managing credentials.
+```
+
+Probed the page for the referenced control:
+
+```js
+document.querySelector('header').innerText
+// → "reventlabs\nNo resume uploaded"
+
+document.querySelectorAll('header select, header button, header [role="button"]').length
+// → 0
+
+document.querySelector('[class*="resume-switcher"], [aria-label*="resume" i]')
+// → null
+```
+
+The `<header>` contains only the tenant name and the literal string "No resume uploaded" — no select, no dropdown, no button. There is no "resume switcher" anywhere in the DOM. The user is told to use a control that doesn't exist.
+
+#### Why it matters
+`/credentials` is a dead end for any user without an active resume. The workaround is to go to `/resume-score`, mark a persona active there, and navigate back — but the page copy doesn't say that.
+
+#### Suggested fix
+Two options:
+- **(A)** Add the promised switcher: `components/Header.tsx` gains a `<select>` populated from `/api/v1/resume/list`; change fires `PATCH /api/v1/resume/{id}/set-active`. Matches the copy.
+- **(B)** Fix the copy to reference the existing affordance: `CredentialsPage.tsx` empty-state becomes *"Go to Resume Score and mark a persona active before returning here"* with a `<Link to="/resume-score">` button.
+
+(A) is the better UX — the credentials/persona separation is per-resume, so users will want to switch persona often.
+
+#### Cleanup
+Read-only DOM inspection.
+
+---
+
+### 41. `/docs` is zero-link plain text — every "Go to X" is unclickable
+**Severity:** 🟡 MEDIUM · **Area:** Docs / Navigation
+
+#### What I saw
+```js
+document.querySelectorAll('main a').length
+// → 0
+
+[...document.body.innerText.matchAll(/Go to ([A-Za-z ]+)/g)].map(m=>m[0])
+// → [
+//   'Go to Resume Score in the sidebar',
+//   'Go to Credentials',
+//   'Go to Relevant Jobs or the Review Queue and start accepting jobs ...'
+// ]
+```
+
+The Platform Guide has a numbered "First-Time Setup Checklist" (Upload Resume → Answer Book → Credentials → Score Resume → Browse and Accept Jobs) and a "Recommended Daily Workflow" (Dashboard → Review Queue → Jobs → Companies → Applications → Pipeline → Analytics → Re-score). Every page name mentioned is rendered as plain text. New users have to manually locate each destination in the sidebar.
+
+#### Why it matters
+Onboarding friction. Docs that tell you "go here" without a link are the slowest kind of onboarding — they test the user's memory of UI state instead of just taking them there.
+
+#### Suggested fix
+`DocsPage.tsx`: replace the bare nouns with `react-router-dom` `<Link>` elements.
+
+```tsx
+// Before: Go to Resume Score in the sidebar. Upload a PDF or DOCX…
+// After:  Go to <Link to="/resume-score">Resume Score</Link>. Upload a PDF or DOCX…
+```
+
+Routes touched: `/resume-score`, `/answer-book`, `/credentials`, `/jobs?role_cluster=relevant`, `/review`, `/pipeline`, `/analytics`, `/companies`, `/applications`. Do the same for any term in "Key Terms" that matches an app page.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 42. Setup-checklist typo: `Work Authorization,Experience` (missing space)
+**Severity:** 🔵 LOW · **Area:** Docs / Copy
+
+#### What I saw
+```
+2. Build Your Answer Book
+   Categories to fill: Personal Info, Work Authorization,Experience, Skills, Preferences.
+```
+
+Surrounding commas in the list are all ", " (comma + space). One missing space between `Authorization,` and `Experience`.
+
+#### Why it matters
+Visible polish bug. Cheap to fix.
+
+#### Suggested fix
+`DocsPage.tsx`: change `"Work Authorization,Experience"` → `"Work Authorization, Experience"`. One-character diff.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+### 43. Change-Password form: no `autocomplete`, no `<label for>`, min-length 6
+**Severity:** 🟠 HIGH · **Area:** A11y / Auth / Password hygiene
+
+#### What I saw
+```js
+[...document.querySelectorAll('input[type="password"]')].map(i => ({
+  autocomplete: i.autocomplete || '(unset)',
+  name: i.name || '(unset)',
+  id: i.id || '(unset)',
+  ariaLabel: i.getAttribute('aria-label') || '(unset)',
+  hasLabelFor: !!document.querySelector('label[for="'+i.id+'"]'),
+  minLength: i.minLength,
+}))
+// → all 3 fields: autocomplete "(unset)", name "(unset)", id "(unset)",
+//   ariaLabel "(unset)", hasLabelFor false.
+//   New-password field: minLength 6.
+```
+
+All three `<input type="password">` (Current, New, Confirm) render with no `id`, no `name`, no `autocomplete`, and no `aria-label`. The three visible `<label>` elements all have `htmlFor=""`. `minLength=6` on the new password.
+
+#### Why it matters
+- **Password managers won't save or fill.** 1Password / Bitwarden / Chrome autofill / LastPass key their heuristics on `autocomplete="current-password"` vs `"new-password"`. Without those attributes they treat all three boxes as ambiguous and either ignore them or lock up the user's vault prompt.
+- **Screen readers don't announce labels.** The `<label>` is adjacent visually but not programmatically associated; VoiceOver/NVDA announce the input as just "edit text, secure, required".
+- **Clicking a label doesn't focus its input.**
+- **6 chars is too short for 2026.** OWASP ASVS 5.0 requires 8; NIST SP 800-63B-4 draft requires 8 minimum, 15 recommended for user-chosen; no admin should accept `abc123`.
+
+#### Suggested fix
+`SettingsPage.tsx`:
+```tsx
+<div>
+  <label htmlFor="current-password" …>Current Password</label>
+  <input id="current-password" type="password" required
+         autoComplete="current-password" value={…} onChange={…} />
+</div>
+<div>
+  <label htmlFor="new-password" …>New Password</label>
+  <input id="new-password" type="password" required minLength={8}
+         autoComplete="new-password" placeholder="Min 8 characters" … />
+</div>
+<div>
+  <label htmlFor="confirm-password" …>Confirm New Password</label>
+  <input id="confirm-password" type="password" required minLength={8}
+         autoComplete="new-password" … />
+</div>
+```
+
+Server side: `app/api/v1/auth.py` `change_password` should enforce the same length floor so an attacker or malformed client can't slip past the frontend.
+
+#### Cleanup
+Form was closed via the inline Cancel/Change button. No state mutated.
+
+---
+
+### 44. "+ New Ticket" form: labels not associated; Priority is a fake radio group
+**Severity:** 🟠 HIGH · **Area:** A11y / Forms
+
+#### What I saw
+Clicked `+ New Ticket` → `🐛 Bug Report`. DOM probe of the resulting form:
+
+```js
+// 7 inputs in the form; every one has id '', name '', aria-label '', no label[for] match.
+// labels in DOM: 8 items, every one with htmlFor: ''
+//   'Title *', 'Priority', 'Description *', 'Steps to Reproduce *',
+//   'Expected Behavior *', 'Actual Behavior *',
+//   'Proposed Solution (optional)', 'Attachments (optional)'
+
+// Priority is rendered as:
+<div class="flex gap-2">
+  <button type="button">Critical</button>
+  <button type="button">High</button>
+  <button type="button" class="… bg-yellow-100 ring-2 …">Medium</button>
+  <button type="button">Low</button>
+</div>
+// No role=radiogroup, no role=radio, no aria-pressed.
+// Selected state signalled only by Tailwind colours.
+```
+
+#### Why it matters
+- Clicking any label (e.g. "Description *") doesn't focus its textarea.
+- Screen readers have no programmatic name for any field — they hear "edit, required" 6 times.
+- Priority is inaccessible: keyboard users can tab into each button individually but no arrow-key nav between options (which the native radio pattern gives for free). AT announces 4 toggle buttons with no relationship.
+- The submit path relies entirely on React state. If JS fails or a power user Tab-Enters expecting a form submit, there's no `name=` to fall back to.
+
+#### Suggested fix
+`FeedbackPage.tsx` form section:
+
+1. Generate stable ids (e.g. `useId()`), set `htmlFor` on every `<label>`, and set matching `id`/`name` on every input/textarea.
+2. Add `aria-required="true"` where `required`. Add `aria-invalid` + an `aria-describedby` to a visually-hidden error hint when validation fails.
+3. Priority: replace the 4 buttons with a native radio group (styled pills):
+   ```tsx
+   <div role="radiogroup" aria-label="Priority" className="flex gap-2">
+     {['critical','high','medium','low'].map(p => (
+       <label key={p} className={/* selected styling */}>
+         <input type="radio" name="priority" value={p}
+                checked={priority===p} onChange={e=>setPriority(p)}
+                className="sr-only" />
+         {p[0].toUpperCase()+p.slice(1)}
+       </label>
+     ))}
+   </div>
+   ```
+   Native radio gives arrow-key nav and `aria-checked` automatically.
+4. Add a visible char counter next to Title (it already has `maxLength=200` but no user signal).
+
+#### Cleanup
+Form cancelled via the inline Cancel button before touching the DB.
+
+---
+
+### 45. Role Clusters icon-only buttons use `title` instead of `aria-label`
+**Severity:** 🟡 MEDIUM · **Area:** A11y
+
+#### What I saw
+14 `<button>` elements on `/role-clusters`. Two (`Add Cluster`, sidebar `Sign out`) have a text label. The remaining 12 are all per-cluster action icons:
+
+```
+{title:'Remove from relevant', svg:'lucide-star',          aria-label:''}  × 3 clusters
+{title:'Deactivate',            svg:'lucide-toggle-right', aria-label:''}  × 3 clusters
+{title:'Edit',                  svg:'lucide-pen-line',     aria-label:''}  × 3 clusters
+{title:'Delete',                svg:'lucide-trash2',       aria-label:''}  × 3 clusters
+```
+
+#### Why it matters
+`title` is an unreliable a11y surface:
+- JAWS reads it only in specific verbosity modes.
+- VoiceOver rarely announces it.
+- NVDA announces it inconsistently depending on element role.
+- It's also invisible on touch devices (no hover).
+
+The right primitive for "icon-only button" is a visible SVG + `aria-label` + optional `title` tooltip.
+
+Because the 4 action icons repeat for 3 clusters, a screen-reader sweep hears `"button button button button button button …"` with no context — 12 ambiguous announcements. Including the cluster name in the label (`aria-label="Edit Infrastructure / DevOps / SRE"`) disambiguates.
+
+#### Suggested fix
+`RoleClustersPage.tsx`:
+```tsx
+<button
+  type="button"
+  aria-label={`Edit ${cluster.display_name}`}
+  title="Edit"                  // keep for hover-tooltip
+  onClick={() => startEdit(cluster)}
+>
+  <PenLine className="h-4 w-4" />
+</button>
+```
+
+Same pattern for the Star / Toggle / Trash buttons.
+
+#### Cleanup
+Read-only DOM inspection.
+
+---
+
+### 46. Role Clusters Edit / Add form: no placeholders, no Esc-to-close
+**Severity:** 🔵 LOW · **Area:** A11y / UX polish
+
+#### What I saw
+- Clicked pencil → inline edit form with 3 fields, all `placeholder=""`. Empty boxes, no hint.
+- Clicked `+ Add Cluster` → 5-field inline form, same story.
+- Probed `Escape` keydown against the document: form count before = 5 inputs, after = 5 inputs. Esc does nothing.
+
+#### Why it matters
+- Users don't know the expected format for keywords / approved roles. Comma-separated? Newline-separated? JSON? The placeholder is the natural place for that hint.
+- Users accustomed to modal forms instinctively reach for Esc to dismiss. The form is inline (not a modal) so there's no backdrop expectation, but Esc closing still matches mental model.
+
+#### Suggested fix
+`RoleClustersPage.tsx` edit/add form:
+- Add placeholders: *"Internal id (letters, digits, underscore)"* on `name`, *"e.g. cloud, kubernetes, terraform (one per line)"* on keywords, *"e.g. DevOps Engineer (one per line)"* on approved_roles.
+- Wrap the form in a `<form onKeyDown={e => e.key === 'Escape' && onCancel()}>` (or add an effect that listens on the document while the form is open).
+- Optional: wrap in `<section role="region" aria-label="Edit cluster">` for AT landmark nav — inline editor acts like a modal for AT purposes.
+
+#### Cleanup
+Cancel button pressed after probe.
+
+---
+
+### 47. Platforms page: inactive platforms render blank job count
+**Severity:** 🔵 LOW · **Area:** Platforms / Rendering
+
+#### What I saw
+`/platforms` card grid. Active platforms render `11,466 jobs` with a thousands separator. Inactive platforms (`bamboohr`, `jobvite`, `recruitee`, `wellfound`, `weworkremotely`) render just white space where the count should be — no `0`, no `0 jobs`, no `—`.
+
+#### Why it matters
+Looks like the render crashed mid-row. Users can't distinguish "zero jobs found" from "data failed to load". It's also noise that makes the grid visually inconsistent.
+
+#### Suggested fix
+`PlatformsPage.tsx` card body:
+```tsx
+// Before: <span>{count.toLocaleString()} jobs</span>
+// After:  <span>{(count ?? 0).toLocaleString()} jobs</span>
+//   (or): <span>{count > 0 ? `${count.toLocaleString()} jobs` : 'No jobs found'}</span>
+```
+
+The second form is slightly more user-friendly because "No jobs found" doubles as a "this platform is inactive" hint.
+
+#### Cleanup
+Read-only.
+
+---
+
+### 48. Analytics chart legend has no separators
+**Severity:** 🔵 LOW · **Area:** Analytics / Rendering
+
+#### What I saw
+`/analytics` → "Jobs over time" chart legend reads `New JobsAcceptedRejected` — three series names concatenated with no space, pipe, or bullet between them.
+
+#### Why it matters
+Readable with effort once you already know the legend has three series, but at first glance it reads as a run-together glitch. Polish hit.
+
+#### Suggested fix
+`AnalyticsPage.tsx`: either swap the custom legend for recharts' built-in `<Legend />` (which handles spacing, color swatches, and responsiveness for free), or render each label as its own element:
+
+```tsx
+<div className="flex gap-4 text-sm">
+  <span className="flex items-center gap-1"><Dot color="primary"/> New Jobs</span>
+  <span className="flex items-center gap-1"><Dot color="green"/>  Accepted</span>
+  <span className="flex items-center gap-1"><Dot color="red"/>    Rejected</span>
+</div>
+```
+
+#### Cleanup
+Read-only.
+
+---
+
+### 49. Total Jobs render lacks thousand separator on Analytics (but works on Platforms)
+**Severity:** 🔵 LOW · **Area:** Analytics / Formatting
+
+#### What I saw
+- `/analytics` stat card: `Total Jobs 47776`, `Total Companies 6639`, `Avg Relevance 40`.
+- `/platforms` stat card: `Total Jobs 47,776` (with comma).
+- `/monitoring` stat card: `Total Jobs 47,776` (with comma).
+- `/dashboard`: `Total Jobs 47776` (no comma). See Finding #36.
+
+Formatting is inconsistent even within the admin surface.
+
+#### Why it matters
+Same number looks different on different pages. Users reconcile by debating which page is "right". Reads as stale data.
+
+#### Suggested fix
+Same as Finding #36: a single `formatCount()` helper in `lib/format.ts` that does `n.toLocaleString()` and gets called everywhere a count renders. Explicitly applied on Analytics: `Total Jobs`, `Total Companies`, `Avg Relevance`, plus chart-tooltip values.
+
+#### Cleanup
+Read-only.
+
+---
+
+### 50. Avg Relevance Score differs between Dashboard (39.65) and Analytics (40)
+**Severity:** 🔵 LOW · **Area:** Analytics / Rounding
+
+#### What I saw
+- Dashboard: `Avg Relevance: 39.65`
+- Analytics: `Avg Relevance: 40`
+
+Backend returns the same number. Frontend rounds differently per page:
+- Dashboard uses `.toFixed(2)` → `39.65`
+- Analytics uses `Math.round()` → `40`
+
+#### Why it matters
+39.65 rounding up to 40 looks normal to someone who knows the backend is consistent. To anyone else it looks like either a bug or stale data. Either way it's a question the user shouldn't have to ask.
+
+#### Suggested fix
+Pick one precision and standardize. Recommend `.toFixed(1)` everywhere → `39.7`:
+- `DashboardPage.tsx`
+- `AnalyticsPage.tsx`
+- Any future `formatScore()` helper
+
+This matches how the role-cluster score bars render percentages (one decimal).
+
+#### Cleanup
+Read-only.
+
+---
+
+### 51. Review Queue has no keyboard shortcuts
+**Severity:** 🟡 MEDIUM · **Area:** Review Queue / UX
+
+#### What I saw
+`/review` shows one job at a time with a "1 of 20" counter plus Accept / Reject / Skip buttons. Tested:
+
+```js
+document.dispatchEvent(new KeyboardEvent('keydown',{key:'j'}))  // no-op
+document.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight'})) // no-op
+document.dispatchEvent(new KeyboardEvent('keydown',{key:'a'}))  // no-op
+// counter still "1 of 20"
+```
+
+#### Why it matters
+Review Queue is a queue-of-one workflow — one decision per keystroke is the standard pattern (Gmail `e`/`[`/`]`, Missive `j`/`k`/`e`, Front `a`/`r`/`n`). Forcing a mouse click per decision adds ~1-2s per review. Over 20 jobs that's 20-40 seconds of unnecessary friction; over a day's backlog it compounds.
+
+#### Suggested fix
+`ReviewQueuePage.tsx`:
+
+```tsx
+useEffect(() => {
+  const handler = (e: KeyboardEvent) => {
+    // don't hijack when typing in an input/textarea
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'j' || e.key === 'ArrowRight') next();
+    else if (e.key === 'k' || e.key === 'ArrowLeft')  prev();
+    else if (e.key === 'a') accept();
+    else if (e.key === 'r') reject();
+    else if (e.key === 's') skip();
+    else if (e.key === '?') openCheatSheet();
+  };
+  window.addEventListener('keydown', handler);
+  return () => window.removeEventListener('keydown', handler);
+}, [next, prev, accept, reject, skip]);
+```
+
+Add a `?` cheat-sheet dialog that lists the shortcuts — discoverability.
+
+#### Cleanup
+Read-only probe; dispatched events only, no state mutated.
+
+---
+
+### 52. Focus-ring coverage across the app is very low
+**Severity:** 🟡 MEDIUM · **Area:** A11y / Keyboard nav
+
+#### What I saw
+Counted `focus:ring` / `focus:outline` / `focus-visible` utility-class presence on every `button/a/input/textarea/select` on four pages:
+
+| Page | With focus styles | Total interactive | Coverage |
+|------|-------------------|-------------------|----------|
+| `/role-clusters` | 1 | 32 | 3% |
+| `/review` | 3 | 32 | 9% |
+| `/jobs` | 2 | 27 | 7% |
+| `/settings` (password form open) | 2 | 14 | 14% |
+
+Icon-only buttons are the worst offenders — the sidebar `Sign out`, role-cluster Edit/Delete/Toggle/Star, and feedback close-X all have zero focus style.
+
+#### Why it matters
+Keyboard-only users tab through the app and lose track of focus. WCAG 2.1 SC 2.4.7 (Focus Visible, Level AA) requires a visible keyboard focus indicator for every focusable element. Current coverage fails AA on at least four audited pages.
+
+#### Suggested fix
+Two-part fix in `index.css`:
+
+1. Add a global rule so every focusable element gets a visible ring by default:
+   ```css
+   *:focus-visible {
+     outline: none;
+     box-shadow: 0 0 0 2px theme('colors.primary.500'), 0 0 0 3px white;
+   }
+   ```
+   Or with Tailwind:
+   ```css
+   *:focus-visible { @apply outline-none ring-2 ring-primary-500 ring-offset-1; }
+   ```
+
+2. Audit for any existing `outline-none` overrides that were added without a `focus-visible` replacement, and remove them.
+
+Verification: after the change, tabbing through each page should produce a visible ring on every button / link / input / select / textarea. Use `document.querySelectorAll('button,a,input,textarea,select').forEach(el => el.focus())` in devtools as a smoke test.
+
+#### Cleanup
+Read-only.
+
+---
+
+### 53. Legacy 1 MB feedback description still shipped in every list response
+**Severity:** 🔵 LOW · **Area:** Feedback / Data hygiene
+
+#### What I saw
+`GET /api/v1/feedback` returns 20 items. One item's `description` field contains ~1,000,000 characters of filler — a leftover from a Round 2 probe that submitted a 1 MB description to verify there was no bound (which became Finding #25).
+
+Finding #25's code fix caps `description`, `steps_to_reproduce`, `expected_behavior`, `actual_behavior`, `use_case`, `proposed_solution`, `impact`, `screenshot_url`, and `admin_notes` at 8000 chars on **new submissions**, but the existing 1 MB row is not retroactively trimmed.
+
+The feedback page CSS-truncates with `class="truncate"` so visually you don't see it, but the DOM carries the full 1 MB string. Measurable TTFB / DOM-weight regression on every list fetch.
+
+#### Why it matters
+Not a security issue, but a non-trivial performance one. Every user loading `/feedback` pays the cost. Over time, if more legacy rows from before #25 exist, the cost compounds. Also a data-hygiene loose end that should be closed before the #25 fix is considered "done".
+
+#### Suggested fix
+Post-deploy one-shot cleanup script, modelled on `app/close_legacy_duplicate_feedback.py`:
+
+```python
+# app/trim_oversized_feedback.py
+FIELDS = ['description','steps_to_reproduce','expected_behavior',
+          'actual_behavior','use_case','proposed_solution','impact','admin_notes']
+MAX = 8000
+
+# For each row in feedback:
+#   For each field:
+#     if LENGTH(field) > MAX:
+#       field = LEFT(field, MAX) || '… [truncated legacy row]'
+#   if any field changed: UPDATE
+```
+
+Include `--dry-run`. Log per-row change counts.
+
+Alternative: cap the field in the `FeedbackOut` list serializer so list responses are small even if DB cleanup is deferred. Detail endpoint keeps the full value (ticket author can still see their original submission).
+
+#### Cleanup
+Read-only. The 1 MB row predates this session.
 
 ---
 
