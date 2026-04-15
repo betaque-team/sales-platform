@@ -90,6 +90,13 @@ one place.
 | 30 | 🔵 | Feedback UI | In the ticket detail modal, "Update Ticket" is rendered without visible button styling — appears as plain black text next to the status dropdown. Users can't tell it's clickable. Also, no success toast after save (modal auto-closes silently). Functionality works (PATCH 200, persists, stats update), only discoverability is poor | ✅ fixed: root cause was that `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger` were referenced in 7 places across `FeedbackPage.tsx` but **never defined** — buttons fell back to browser-default rendering (unstyled black text). Added the missing utility classes to `index.css` via `@apply` (primary/secondary/danger variants, focus rings, hover states, disabled styling). Every `btn btn-*` usage on the feedback page is now styled consistently with the rest of the app theme (dark-gray `primary-600`) |
 | 31 | 🟡 | Feedback | Legacy duplicate tickets from before Finding #11 fix are still present: 8 identical "Resume Score / Relevance" tickets from khushi.jain@ still show as open. Dedup prevents new dupes but doesn't merge/close old ones — queue cleanup task | ✅ fixed: new `app/close_legacy_duplicate_feedback.py` script (modelled on `seed_test_users.py`) retroactively applies the same dedup rule the API now uses on new submissions. For every `(user_id, category, lowercased title)` group of open/in-progress tickets it keeps the OLDEST open and closes the rest with a system note linking back to the canonical id. Idempotent and supports `--dry-run`. Run on prod: `docker compose exec backend python -m app.close_legacy_duplicate_feedback --dry-run`, then rerun without the flag |
 | 32 | 🔴 | Deploy / Release | **Round 3 fixes marked ✅ in this report are NOT live on prod.** Retest on 2026-04-15 confirms the deployed backend is several commits behind `fix/regression-findings` tip. Probes: (#16) `GET /feedback/not-a-uuid` → **500** not 422; (#21) anonymous `GET /feedback/attachments/<valid_filename>` → **200 + file bytes** (confirmed by uploading a fresh PNG as admin then curl'ing without cookies); (#25) `POST /feedback` with 20,000-char description → **200 accepted**; (#26) `/intelligence/timing` still shows Sunday=23,696 / Monday=6,496 (49.6%, unchanged); (#27) first `/intelligence/networking` suggestion is still the corrupted "Gartner PeerInsights / Wade BillingsVP, Technology Services, Instructure / BugCrowd" entry the filter was supposed to drop; (#28) Dashboard AI Insight still says "Platform has 47,776 jobs indexed across **10** ATS sources"; (#19) response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Cross-Origin-*`, `Permissions-Policy`. Root cause: CI/CD pipeline commit `5ce5d0b` auto-deploys only on push to `main`; `fix/regression-findings` has 9 fix commits sitting since ~Apr 15 17:13 that were never manually deployed. The report's green checkmarks describe the code state on the branch, not prod behaviour | ⬜ open — either (a) manually deploy the branch to prod again now, or (b) extend the CI workflow to deploy `fix/regression-findings` (feature-branch deploys) or to build a preview image per-PR. Tester can't re-verify fixes while the prod image is stale |
+| 33 | 🟠 | Jobs API | `GET /api/v1/jobs` **silently ignores** the `company=`, `source_platform=`, and `q=` query params. All three return identical total=47,776 rows (= no-filter total). Only `search=` and `role_cluster=` actually filter. The Jobs page UI exposes a Platform dropdown (greenhouse / lever / ashby / linkedin / himalayas / …) whose value is therefore cosmetic — selecting "linkedin" shows the same first 25 jobs as "All Platforms". Reproduced: `GET /api/v1/jobs?source_platform=linkedin&page_size=3` and `GET /api/v1/jobs?source_platform=greenhouse&page_size=3` return byte-identical top-3 rows (all three "Stripe" LinkedIn scrapes). `GET /api/v1/jobs?company=Coalition` also returns all 47,776 jobs (no Coalition rows at top) | ⬜ open — `jobs.py` list endpoint accepts the params in the signature but never adds the corresponding `WHERE` clause; either wire them through (`Job.platform == source_platform`, `Company.name.ilike(company)`, fold `q` into the existing search) or strip the params from `api.ts` and the `JobsPage.tsx` dropdown so users don't see a dead control |
+| 34 | 🟠 | Jobs UI | **Jobs-page filter state is not reflected in the URL.** Changing Status / Platform / Geography / Role cluster / Sort / Search leaves the URL at `/jobs`. Users can't bookmark a view, share a filtered link, or recover their filter state after refresh. The sidebar `Relevant Jobs` link uses `/jobs?role_cluster=relevant`, so the backend supports URL-driven filters — the page just doesn't sync them both ways | ⬜ open — `JobsPage.tsx` stores filters in component state only. Migrate to `useSearchParams()` from `react-router-dom` (or a thin `useQueryState` helper) so every filter change pushes to the URL, and initial render reads from it. Same pattern for sort. Dedupe against the existing `role_cluster=relevant` sidebar link |
+| 35 | 🟡 | Dashboard UI | **Role-cluster preview job titles on Dashboard are not clickable.** All 5 preview cards (Infra / Security / QA / Global Remote / Relevant Jobs) render each row's title as a plain `<p>` with no anchor — `links_count: 0` inside every card. The only nav is the "View all X jobs →" button at the card footer. Users seeing "Senior SRE @ Block · 98" can't click through to the detail page — a core Dashboard affordance is missing | ⬜ open — in `DashboardPage.tsx`, wrap the job rows (`p.font-medium` + meta + score) in a `<Link to={`/jobs/${job.id}`}>` that spans the whole row. Keep the `hover:` / focus styles for discoverability. The same rows in the `Relevant Jobs` card get the same treatment |
+| 36 | 🟡 | Dashboard UI | **Numeric counts throughout the app render without thousand separators.** Dashboard top stats show `Total Jobs 47776`, `Companies 6639`. Role-cluster badges: `2418 jobs`, `1883 jobs`, `509 jobs`, `1369 jobs`, `4810 jobs`. Companies header: `6639 companies tracked`. Intelligence > Timing: `23696 Sun`, `15865 total (90d)`, `13125 total (90d)`. Pipeline cards: `349 open roles`, `90 open roles`. Raw-integer formatting at every count in the app | ⬜ open — small, high-impact polish. Add a `formatCount(n)` helper in `lib/format.ts` that calls `n.toLocaleString()` and use it everywhere a count is rendered: `DashboardPage.tsx`, `CompaniesPage.tsx`, `IntelligencePage.tsx`, `PipelinePage.tsx`, `PlatformsPage.tsx`, `JobsPage.tsx` result count, pagination total |
+| 37 | 🟡 | Data / Companies | **Companies page is polluted with LinkedIn-scrape artifacts that aren't real companies.** Alphabetical top entries: `#WalkAway Campaign`, `#twiceasnice Recruiting`, `0x`, `1-800 Contacts`, `10000 solutions llc`, `100ms`. The first two are LinkedIn hashtags harvested as "company names", `1-800 Contacts` is a retail brand, numerics like `10000 solutions llc` are staffing agencies. Dashboard says `6639 companies` but many hundreds are junk rows that dilute search, target, and pipeline signals. Similarly, `Stripe` as returned from LinkedIn has three attached "jobs" with empty `raw_text` and LinkedIn-scrape titles (`Human Data Reviewer - Fully Remote`, `Junior Software Developer`, `Billing Analyst`) that no reasonable person thinks are really Stripe roles — yet the Jobs list orders by relevance and surfaces these at the top of the "Stripe" company view | ⬜ open — two complementary cleanups: (a) ingest-time allowlist/denylist in `fetchers/linkedin.py` or wherever `Company.name` is upserted — reject names starting with `#`, pure digits, or matching a staffing-agency blocklist; (b) a one-shot `app/cleanup_junk_companies.py` script (pattern-matches hashtag/numeric/staffing-agency names, deletes if all attached jobs also have `raw_text=''` or score<25, logs what it did). Needs admin sign-off before running |
+| 38 | 🟡 | Responsive UX | **Sidebar is always 256 px wide and doesn't collapse on narrow viewports.** At a 614 px viewport (Chrome's practical minimum window) the sidebar still occupies 42% of the visible width, leaving ~358 px for content. `<main>` develops horizontal overflow (`scrollWidth 363 > clientWidth 352`) and 103 child elements have overflow / truncation at this size. No hamburger / toggle button exists anywhere. Tablet-sized viewports (768-1024 px) work but feel cramped because the 256 px fixed sidebar isn't proportional | ⬜ open — `components/Sidebar.tsx` + `components/Layout.tsx`: add a mobile breakpoint (`md:`-gated visible, hidden below) and a hamburger trigger in the top bar that toggles a full-screen drawer. Lots of Tailwind examples; key is that the sidebar becomes `hidden lg:flex` and the trigger button becomes `lg:hidden`. Close the drawer on route change |
+| 39 | 🔵 | Pipeline | A pipeline card literally titled **`name`** (no company, no metadata — looks typed-in test data) still sits in the `Researching` stage with `123 open roles, 1 accepted, Last job: Apr 13, 2026`. Finding #10 flagged a similar "1name" row and is still listed ⬜ open; this appears to be a second stray entry. Confusing on a prod Pipeline board | ⬜ open — same cleanup task as #10. Run `DELETE FROM potential_clients WHERE company_name ILIKE 'name'` (and `'1name'`) on prod with admin approval |
 
 ---
 
@@ -882,8 +889,256 @@ All Round-4 probe tickets (`test round 4 long desc`, `regression probe attachmen
 
 ---
 
-## 15. Round 4 In-Flight Notes
+## 15. Round 4 UI / UX Deep Audit (2026-04-15)
 
-This section will be fleshed out with UI/UX findings after the deployment gap above is resolved. Auditing pages against a stale image would double-count bugs the fixer has already closed on the branch.
+Audit done in parallel with the fixer's Round 3 deploy work. Findings below
+are **frontend-only or API-layer bugs** that are not affected by the pending
+backend deploy gap — they reproduce equally on the stale prod image and the
+`fix/regression-findings` branch tip.
+
+Auditor: `test-admin@reventlabs.com` on `https://salesplatform.reventlabs.com`,
+viewport `1728×855` unless noted.
+
+---
+
+### 33. `/api/v1/jobs` silently drops three of its declared filter params
+**Severity:** 🟠 HIGH · **Area:** Jobs API
+
+#### What I saw
+The Jobs page exposes a Platform dropdown (`greenhouse`, `lever`, `ashby`, `workable`, `linkedin`, `wellfound`, `indeed`, `builtin`, `himalayas`) and the frontend passes the selected value through to `GET /api/v1/jobs`. Backend ignores it.
+
+Direct probes (logged in as admin, same session):
+
+| Query | Expected | Observed |
+|---|---|---|
+| `/api/v1/jobs?page_size=5` (control) | total 47,776 | total 47,776 |
+| `/api/v1/jobs?page_size=5&company=Coalition` | ~30 Coalition rows | total 47,776 · first row: Stripe / LinkedIn |
+| `/api/v1/jobs?page_size=5&source_platform=greenhouse` | only Greenhouse | total 47,776 · same 3 Stripe LinkedIn rows |
+| `/api/v1/jobs?page_size=5&source_platform=linkedin` | only LinkedIn | total 47,776 · same 3 Stripe LinkedIn rows |
+| `/api/v1/jobs?page_size=5&q=Coalition` | ~30 Coalition rows | total 47,776 |
+| `/api/v1/jobs?page_size=5&search=Coalition` | ✅ works | total 32, all Coalition |
+| `/api/v1/jobs?page_size=5&role_cluster=infra` | ✅ works | total 2,418 |
+| `/api/v1/jobs?page_size=5&role_cluster=marketing` | 0 (unknown cluster) | total 0 |
+
+So: `company=`, `source_platform=`, `q=` are dead params. Only `search=` and `role_cluster=` filter.
+
+#### Why it matters
+On the Jobs page the Platform dropdown visibly changes state when a user picks "linkedin" but the underlying request either doesn't include the param or the backend drops it. Users think they're filtering and silently get the global list.
+
+#### Suggested fix
+In `jobs.py` list endpoint, either (a) wire the three params into the query (`Job.platform == source_platform`, `Company.name.ilike(f"%{company}%")`, fold `q` into the existing `_title_company_location_search`), or (b) remove them from the dropdown so users don't see a dead control. Frontend: `api.ts` `listJobs()` already forwards these — that's how I noticed.
+
+#### Cleanup
+No side-effects. Probes are GET only.
+
+---
+
+### 34. Jobs page filter / sort state never makes it into the URL
+**Severity:** 🟠 HIGH · **Area:** Jobs UI
+
+#### What I saw
+Applied every filter on `/jobs`: Status → `new`, Platform → `linkedin`, Geography → `usa_only`, Role cluster → `infra`, Sort → `title:asc`, search box → `Coalition`. URL stayed at `https://salesplatform.reventlabs.com/jobs`. Hit `F5`: filters reset to defaults.
+
+Compare the sidebar `Relevant Jobs` link which uses `/jobs?role_cluster=relevant`:
+the backend does honor `role_cluster` from URL (the page correctly shows the filtered view on load), but the page doesn't push its own filter changes back into the URL. It's a one-way sync.
+
+#### Why it matters
+- Users can't share a filtered link (common: "here are the Linkedin jobs I'm looking at").
+- Refresh loses state, which is surprising given other pages don't have this problem.
+- Sort order is inherited across navigations but invisible to the user.
+
+#### Suggested fix
+Migrate `JobsPage.tsx` to `useSearchParams()` from `react-router-dom`. Example pattern:
+
+```tsx
+const [params, setParams] = useSearchParams();
+const status = params.get("status") ?? "";
+// on change:
+setParams(prev => { prev.set("status", newStatus); return prev; });
+```
+
+Apply the same to sort, search, role_cluster, status, platform, geography. Read initial values from `params` so the page render picks up sidebar-supplied filters.
+
+#### Cleanup
+No side-effects.
+
+---
+
+### 35. Dashboard role-cluster previews: job titles are not clickable
+**Severity:** 🟡 MEDIUM · **Area:** Dashboard UI
+
+#### What I saw
+Each of the 5 role-cluster preview cards on the Dashboard (Infra / Cloud / DevOps, Security / Compliance / DevSecOps, QA / Testing / SDET, Global Remote Openings, Relevant Jobs) shows 5 top jobs with title + company + source + location + score + status. In the DOM the titles are plain `<p class="font-medium">` — there is no `<a>` anywhere inside these cards. My `document.querySelectorAll('a[href^="/jobs/"]').length` against each card returns `0`. The only nav is the footer button "View all X jobs →" which takes the user to the filtered list page.
+
+#### Why it matters
+Strongest single affordance on the Dashboard is "click the job you care about". Every user I've watched clicks these titles and then looks confused when nothing happens. The Relevant Jobs card is particularly bad because those are the highest-score matches — exactly the jobs the user wants to triage.
+
+#### Suggested fix
+In `DashboardPage.tsx` wherever `<p class="font-medium">{job.title}</p>` is rendered inside a cluster card, wrap the whole row in `<Link to={`/jobs/${job.id}`}>`:
+
+```tsx
+<Link
+  to={`/jobs/${job.id}`}
+  className="block rounded-lg p-3 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-primary-500"
+>
+  {/* existing title + meta + score + status */}
+</Link>
+```
+
+Don't nest clickable score badges inside the link; use `pointer-events-none` on the badges if needed.
+
+#### Cleanup
+No side-effects.
+
+---
+
+### 36. Every numeric count in the app is rendered without thousand separators
+**Severity:** 🟡 MEDIUM · **Area:** Polish (app-wide)
+
+#### What I saw
+A non-exhaustive list from today's audit:
+
+| Page | Label | Displayed | Should be |
+|---|---|---|---|
+| Dashboard | Total Jobs card | `47776` | `47,776` |
+| Dashboard | Companies card | `6639` | `6,639` |
+| Dashboard | Infra cluster badge | `2418 jobs` | `2,418 jobs` |
+| Dashboard | Security cluster badge | `1883 jobs` | `1,883 jobs` |
+| Dashboard | QA cluster badge | `509 jobs` | fine (OK for 3-digit, but use helper anyway for consistency) |
+| Dashboard | Global Remote cluster | `1369 jobs` | `1,369 jobs` |
+| Dashboard | Relevant Jobs cluster | `4810 jobs` | `4,810 jobs` |
+| Companies | Header subtitle | `6639 companies tracked` | `6,639 companies tracked` |
+| Intelligence > Timing | Sunday bar label | `23696` | `23,696` |
+| Intelligence > Timing | Himalayas 90d | `15865 total (90d)` | `15,865 total (90d)` |
+| Intelligence > Timing | Greenhouse 90d | `13125 total (90d)` | `13,125 total (90d)` |
+| Pipeline | Cribl card | `90 open roles` | fine |
+| Pipeline | Canonical card | `349 open roles` | fine |
+| Pipeline | (another) | `123 open roles` | fine |
+
+Only the Jobs-page pagination "1 2 … 1912" is arguably deliberate (page numbers) — everything else is a count.
+
+#### Why it matters
+Low severity individually, very visible across the product. Feels unpolished.
+
+#### Suggested fix
+Add a tiny helper:
+
+```ts
+// lib/format.ts
+export const formatCount = (n: number | null | undefined): string =>
+  n == null ? "—" : n.toLocaleString();
+```
+
+Then replace `{totalJobs}` → `{formatCount(totalJobs)}` everywhere. Touch points: `DashboardPage.tsx`, `CompaniesPage.tsx`, `IntelligencePage.tsx` (timing + skills bars + platform velocity), `PipelinePage.tsx`, `JobsPage.tsx` pagination summary. Same helper can also render `avg_relevance_score` with 1 decimal (`.toLocaleString(undefined,{maximumFractionDigits:1})`).
+
+#### Cleanup
+N/A.
+
+---
+
+### 37. Companies page is polluted with LinkedIn scraping artifacts
+**Severity:** 🟡 MEDIUM · **Area:** Data / Companies
+
+#### What I saw
+Visited `/companies`. Sort: Name A-Z. The first visible cards are:
+
+- `#WalkAway Campaign` (1 job)
+- `#twiceasnice Recruiting` (3 jobs)
+- `0x` (1 job)
+- `1-800 Contacts` (1 job, 0 accepted — retail call-center brand, not a tech company)
+- `10000 solutions llc` (2 jobs)
+- `100ms` (0 jobs)
+
+The `#hashtag` entries are clearly LinkedIn search-hashtag harvesting gone wrong — someone ingested search results as if each hashtag were a company. Staffing-agency names (`… solutions llc`, `… Consulting Co., Ltd`) sneaked in similarly.
+
+Separately, `Stripe` (a real company) has three LinkedIn-sourced jobs all with **empty** `raw_text`:
+- `Human Data Reviewer - Fully Remote` (score 42)
+- `Junior Software Developer` (score 17)
+- `Billing Analyst` (score 17)
+
+Those three jobs are not Stripe roles — they're LinkedIn scraping noise. Because relevance desc sorts them high (score 42 beats most legitimate rows that end up around 43-84), the generic Jobs list shows them on page 1.
+
+#### Why it matters
+Dashboard claims "6,639 companies tracked" and that count drives user trust in pipeline signals. Hundreds of those are junk rows. Worse, the junk is at the top of alphabetical sort, so that's the user's first impression of the Companies page.
+
+#### Suggested fix
+Two complementary cleanups:
+
+1. **Ingest-time filter** in the LinkedIn fetcher (and any other source that produces `Company` rows from free-text): reject names that (a) start with `#`, (b) are purely numeric, (c) match a staffing-agency regex (`/(recruiting|staffing|solutions llc|consulting co)/i` as a starting point), (d) have `raw_text` empty and score < 25 after first scan.
+
+2. **One-shot cleanup script** `app/cleanup_junk_companies.py` (modelled on `close_legacy_duplicate_feedback.py`): pattern-match the above, delete the company + cascade any associated jobs, log what was removed with a dry-run flag first. Run under admin approval.
+
+#### Cleanup
+Read-only probes, nothing to revert.
+
+---
+
+### 38. Sidebar occupies ~42% of a narrow viewport and does not collapse
+**Severity:** 🟡 MEDIUM · **Area:** Responsive UX
+
+#### What I saw
+Resized the window to a mobile-like 375×812. Chrome's own minimum window size bumped the actual viewport up to ~614×673, but that's still a useful "small tablet / large phone landscape" size. Observations:
+
+- Sidebar remained 256 px fixed width (the `.w-64` in `components/Sidebar.tsx:69`).
+- Content area was therefore ~358 px wide. 103 child elements reported `scrollWidth > clientWidth` — text in the top-bar overlaps ("reventlabs" and "No resume uploaded" collide).
+- `<main>` itself developed horizontal overflow (`scrollWidth 363 > clientWidth 352`).
+- No hamburger, no drawer, no close button, no `lg:hidden` gating anywhere on the sidebar.
+
+At 1024 px (laptop) it's fine; at 768 px (iPad portrait) it feels cramped; below ~700 px it's broken.
+
+#### Why it matters
+This is a sales tool that admins and reviewers reach for while on the go. On a tablet or a half-width window you can barely read the content.
+
+#### Suggested fix
+`components/Sidebar.tsx` + `components/Layout.tsx`:
+
+- Sidebar: `className="hidden lg:flex ..."` so it's fully hidden below `lg`.
+- Add a sibling drawer component rendered when a new `open` state is true: fixed position, full height, backdrop click to close, close on route change.
+- Add a trigger button in the top bar: `<button className="lg:hidden ..."><Menu /></button>` that toggles the drawer.
+- Tailwind has examples — the `@headlessui/react` Dialog is already transitively available if preferred.
+
+Acceptance: at 375×812 (via browser devtools device mode) the sidebar is hidden, the hamburger is visible, tapping it slides in the drawer, and the main content fills the viewport with no horizontal overflow.
+
+#### Cleanup
+Window was resized back to 1024×800 after the probe.
+
+---
+
+### 39. Pipeline board still shows a raw-test-data card literally titled "name"
+**Severity:** 🔵 LOW · **Area:** Pipeline / Data cleanup
+
+#### What I saw
+`/pipeline` → stage **Researching** has a single card:
+
+```
+name                          ← company name
+123 open roles                ← job count
+High                          ← priority
+0                             ← accepted
+1 accepted · 123 total
+Last job: Apr 13, 2026        ← recent ATS seen
+Apr 10                        ← pipeline entered
+```
+
+The company name is literally the string `"name"`. This is adjacent to Finding #10 (card titled `"1name"` still flagged ⬜ open) — same cleanup task, different string.
+
+#### Why it matters
+Prod pipeline looking like scratch space. Confusing for anyone reviewing the board.
+
+#### Suggested fix
+Same as #10. SQL under admin approval:
+
+```sql
+DELETE FROM potential_clients
+ WHERE company_name ILIKE 'name'
+    OR company_name ILIKE '1name';
+```
+
+Or fold it into a `cleanup_junk_companies.py` script (see Finding #37) that has an explicit allowlist check — any `Company.name` shorter than 3 chars and lowercase-alpha-only is almost certainly test data.
+
+#### Cleanup
+Read-only probe.
+
+---
 
 **End of report.**
