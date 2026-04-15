@@ -227,8 +227,19 @@ action_deploy() {
     "$tag" "$prev" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$APP_DIR/.last-deploy.json"
 
-  log "Cleanup: prune dangling images (keep last 3 tags)"
+  log "Cleanup: prune dangling + keep only last 3 tagged images"
   docker image prune -f >/dev/null 2>&1 || true
+  # Drop all but the 3 most recent platform-backend / platform-frontend tags.
+  # CreatedAt sort, skip first 3, rm the rest. -f in case a transient "is being
+  # used by another container" error slips through.
+  for repo in platform-backend platform-frontend; do
+    docker images "$repo" --format '{{.CreatedAt}}\t{{.Tag}}' \
+      | sort -r \
+      | awk 'NR>3 && $NF != "latest" {print $NF}' \
+      | while read -r stale_tag; do
+          [[ -n "$stale_tag" ]] && docker rmi -f "${repo}:${stale_tag}" >/dev/null 2>&1 || true
+        done
+  done
 
   # Clean up any GHCR login we established
   [[ -n "$ghcr_user" ]] && ghcr_logout && trap - EXIT
