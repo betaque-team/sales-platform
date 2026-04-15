@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models.job import Job
 from app.models.review import Review
 from app.models.pipeline import PotentialClient
-from app.models.company import Company
+from app.models.company import Company, CompanyATSBoard
 from app.models.company_contact import CompanyContact
 from app.models.application import Application
 from app.models.user import User
@@ -127,11 +127,20 @@ async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession =
     )
     sources = [{"platform": r[0], "count": r[1]} for r in src_result]
 
-    # Total number of distinct ATS sources — used in insight copy so we
-    # don't show a misleading "6 ATS sources" when there are more.
-    total_sources = (await db.execute(
-        select(func.count(func.distinct(Job.platform)))
-    )).scalar() or 0
+    # Total number of distinct ATS sources — used in insight copy.
+    # Previously this was `COUNT(DISTINCT Job.platform)`, which hid any
+    # configured platform whose boards hadn't produced a job row yet
+    # (bamboohr, recruitee, wellfound, etc. at the time of regression
+    # finding 28). Match the Platforms page instead: union of the distinct
+    # platform names from CompanyATSBoard *and* Job. That way the insight
+    # copy always agrees with the Platforms tab.
+    board_platforms = (await db.execute(
+        select(func.distinct(CompanyATSBoard.platform))
+    )).scalars().all()
+    job_platforms = (await db.execute(
+        select(func.distinct(Job.platform))
+    )).scalars().all()
+    total_sources = len({p for p in (*board_platforms, *job_platforms) if p})
 
     # Role cluster split
     cluster_result = await db.execute(

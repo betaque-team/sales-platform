@@ -1,6 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from uuid import UUID
+
+
+# Reasonable bounds for priority (UI uses 0..3 today; 100 leaves headroom without
+# letting anyone push 10-digit values that break sort comparators) and notes
+# (plenty for deal context, cheap to store, blocks a 100 KB+ payload DOS that
+# was landing in prod — regression finding 15).
+PIPELINE_MAX_PRIORITY = 100
+PIPELINE_MAX_NOTES_LENGTH = 4000
 
 
 class PipelineItemOut(BaseModel):
@@ -27,8 +35,8 @@ class PipelineItemOut(BaseModel):
 
 class PipelineUpdate(BaseModel):
     stage: str | None = None
-    priority: int | None = None
+    priority: int | None = Field(default=None, ge=0, le=PIPELINE_MAX_PRIORITY)
     assigned_to: UUID | None = None
     resume_id: UUID | None = None
     applied_by: UUID | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=PIPELINE_MAX_NOTES_LENGTH)

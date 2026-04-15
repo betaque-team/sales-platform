@@ -3,6 +3,7 @@
 import json
 import os
 import uuid
+from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -114,7 +115,7 @@ async def create_feedback(
 
 @router.post("/{feedback_id}/attachments")
 async def upload_attachment(
-    feedback_id: str,
+    feedback_id: UUID,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -161,7 +162,7 @@ async def upload_attachment(
 
 @router.delete("/{feedback_id}/attachments/{filename}")
 async def delete_attachment(
-    feedback_id: str,
+    feedback_id: UUID,
     filename: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -300,11 +301,13 @@ async def feedback_stats(
 
 @router.get("/{feedback_id}", response_model=FeedbackOut)
 async def get_feedback(
-    feedback_id: str,
+    feedback_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get single feedback item."""
+    # Path param is typed UUID so FastAPI returns 422 on a malformed id
+    # instead of letting SQLAlchemy raise and bubble up as 500.
     fb = await db.get(Feedback, feedback_id)
     if not fb:
         raise HTTPException(404, "Feedback not found")
@@ -317,7 +320,7 @@ async def get_feedback(
 
 @router.patch("/{feedback_id}", response_model=FeedbackOut)
 async def update_feedback(
-    feedback_id: str,
+    feedback_id: UUID,
     body: FeedbackUpdate,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),

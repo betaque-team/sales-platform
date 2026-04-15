@@ -3,7 +3,7 @@
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -15,7 +15,12 @@ from app.models.company import Company
 from app.models.job import Job
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
-from app.schemas.pipeline import PipelineItemOut, PipelineUpdate
+from app.schemas.pipeline import (
+    PipelineItemOut,
+    PipelineUpdate,
+    PIPELINE_MAX_PRIORITY,
+    PIPELINE_MAX_NOTES_LENGTH,
+)
 
 # Default stages seeded on first access
 DEFAULT_STAGES = [
@@ -31,8 +36,8 @@ DEFAULT_STAGES = [
 class PipelineCreateRequest(BaseModel):
     company_id: str
     stage: str = "new_lead"
-    priority: int = 0
-    notes: str = ""
+    priority: int = Field(default=0, ge=0, le=PIPELINE_MAX_PRIORITY)
+    notes: str = Field(default="", max_length=PIPELINE_MAX_NOTES_LENGTH)
 
 
 class StageCreate(BaseModel):
