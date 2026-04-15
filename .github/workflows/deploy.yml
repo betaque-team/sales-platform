@@ -64,6 +64,13 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Deploying tag: $TAG"
 
+      # VM is Oracle Ampere A1 (aarch64). Ubuntu runners are x86_64, so we
+      # need QEMU to emulate ARM during build. buildx drives the multi-arch
+      # build; `platforms: linux/arm64` in each build-push step scopes it.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -78,6 +85,7 @@ jobs:
         with:
           context: platform/backend
           push: true
+          platforms: linux/arm64
           tags: |
             ${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE_BACKEND }}:latest
@@ -89,6 +97,7 @@ jobs:
         with:
           context: platform/frontend
           push: true
+          platforms: linux/arm64
           tags: |
             ${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE_FRONTEND }}:latest
