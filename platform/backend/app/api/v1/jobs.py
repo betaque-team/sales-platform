@@ -15,6 +15,7 @@ from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user, require_role
 from app.schemas.job import JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest
 from app.utils.sanitize import sanitize_html
+from app.utils.sql import escape_like
 
 
 async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
@@ -73,11 +74,14 @@ async def list_jobs(
         query = query.where(Job.platform == effective_platform)
     if company_id:
         query = query.where(Job.company_id == company_id)
-    if company:
+    if company and company.strip():
         # `company=` is a name-substring filter (the id-based filter lives on
         # `company_id`). Matches the same ilike pattern used for the combined
-        # `search` box so the two behave consistently.
-        query = query.where(Job.company.has(Company.name.ilike(f"%{company}%")))
+        # `search` box so the two behave consistently. Findings 84+85:
+        # escape LIKE metachars and strip whitespace-only input so `"100%"`
+        # / `"dev_ops"` / `"   "` don't degenerate into wildcard matches.
+        needle = f"%{escape_like(company.strip())}%"
+        query = query.where(Job.company.has(Company.name.ilike(needle, escape="\\")))
     geo = geography_bucket or geography
     if geo:
         query = query.where(Job.geography_bucket == geo)
@@ -87,13 +91,17 @@ async def list_jobs(
             query = query.where(Job.role_cluster.in_(relevant_clusters))
         else:
             query = query.where(Job.role_cluster == role_cluster)
-    if effective_search:
-        # Search across title, company name, and location
+    if effective_search and effective_search.strip():
+        # Search across title, company name, and location. Findings 84+85:
+        # strip whitespace-only input and escape LIKE metachars — a search
+        # for `"100%"` must not match every row, and a 3-space input must
+        # not wildcard-match random titles with triple spaces.
+        needle = f"%{escape_like(effective_search.strip())}%"
         query = query.where(
             or_(
-                Job.title.ilike(f"%{effective_search}%"),
-                Job.company.has(Company.name.ilike(f"%{effective_search}%")),
-                Job.location_raw.ilike(f"%{effective_search}%"),
+                Job.title.ilike(needle, escape="\\"),
+                Job.company.has(Company.name.ilike(needle, escape="\\")),
+                Job.location_raw.ilike(needle, escape="\\"),
             )
         )
 

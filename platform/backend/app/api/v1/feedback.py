@@ -24,6 +24,7 @@ from app.schemas.feedback import (
     VALID_PRIORITIES,
     VALID_STATUSES,
 )
+from app.utils.sql import escape_like
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
@@ -212,10 +213,13 @@ async def get_attachment(
 
     # Find the feedback row that owns this attachment. The `attachments`
     # column is a JSON-encoded string, so we LIKE-match the exact
-    # "filename": "<name>" fragment to avoid partial matches.
-    like_needle = f'%"filename": "{safe_name}"%'
+    # "filename": "<name>" fragment to avoid partial matches. Finding 84:
+    # escape LIKE metachars in `safe_name` so a filename containing a
+    # literal `%` or `_` (legal on disk) doesn't wildcard-match a
+    # different user's attachments row and return the wrong owner_id.
+    like_needle = f'%"filename": "{escape_like(safe_name)}"%'
     owner_result = await db.execute(
-        select(Feedback.user_id).where(Feedback.attachments.ilike(like_needle)).limit(1)
+        select(Feedback.user_id).where(Feedback.attachments.ilike(like_needle, escape="\\")).limit(1)
     )
     owner_id = owner_result.scalar_one_or_none()
     if owner_id is None:
