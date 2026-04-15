@@ -117,6 +117,9 @@ one place.
 | 57 | 🔵 | Pipeline / UX | **Kanban has no drag-and-drop; stage changes require per-card button clicks.** Each card has two icon-only buttons (`Move to previous stage`, `Move to next stage`) with `title` attribute (same `title` vs `aria-label` issue as Finding #45). Moving a card from `New Lead` → `Engaged` takes 4 forward-clicks per card. There are 10 cards in pipeline today, which stays manageable; at 50+ cards the friction shows. Not a functional bug but a common kanban affordance users will expect | ⬜ open (optional) — `PipelinePage.tsx`: add HTML5 drag-drop (`draggable="true"`, `onDragStart` / `onDragOver` / `onDrop` handlers) or adopt a small lib like `@dnd-kit/core`. Keep the existing arrow buttons as the accessible fallback — keyboard users can't drag. Emit the same `PATCH /api/v1/pipeline/{id} {stage}` on drop |
 | 58 | 🟡 | Companies / Jobs | **Company list cards AND Jobs table rows navigate via `div|tr.onClick` instead of `<a>`, breaking standard web-nav affordances.** `/companies`: each card is `<div class="cursor-pointer group" onClick={…}>` → `navigate('/companies/{id}')`. `/jobs`: each row is `<tr class="cursor-pointer hover:bg-gray-50" onClick={…}>` → `navigate('/jobs/{id}')`. Neither has an `<a>` inside, `tabindex`, or `role="link"`. Consequences across both pages: (a) middle-click and Ctrl/Cmd-click don't open in a new tab, (b) right-click → "Open in new tab" / "Copy link" don't work, (c) keyboard users can't Tab to the row/card, (d) screen readers announce generic container instead of a link. Additionally, `/companies/{id}` detail view's "Open Roles: N" is plain text instead of a link to `/jobs?company_id={id}` | ⬜ open — two patches: `CompaniesPage.tsx` replaces `<div onClick={navigate}>` with `<Link to={…} className="block …">`, nested buttons use `e.preventDefault();e.stopPropagation()`. `JobsPage.tsx` restructures the table: either (a) change the `<tr>` to `<tr><td><Link to="/jobs/{id}">` inside each cell (accessible) or (b) wrap the whole row in a `TableRowLink` component that stacks an invisible `<a>` covering the row + `position:relative` on the `<tr>`. Same approach on `CompanyDetailPage.tsx` for the `Open Roles` metric |
 | 59 | 🟠 | Security / XSS-adjacent | **External links on `/jobs/{id}` open in new tabs **without** `rel="noopener noreferrer"` — reverse-tabnabbing vector.** On a live Job Detail page (alphasense/greenhouse), `document.querySelectorAll('main a')` surfaces three external links: "View Original Listing" → Greenhouse (has `rel="noopener noreferrer"` ✅), "alpha-sense.com" → `target="_blank" rel="(none)"` ❌, "Careers page" (company career url) → `target="_blank" rel="(none)"` ❌. The two un-hardened anchors use `Company.website` and `Company.careers_url`. An attacker whose domain becomes a company `website`/`careers_url` (via manual admin-add, or a compromised scrape) can use `window.opener.location = 'https://phishing.example'` from the opened tab to redirect the user's original sales-platform tab to a phishing clone of the login page. Users click back to the original tab, see the login page, and re-enter credentials | ⬜ open — in `JobDetailPage.tsx` (and anywhere else `Company.website` / `Company.careers_url` / arbitrary ATS URLs are rendered): every `<a target="_blank">` must have `rel="noopener noreferrer"`. Simplest fix: add a small `<ExternalLink href={url}>…</ExternalLink>` component with those attrs baked in and replace every `<a target="_blank">` on the page. Browser behavior changed in Chrome 88 / Firefox 79 (implicit `noopener` when `target="_blank"`), but Safari and older browsers still leak `window.opener`, so the explicit `rel` is still required by modern security guides (OWASP: Reverse Tabnabbing) |
+| 60 | 🟠 | Data Quality / Export | **`/api/v1/export/contacts` emits 445 (11.8%) garbage contact rows where `first_name` is an English stop-word.** Parsed the full 3,756-row CSV with a proper quoted-CSV parser. 445 rows have `first_name` in {"help","for","the","apply","learn","us","to","in","with","on","what","our","your","at"…}, of which 148 have BOTH `first_name` AND `last_name` as stop-words (e.g. `{company:"Abbott", first:"help", last:"you", title:"Recruiter / Hiring Contact"}`, `{company:"Airbnb", first:"us", last:"at", …}`, `{company:"AbbVie", first:"for", last:"the", …}`). All 445 have `source="job_description"`, all have `email=""`, `phone=""`, `linkedin_url=""` — **zero actionable contact info**. Every single one has `title="Recruiter / Hiring Contact"` (1,348 rows total, 36% of the whole export). The root cause is the `job_description` contact-extractor: a regex like `/contact ([A-Za-z]+) ([A-Za-z]+)/` is matching on phrases like *"contact us at…"*, *"help you apply"*, *"for the role"*, *"learn more about our team"* — two adjacent tokens after a trigger word are treated as `first_name last_name` with no English-word validation, no length check, and no case-sensitivity filter (proper names are capitalized; stop-words aren't). Result: sales team sees a contacts table bloated with noise and wastes review cycles triaging phantom "Recruiter" rows. Also: `phone` and `telegram_id` columns are exported but **never populated** (0 / 3756 rows). | ⬜ open — two fixes in `workers/tasks/` (wherever `contact extraction from job_description` lives, likely `enrichment_task.py` or similar): (a) reject any name token that is in a stop-word set (`STOPWORDS = {"help","here","for","the","a","an","in","at","on","of","to","with","and","or","is","are","was","were","be","been","by","from","as","if","it","its","their","them","they","you","us","we","our","your","what","who","where","when","how","this","that","very","just","should","now","each","both","complex","motivated","assigned"}`), (b) require the first character of `first_name` and `last_name` to be uppercase ASCII letter (real names are capitalized), (c) require length ≥ 2 and ≤ 20 chars. Backfill: one-shot `app/cleanup_stopword_contacts.py` that `DELETE FROM company_contacts WHERE source='job_description' AND (lower(first_name) IN (…stopwords…) OR first_name = '' OR length(first_name) < 2)`. Also remove `phone` + `telegram_id` columns from `CONTACT_CSV_COLUMNS` in `api/v1/export.py` until the enrichment pipeline actually populates them, or document them as "future use" in the export docs |
+| 61 | 🟠 | Auth / Data Exfiltration | **All three bulk-export endpoints gate on "logged in" only — any viewer can download the entire contacts/jobs/pipeline database.** Read `platform/backend/app/api/v1/export.py` directly: `/export/jobs`, `/export/pipeline`, and `/export/contacts` all have `user: User = Depends(get_current_user)` — no `require_role(…)`. Viewer (the lowest privilege tier) gets the same CSV as admin: 3,756-row / 640 KB contacts dump including `is_decision_maker`, `email`, `email_status`, and all outreach metadata. Fetched as admin on prod: `GET /api/v1/export/contacts` → 200, Content-Length ≈ 640,000 bytes, no pagination, no rate-limit. The `/companies` page shows a prominent "Export Contacts" button (`<a href={exportContactsUrl()}>`) to every logged-in role — `CompaniesPage.tsx` line 88 has no role-guard around the button. Consequence: **a single compromised viewer account (e.g. a contractor given read-only access for onboarding) can exfiltrate the entire prospect list in one HTTP GET.** No audit log entry is written for exports (no visible signal anywhere in `/monitoring`). Also: query has no `LIMIT`, no streaming-chunk size guard, no tenant filter — everything relies on single-tenant assumption | ⬜ open — three patches: (a) `api/v1/export.py`: replace `Depends(get_current_user)` with `Depends(require_role("admin"))` (or at minimum `require_role("reviewer")` if sales-team reviewers are a legitimate export audience — product decision). (b) Log every export in an `audit_log` table (who, when, which endpoint, how many rows returned, filters applied). (c) `CompaniesPage.tsx`: conditionally render the "Export Contacts" button only when `user.role === "admin"` (matches the backend role gate). Optional: add a per-user export rate limit (e.g. ≤ 3 full-table exports per hour) to slow down programmatic dumps |
+| 62 | 🔵 | Data / Export | **Export CSV has two columns that are always empty; confusing for consumers.** Fully parsed the live `/api/v1/export/contacts` CSV: `phone` has 0 / 3,756 values populated; `telegram_id` has 0 / 3,756 values populated. Column headers are present in the CSV and in `CONTACT_CSV_COLUMNS` in `api/v1/export.py`. Sales team pulling this into their CRM / spreadsheet sees two "dead" columns and has no signal about whether the data is *missing* (bug) or *never collected* (product scope). Related: `last_outreach_at` and `outreach_note` are also empty in the current sample but that's expected (no outreach activity yet) — those become meaningful once sales starts working the list. `phone`/`telegram_id` won't fill themselves | ⬜ open — two valid paths: (a) **wire up the enrichment pipeline** to populate `phone` and `telegram_id` for `role_email` and `website_scrape` sources (probably a Hunter.io / Apollo / Clearbit call), at which point the columns become useful, or (b) **remove the columns from the export** until they are populated — edit `CONTACT_CSV_COLUMNS` in `api/v1/export.py` to drop `phone` and `telegram_id`, and stop appending those values in the row builder. Least-work: option (b) now, option (a) when enrichment is added |
 
 ---
 
@@ -1961,6 +1964,281 @@ Two-part:
 2. Audit the other places that render arbitrary URLs: company detail (same `website`/`careers_url`), any platform/ATS redirect, any Intelligence > Networking "source URL" link, etc. A grep for `target="_blank"` should surface all of them.
 
 3. Optional belt-and-suspenders: add a global ESLint rule (e.g. `react/jsx-no-target-blank`) that flags any `target="_blank"` without `rel="noopener"` at lint-time.
+
+#### Cleanup
+Read-only probe.
+
+---
+
+## 18. Round 4F — Bulk export endpoint audit
+
+Round 4F focused on the three bulk-export endpoints (`/api/v1/export/{jobs,pipeline,contacts}`), which are reachable from the Export Contacts button on `/companies` but were not previously exercised. Findings #60–#62 came out of parsing the full 3,756-row contacts CSV and cross-referencing the response with `platform/backend/app/api/v1/export.py`.
+
+### 60. Contact export is 11.8% stop-word junk rows from `source=job_description`
+**Severity:** 🟠 HIGH · **Area:** Data Quality / Export
+
+#### What I saw
+```js
+// In /companies tab, parse the live CSV.
+const r = await fetch('/api/v1/export/contacts', {credentials: 'include'});
+const csv = await r.text();
+// …proper quoted-CSV parser…
+// Breakdown:
+{
+  rowCount:         3756,
+  hdrCount:         19,
+  emailPresent:     1427,   // only 38 % have any email
+  phonePresent:     0,      // column always empty
+  telegramPresent:  0,      // column always empty
+  linkedinPresent:  620,
+  uniqueCompanies:  957,
+  sourceBuckets: {
+    job_description: 1348,  // <- the junk source
+    role_email:       156,
+    website_scrape:  2252
+  },
+  confidenceBuckets: { "0.4": 156, "0.7": 3268, "0.8999999999999999": 332 },
+  topTitles: [
+    ["Recruiter / Hiring Contact", 1348],  // ← all from job_description
+    ["",                            120],
+    ["CEO",                          56],
+    ["Chief Financial Officer",      56],
+    …
+  ],
+  weirdFirstCount: 445,     // first_name is an English stop-word
+  weirdBothCount:  148,     // BOTH first and last are stop-words
+}
+```
+
+Concrete junk rows (sample of 148 where both names are stop-words):
+
+| company | first_name | last_name | title | source | email |
+|---------|------------|-----------|-------|--------|-------|
+| Abbott | help | you | Recruiter / Hiring Contact | job_description | (empty) |
+| AbbVie | for | the | Recruiter / Hiring Contact | job_description | (empty) |
+| Airbnb | us | at | Recruiter / Hiring Contact | job_description | (empty) |
+| Airbnb | us | if | Recruiter / Hiring Contact | job_description | (empty) |
+| AltScore | in | our | Recruiter / Hiring Contact | job_description | (empty) |
+| AHEAD | us | at | Recruiter / Hiring Contact | job_description | (empty) |
+| Addepar | us | to | Recruiter / Hiring Contact | job_description | (empty) |
+| American Regent, Inc. | with | division | Recruiter / Hiring Contact | job_description | (empty) |
+| 200510503Z Thermo Fisher… | apply | for | Recruiter / Hiring Contact | job_description | (empty) |
+
+All 148 rows have empty `email`, `phone`, `linkedin_url`, `telegram_id`. **Zero actionable data** — they pollute outreach lists with phantom "contacts" derived from English prose in job descriptions.
+
+The broader count of 445 stop-word-first-name rows includes ones where the *second* token happened to look like a name (e.g. `{first:"learn", last:"Tools", title:"Recruiter / Hiring Contact"}`). Those are equally useless.
+
+#### Why it matters
+- Sales team opens the Contacts export, sees 3,756 rows, and immediately loses trust when 1 in 9 is garbage.
+- CRM imports will ingest the noise and waste enrichment credits.
+- The `confidence_score=0.7` is the same for the good `website_scrape` rows (real exec names) and the junk `job_description` rows, so a downstream filter by confidence doesn't help.
+- The `phone` and `telegram_id` columns are always empty (0/3756) — adds to the impression of broken data.
+
+#### Root cause (from matching behavior to code)
+The extractor that reads `source="job_description"` is running a regex over free-text like *"please help us at careers@…"* / *"apply for the role at…"* / *"learn more about our team"* / *"reach out to us if…"* and treating two adjacent tokens after the trigger as `first_name last_name`. There's no:
+
+- English stop-word filter
+- Uppercase-first-letter check (real names are capitalized; `help`, `for`, `us`, `to` are not)
+- Minimum length / alphabetic constraint
+- Frequency guard (the same pair `("for","the")` appears across dozens of unrelated companies — obviously not a name)
+
+#### Suggested fix
+`workers/tasks/` wherever the contact extraction for `source=job_description` happens (likely `enrichment_task.py` / `_ai_resume.py` neighbour):
+
+```python
+STOPWORDS = {
+    "help","here","click","read","learn","apply","view","send","what","who","where","when","how",
+    "this","that","our","your","we","the","a","an","in","at","on","of","to","for","with","and",
+    "or","is","are","was","were","be","been","by","from","as","if","it","its","their","them",
+    "they","he","she","you","us","so","do","does","did","up","down","out","over","about","into",
+    "more","most","other","some","such","no","not","only","own","same","than","too","very","can",
+    "will","just","should","now","each","both","back","complex","customer","motivated","regarding",
+    "themselves","yourself","key","business","compliance","division","environment","high",
+}
+
+def looks_like_name(first: str, last: str) -> bool:
+    for tok in (first, last):
+        if not tok: return False
+        if tok.lower() in STOPWORDS: return False
+        if not tok[0].isupper(): return False
+        if not (2 <= len(tok) <= 20): return False
+        if not tok.replace("-", "").replace("'", "").isalpha(): return False
+    return True
+
+# Before saving a contact:
+if not looks_like_name(first_name, last_name):
+    continue  # skip — not a real name
+```
+
+Backfill one-shot (similar to `app/close_legacy_duplicate_feedback.py` pattern):
+
+```python
+# app/cleanup_stopword_contacts.py
+from sqlalchemy import delete
+from app.models.company_contact import CompanyContact
+from app.database import get_sync_session
+
+STOPWORDS = {…}  # same set
+
+def main(dry_run: bool = True):
+    sess = get_sync_session()
+    candidates = sess.query(CompanyContact).filter(
+        CompanyContact.source == "job_description"
+    ).all()
+    to_delete = [
+        c.id for c in candidates
+        if (c.first_name or "").lower() in STOPWORDS
+        or (c.last_name or "").lower() in STOPWORDS
+        or not (c.first_name or "") or len(c.first_name) < 2
+    ]
+    print(f"Would delete {len(to_delete)} of {len(candidates)}")
+    if not dry_run:
+        sess.execute(delete(CompanyContact).where(CompanyContact.id.in_(to_delete)))
+        sess.commit()
+```
+
+#### Cleanup
+Read-only probe. Fetched the export but did not submit, modify, or delete anything.
+
+---
+
+### 61. Bulk-export endpoints gate on "logged in" only — any viewer can dump the whole DB
+**Severity:** 🟠 HIGH · **Area:** Auth / Data Exfiltration
+
+#### What I saw
+Read `platform/backend/app/api/v1/export.py` directly (the file, not just the network response):
+
+```python
+@router.get("/jobs")
+async def export_jobs(
+    …,
+    user: User = Depends(get_current_user),   # ← no require_role
+    db: AsyncSession = Depends(get_db),
+): …
+
+@router.get("/pipeline")
+async def export_pipeline(
+    …,
+    user: User = Depends(get_current_user),   # ← no require_role
+    db: AsyncSession = Depends(get_db),
+): …
+
+@router.get("/contacts")
+async def export_contacts(
+    …,
+    user: User = Depends(get_current_user),   # ← no require_role
+    db: AsyncSession = Depends(get_db),
+): …
+```
+
+All three endpoints use plain `get_current_user`. Nothing scopes by `user.role`, `user.tenant_id`, or `user.id`. The query is `select(CompanyContact, Company.name).join(Company …)` — no `WHERE` clause bound to the caller.
+
+Live probe (logged in as `admin`, `test-admin@reventlabs.com`):
+```
+GET /api/v1/export/contacts     → 200, ~640 KB, 3,756 rows
+```
+No rate limit visible; no audit log written anywhere `/monitoring` can see.
+
+Front-end confirmation — `CompaniesPage.tsx` line 88:
+```tsx
+<a href={exportContactsUrl()} className="…" title="Export all contacts as CSV">
+  <Download className="h-4 w-4" /> Export Contacts
+</a>
+```
+No `{user.role === 'admin' && …}` guard. Every logged-in role sees the button.
+
+Anonymous check:
+```
+GET /api/v1/export/contacts  (credentials:'omit')  → 401 Unauthorized
+```
+Good — anonymous is blocked. But reviewer / viewer / admin all get 200.
+
+#### Why it matters
+- A compromised viewer account (contractor on-boarded with read-only access, stolen session cookie from a coffee-shop WiFi attack, etc.) can download the entire sales prospect list in one GET. 3,756 contacts × 957 companies × email metadata is a meaningful competitive-intel leak.
+- There's no audit log signal. No one will notice that a viewer pulled the whole CSV.
+- The same gap applies to `/export/jobs` (the open-role list is less sensitive but is still proprietary scrape output) and `/export/pipeline` (**which includes `notes` — free-text fields that may contain "John at Acme is unhappy with their current vendor" type commentary**).
+- The product is single-tenant today, but if multi-tenant support ever ships, this becomes a cross-tenant data leak the moment the first tenant splits out.
+
+#### Suggested fix
+Three patches:
+
+1. `platform/backend/app/api/v1/export.py`:
+   ```python
+   from app.api.deps import require_role
+
+   @router.get("/jobs")
+   async def export_jobs(…, user: User = Depends(require_role("admin")), …): …
+   @router.get("/pipeline")
+   async def export_pipeline(…, user: User = Depends(require_role("admin")), …): …
+   @router.get("/contacts")
+   async def export_contacts(…, user: User = Depends(require_role("admin")), …): …
+   ```
+   If sales-team reviewers have a legitimate export need, use `require_role("reviewer")` (which includes admin+super_admin). Don't allow viewer.
+
+2. Audit log — new `audit_log` table or re-use `scan_log` style:
+   ```python
+   await db.execute(insert(AuditLog).values(
+       user_id=user.id, action="export_contacts",
+       row_count=len(rows), filter_params=str(dict(role_category=…, …)),
+       created_at=datetime.utcnow(),
+   ))
+   ```
+
+3. `platform/frontend/src/pages/CompaniesPage.tsx`:
+   ```tsx
+   {user?.role === 'admin' && (
+     <a href={exportContactsUrl()} …>Export Contacts</a>
+   )}
+   ```
+   Keeps the UI aligned with the backend role gate. Also do the same for any "Export Jobs" / "Export Pipeline" buttons (grep for `exportJobsUrl`, `exportPipelineUrl`).
+
+Optional — add a per-user rate limit via `slowapi` or a simple Redis counter: e.g. ≤ 3 full-table exports per hour per user. Slows down programmatic scraping even by authorised admins.
+
+#### Cleanup
+Read-only probe. No mutations. Server-side: no patch applied yet — this finding records the gap so the bug-fixer can gate it.
+
+---
+
+### 62. Export CSV has two permanently-empty columns (`phone`, `telegram_id`)
+**Severity:** 🔵 LOW · **Area:** Data / Export
+
+#### What I saw
+Parsed all 3,756 rows; counted populated columns:
+```
+phone        : 0 / 3756
+telegram_id  : 0 / 3756
+email        : 1427 / 3756  (38 %)
+linkedin_url : 620 / 3756   (16 %)
+```
+
+Columns are declared in `CONTACT_CSV_COLUMNS` (`api/v1/export.py` line 146) and written for every row (`rows.append([…, contact.phone, contact.linkedin_url, contact.telegram_id, …])`) — but the values are always empty strings because the enrichment pipeline never writes to `CompanyContact.phone` or `CompanyContact.telegram_id`.
+
+#### Why it matters
+Low severity, but:
+- Sales pulls the CSV into a CRM and sees two empty columns → looks like a bug or missing data.
+- Future enrichment devs will assume these columns are used and build on the false baseline.
+- Noise in sample/demo exports (e.g. when showing the platform to new prospective users).
+
+#### Suggested fix
+Pick one:
+
+**(a) Remove from export until populated:**
+```python
+# api/v1/export.py, line 146-152
+CONTACT_CSV_COLUMNS = [
+    "company", "first_name", "last_name", "title", "role_category",
+    "department", "seniority", "email", "email_status",
+    # removed: "phone", "telegram_id",
+    "linkedin_url", "is_decision_maker",
+    "outreach_status", "outreach_note", "last_outreach_at",
+    "source", "confidence_score", "created_at",
+]
+# row builder (line 184-206): drop contact.phone and contact.telegram_id indices
+```
+
+**(b) Wire up enrichment:** add a Hunter.io / Apollo / Clearbit call in `workers/tasks/enrichment_task.py` that populates `phone` and `telegram_id` when available (telegram is unusual for B2B sales — consider dropping it entirely and substituting a different signal like Twitter/X handle or company-wide Slack Connect invite URL).
+
+Least-work path: (a) now, then (b) when enrichment scope is decided.
 
 #### Cleanup
 Read-only probe.
