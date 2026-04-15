@@ -36,11 +36,14 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 async def list_jobs(
     status: str | None = None,
     platform: str | None = None,
+    source_platform: str | None = None,
     company_id: UUID | None = None,
+    company: str | None = None,
     geography_bucket: str | None = None,
     geography: str | None = None,
     role_cluster: str | None = None,
     search: str | None = None,
+    q: str | None = None,
     sort_by: str = "first_seen_at",
     sort_dir: str = "desc",
     page: int = Query(1, ge=1),
@@ -52,14 +55,29 @@ async def list_jobs(
     # Accept page_size as alias for per_page (frontend sends page_size)
     if page_size is not None:
         per_page = page_size
+
+    # Regression finding 33: the response schema aliases `Job.platform` as
+    # `source_platform` and field-level aliases for `search` (`q`) and
+    # `company_id` (`company`) are expected by callers who are reading the
+    # response field names and assuming the query params match. Accept the
+    # aliases here as a non-breaking alternative to the original param
+    # names — callers who were passing the original names still work.
+    effective_platform = platform or source_platform
+    effective_search = search or q
+
     query = select(Job).options(joinedload(Job.company))
 
     if status:
         query = query.where(Job.status == status)
-    if platform:
-        query = query.where(Job.platform == platform)
+    if effective_platform:
+        query = query.where(Job.platform == effective_platform)
     if company_id:
         query = query.where(Job.company_id == company_id)
+    if company:
+        # `company=` is a name-substring filter (the id-based filter lives on
+        # `company_id`). Matches the same ilike pattern used for the combined
+        # `search` box so the two behave consistently.
+        query = query.where(Job.company.has(Company.name.ilike(f"%{company}%")))
     geo = geography_bucket or geography
     if geo:
         query = query.where(Job.geography_bucket == geo)
@@ -69,13 +87,13 @@ async def list_jobs(
             query = query.where(Job.role_cluster.in_(relevant_clusters))
         else:
             query = query.where(Job.role_cluster == role_cluster)
-    if search:
+    if effective_search:
         # Search across title, company name, and location
         query = query.where(
             or_(
-                Job.title.ilike(f"%{search}%"),
-                Job.company.has(Company.name.ilike(f"%{search}%")),
-                Job.location_raw.ilike(f"%{search}%"),
+                Job.title.ilike(f"%{effective_search}%"),
+                Job.company.has(Company.name.ilike(f"%{effective_search}%")),
+                Job.location_raw.ilike(f"%{effective_search}%"),
             )
         )
 

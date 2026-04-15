@@ -11,6 +11,7 @@ from app.models.company import CompanyATSBoard
 from app.models.scan import ScanLog
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
+from app.utils.company_name import looks_like_junk_company_name
 
 router = APIRouter(prefix="/platforms", tags=["platforms"])
 
@@ -162,6 +163,19 @@ async def add_board(
     valid_platforms = ["greenhouse", "lever", "ashby", "workable", "bamboohr", "himalayas", "wellfound", "jobvite", "smartrecruiters", "recruitee"]
     if platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"platform must be one of: {', '.join(valid_platforms)}")
+
+    # Regression finding 37: reject LinkedIn-hashtag / staffing / scratch
+    # names up-front so manual admin adds can't reintroduce the same
+    # junk the ingest filter (scan_task.py) drops automatically.
+    if looks_like_junk_company_name(company_name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "company_name looks like a scraping artifact (hashtag harvest, "
+                "staffing shell, purely numeric, or scratch string). If this "
+                "is a real company, please pass a cleaned display name."
+            ),
+        )
 
     # Find or create company
     result = await db.execute(select(Company).where(Company.name == company_name))

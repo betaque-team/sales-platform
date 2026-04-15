@@ -16,6 +16,7 @@ from app.workers.tasks._role_matching import match_role, match_role_with_config,
 from app.models.company import Company, CompanyATSBoard
 from app.models.job import Job, JobDescription
 from app.models.scan import ScanLog
+from app.utils.company_name import looks_like_junk_company_name
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,18 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
                         or ""
                     ).strip()
                     if agg_company_name:
+                        # Regression finding 37: drop LinkedIn/aggregator-noise
+                        # company names at ingest. `#hashtag` harvests, pure
+                        # numerics, staffing-agency shells, and scratch names
+                        # like "name"/"1name" all used to land in Company and
+                        # then pollute /companies and the Pipeline board.
+                        if looks_like_junk_company_name(agg_company_name):
+                            logger.info(
+                                "scan_task: skipping junk company name %r from %s/%s",
+                                agg_company_name, board.platform, board.slug,
+                            )
+                            stats["skipped_jobs"] += 1
+                            continue
                         import re
                         agg_slug = re.sub(r"[^a-z0-9-]", "", agg_company_name.lower().replace(" ", "-"))[:100]
                         # Look up by slug first (unique), then by name
