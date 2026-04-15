@@ -94,12 +94,26 @@ RESUME_SECTIONS = [
 ]
 
 
+# Regression finding 95: previously the word-boundary threshold was
+# `len(keyword) <= 2`, so 3-4 char tech acronyms (`aws`, `gcp`, `sre`,
+# `dns`, `cdn`, `vpc`, `tcp`, `tls`, `ssl`, `elk`, `iac`, `eks`,
+# `ecs`, `gke`, `aks`, `sox`, `iso`, `sap`, `helm`, `java`, `ruby`,
+# `perl`, `bash`, `nist`) fell into the substring branch and matched
+# inside unrelated words — "aws" in "laws", "sre" in "presented",
+# "elk" in "welkin", "java" in "javascript". Bumped to 4 so every
+# short acronym gets word-boundary semantics; anything longer keeps
+# the faster `in` check. Multi-word keywords like `"tcp/ip"` are
+# 6 chars so unaffected, and the `\b` token matches between word /
+# non-word chars (so `\btcp\b` still matches inside `"tcp/ip"`).
+_ATS_WORD_BOUNDARY_MAX_LEN = 4
+
+
 def _extract_keywords_from_text(text: str) -> set[str]:
     """Extract matching tech keywords from text."""
     text_lower = text.lower()
     found = set()
     for keyword in ALL_TECH_KEYWORDS:
-        if len(keyword) <= 2:
+        if len(keyword) <= _ATS_WORD_BOUNDARY_MAX_LEN:
             if re.search(r'\b' + re.escape(keyword) + r'\b', text_lower):
                 found.add(keyword)
         else:
@@ -109,7 +123,17 @@ def _extract_keywords_from_text(text: str) -> set[str]:
 
 
 def _extract_job_keywords(job_title: str, role_cluster: str, matched_role: str, description_text: str = "") -> set[str]:
-    """Extract expected keywords from a job posting."""
+    """Extract expected keywords from a job posting.
+
+    Regression finding 94: the QA cluster previously had no baseline
+    backfill, so a QA job with an empty description produced an empty
+    expected-keyword set — which then hit the `compute_keyword_score`
+    short-circuit and awarded a free 50.0. Every known relevant
+    cluster now seeds at least a handful of domain keywords, so the
+    only remaining path to empty `job_keywords` is "unclassified job
+    with empty description AND empty title" — which is correctly
+    scored as zero in `compute_keyword_score`.
+    """
     keywords = set()
 
     # From job description text
@@ -126,6 +150,13 @@ def _extract_job_keywords(job_title: str, role_cluster: str, matched_role: str, 
         keywords.update(["security", "compliance"])
         for cat in ["security_tools", "compliance_frameworks"]:
             keywords.update(TECH_CATEGORIES[cat][:3])
+    elif role_cluster == "qa":
+        # Regression finding 94: add the missing QA backfill so QA
+        # postings with empty descriptions don't slip through to the
+        # "no job_keywords → free 50.0" short-circuit. Selects the
+        # most universal QA tools/practices as minimum expectations.
+        keywords.update(["quality assurance", "test automation", "sdet"])
+        keywords.update(TECH_CATEGORIES["qa_testing"][:6])
 
     # From title keywords
     title_keywords = _extract_keywords_from_text(job_title)
@@ -138,9 +169,20 @@ def compute_keyword_score(resume_keywords: set[str], job_keywords: set[str]) -> 
     """Compute keyword overlap score.
 
     Returns (score 0-100, matched_list, missing_list).
+
+    Regression finding 94: the old empty-job_keywords short-circuit
+    returned `(50.0, resume_keywords[:20], [])` — which gave every
+    job with an empty description a free 25 points on the weighted
+    overall (50% keyword weight × 50 = 25) AND falsely labeled up to
+    20 resume tokens as "matched". A resume scored against an
+    empty-JD job looked better than one scored against a
+    well-documented JD, since missing keywords penalise the latter.
+    Now we honestly report zero when the job offered nothing to
+    compare against, with both lists empty so the UI won't display
+    "matched: aws, docker, …" for tokens that were never required.
     """
     if not job_keywords:
-        return 50.0, list(resume_keywords)[:20], []
+        return 0.0, [], []
 
     matched = resume_keywords & job_keywords
     missing = job_keywords - resume_keywords
