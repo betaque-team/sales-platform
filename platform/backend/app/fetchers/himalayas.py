@@ -23,6 +23,14 @@ class HimalayasFetcher(BaseFetcher):
 
     PLATFORM = "himalayas"
 
+    # Safety ceiling. Per-company calls pass a slug so the catalog is small;
+    # the aggregator __all__ path pulls the whole board, which recently
+    # exceeded the old 1020 cap and got the scan stuck on the first 1020
+    # rows every run (regression finding 17). Raising to 20k covers the
+    # whole current catalog with headroom and still bounds the worst case
+    # if the API misreports `totalCount`.
+    _MAX_JOBS_PER_SCAN = 20000
+
     def fetch(self, slug: str) -> list[dict]:
         client = self._get_client()
         all_jobs = []
@@ -58,8 +66,13 @@ class HimalayasFetcher(BaseFetcher):
                 break
             offset += len(jobs)
 
-            # Safety limit — fetch up to 1000 jobs per scan
-            if offset > 1000:
+            # Safety ceiling — bounds runaway pagination if the API lies
+            # about totalCount. See _MAX_JOBS_PER_SCAN note above.
+            if offset >= self._MAX_JOBS_PER_SCAN:
+                logger.warning(
+                    "Himalayas %s hit pagination safety ceiling at offset=%s",
+                    slug, offset,
+                )
                 break
 
         return all_jobs

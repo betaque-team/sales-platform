@@ -276,21 +276,33 @@ async def timing_intelligence(
     db: AsyncSession = Depends(get_db),
 ):
     """Analyze job posting patterns to find optimal application timing."""
-    # Jobs posted by day of week
+    # Regression finding 26: using `first_seen_at` skewed this heavily toward
+    # Sunday because bulk seed / discovery runs happened to kick off on
+    # Sundays and each imported thousands of jobs with an identical
+    # `first_seen_at`. What users actually want to know is when *job
+    # posters* publish — use `posted_at` (set by the upstream ATS) and
+    # fall back only when it is missing. We also exclude jobs whose
+    # `posted_at` matches `first_seen_at` to the second, because those
+    # are rows where the ATS didn't return a posted date and the scanner
+    # backfilled with NOW() at ingest time.
     dow_result = await db.execute(text("""
-        SELECT EXTRACT(DOW FROM first_seen_at) AS dow, COUNT(*) AS cnt
+        SELECT EXTRACT(DOW FROM posted_at) AS dow, COUNT(*) AS cnt
         FROM jobs
-        WHERE first_seen_at >= NOW() - INTERVAL '90 days'
+        WHERE posted_at IS NOT NULL
+          AND posted_at >= NOW() - INTERVAL '90 days'
+          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1
         GROUP BY dow ORDER BY dow
     """))
     days_of_week = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     posting_by_day = [{"day": days_of_week[int(r[0])], "count": r[1]} for r in dow_result]
 
-    # Jobs posted by hour
+    # Jobs posted by hour — same rationale as above.
     hour_result = await db.execute(text("""
-        SELECT EXTRACT(HOUR FROM first_seen_at) AS hr, COUNT(*) AS cnt
+        SELECT EXTRACT(HOUR FROM posted_at) AS hr, COUNT(*) AS cnt
         FROM jobs
-        WHERE first_seen_at >= NOW() - INTERVAL '90 days'
+        WHERE posted_at IS NOT NULL
+          AND posted_at >= NOW() - INTERVAL '90 days'
+          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1
         GROUP BY hr ORDER BY hr
     """))
     posting_by_hour = [{"hour": int(r[0]), "count": r[1]} for r in hour_result]
@@ -356,6 +368,56 @@ async def timing_intelligence(
 
 # ── Networking Suggestions ───────────────────────────────────────────────────
 
+# Regression finding 27: the contact enrichment pipeline has been saving
+# rows where two page elements got glued together — e.g. `first_name =
+# "Gartner"` / `last_name = "PeerInsights"`, or `title = "Wade BillingsVP,
+# Technology Services, Instructure"`. The email field was then synthesized
+# as `first-word@company-domain`, so users were seeing fabricated addresses
+# in outreach suggestions. We filter these out at the API layer so the UI
+# stops showing them while the enrichment pipeline itself is repaired
+# upstream. Heuristics are deliberately conservative — we'd rather drop a
+# real contact than include a corrupted one for outreach.
+
+_COMMA_OR_PIPE = re.compile(r"[,|\t;]")
+
+
+def _looks_like_corrupted_contact(first_name: str, last_name: str, title: str) -> bool:
+    """Return True if this row looks like glued-together scraped strings."""
+    fn = (first_name or "").strip()
+    ln = (last_name or "").strip()
+    tt = (title or "").strip()
+
+    # Missing given name is unusable for outreach.
+    if not fn:
+        return True
+
+    # Name fields should never contain commas / pipes / tabs — those are
+    # strong signals that multiple page elements were concatenated.
+    if _COMMA_OR_PIPE.search(fn) or _COMMA_OR_PIPE.search(ln):
+        return True
+
+    # Titles longer than ~120 chars are almost always two roles glued
+    # together ("Wade BillingsVP, Technology Services, Instructure").
+    if len(tt) > 120:
+        return True
+
+    # Titles that contain a company name separator AND a non-role fragment
+    # after it ("VP, <team>, <company>") — three comma-separated segments
+    # with the last looking like a proper noun.
+    parts = [p.strip() for p in tt.split(",") if p.strip()]
+    if len(parts) >= 3:
+        return True
+
+    # Name fields composed of two capitalized tokens run together without
+    # a space ("PeerInsights", "BillingsVP") — cheap heuristic: first_name
+    # has 2+ uppercase letters not at index 0.
+    internal_caps = sum(1 for i, c in enumerate(fn) if i > 0 and c.isupper())
+    if internal_caps >= 2:
+        return True
+
+    return False
+
+
 @router.get("/networking")
 async def networking_suggestions(
     job_id: str = "",
@@ -382,6 +444,8 @@ async def networking_suggestions(
 
         suggestions = []
         for contact, company_name in contacts:
+            if _looks_like_corrupted_contact(contact.first_name, contact.last_name, contact.title or ""):
+                continue
             relevance = _contact_relevance(contact, job)
             suggestions.append({
                 "contact_id": str(contact.id),
@@ -418,11 +482,13 @@ async def networking_suggestions(
                      c.linkedin_url, c.is_decision_maker, c.outreach_status, c.confidence_score,
                      co.name, co.id
             ORDER BY c.is_decision_maker DESC, top_score DESC, open_roles DESC
-            LIMIT 20
+            LIMIT 60
         """))
 
         suggestions = []
         for r in result:
+            if _looks_like_corrupted_contact(r.first_name, r.last_name, r.title or ""):
+                continue
             suggestions.append({
                 "contact_id": str(r.id),
                 "name": f"{r.first_name} {r.last_name}".strip(),
@@ -440,7 +506,9 @@ async def networking_suggestions(
                 "suggested_approach": "Reach out via LinkedIn first, then email" if r.linkedin_url else "Send a personalized email",
             })
 
-        return {"suggestions": suggestions}
+        # Trim to the 20 the UI expects — we pulled up to 60 candidates
+        # above so the corrupted-row filter couldn't starve the list.
+        return {"suggestions": suggestions[:20]}
 
 
 def _contact_relevance(contact: CompanyContact, job: Job) -> dict:
