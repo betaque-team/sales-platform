@@ -1,0 +1,76 @@
+# =============================================================================
+# Rollback — manual dispatch only. Swaps RELEASE_TAG on the VM to a prior tag.
+# Does NOT touch the database by default.
+# =============================================================================
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to roll back to (e.g. sha-abc1234). Must already be pushed to GHCR."
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://salesplatform.reventlabs.com
+
+    steps:
+      - name: Validate tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ "$TAG" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+            echo "::error::Invalid tag: $TAG"
+            exit 1
+          fi
+          if [ "${#TAG}" -gt 64 ]; then
+            echo "::error::Tag too long"
+            exit 1
+          fi
+
+      - name: Set up SSH key
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOSTKEY: ${{ secrets.DEPLOY_HOSTKEY }}
+        run: |
+          mkdir -p ~/.ssh
+          umask 077
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "${HOSTKEY:-}" ]; then
+            echo "$HOSTKEY" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -t ed25519 -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+      - name: Rollback on VM
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "rollback ${{ inputs.tag }}"
+
+      - name: Status
+        if: always()
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "status" || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Rollback — ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Target tag | \`${{ inputs.tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL | https://salesplatform.reventlabs.com |" >> "$GITHUB_STEP_SUMMARY"
