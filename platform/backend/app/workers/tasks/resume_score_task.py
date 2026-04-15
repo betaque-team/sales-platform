@@ -1,5 +1,6 @@
 """Celery task for scoring a resume against all relevant jobs."""
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -11,6 +12,9 @@ from app.workers.tasks._ats_scoring import compute_ats_score
 from app.models.resume import Resume, ResumeScore
 from app.models.job import Job, JobDescription
 from app.models.role_config import RoleClusterConfig
+from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 
 def _get_relevant_clusters_sync(session) -> list[str]:
@@ -111,5 +115,60 @@ def score_resume_task(self, resume_id: str):
     except Exception as exc:
         session.rollback()
         raise self.retry(exc=exc, countdown=10)
+    finally:
+        session.close()
+
+
+@celery_app.task(name="app.workers.tasks.resume_score_task.rescore_all_active_resumes")
+def rescore_all_active_resumes():
+    """Fan out `score_resume_task` for every distinct active resume.
+
+    Regression finding 96: the job-to-resume ATS scores were 11 days stale
+    in prod — only 50.7% coverage of the relevant-jobs pool (2,642 / 5,206),
+    all `scored_at` timestamps landing in a single 3-second window from the
+    last manual rescore. Root cause was two missing hooks:
+      (a) no beat schedule ever enqueued resume rescoring, and
+      (b) the upload endpoint didn't enqueue `score_resume_task` on new
+          uploads — users had to click a hidden button.
+    This wrapper is the beat-schedule half; the upload trigger lives in
+    `app/api/v1/resume.py::upload_resume`.
+
+    We enqueue by `User.active_resume_id` rather than every `Resume` row
+    because scoring is expensive (~90s for 5k jobs) and the UI only ever
+    surfaces scores for the active persona. Idle / archived resumes stay
+    cold until the user switches to them.
+
+    Intentionally fires-and-forgets — each enqueued `score_resume_task`
+    manages its own transaction and its own delete-and-replace semantics,
+    so a partial fan-out still leaves the system in a valid state.
+    """
+    session = SyncSession()
+    try:
+        # DISTINCT because two users can't share an active resume (FK is
+        # `User.active_resume_id -> Resume.id`, 1:many from resume's side)
+        # but belt-and-suspenders against future schema changes that might
+        # introduce sharing.
+        active_ids = session.execute(
+            select(User.active_resume_id)
+            .where(
+                User.active_resume_id.is_not(None),
+                User.is_active.is_(True),
+            )
+            .distinct()
+        ).scalars().all()
+
+        enqueued = 0
+        for rid in active_ids:
+            if rid is None:
+                continue
+            score_resume_task.delay(str(rid))
+            enqueued += 1
+
+        logger.info(
+            "rescore_all_active_resumes: enqueued %d resume(s) for rescoring",
+            enqueued,
+        )
+        return {"enqueued": enqueued}
+
     finally:
         session.close()

@@ -55,6 +55,14 @@ if SCAN_MODE == "aggressive":
             "task": "app.workers.tasks.maintenance_task.rescore_jobs",
             "schedule": crontab(minute=0, hour=3),
         },
+        # Finding 96: resume ATS scores were 11 days stale because nothing
+        # scheduled a rescore. Fans out one `score_resume_task` per active
+        # resume at 3:30 UTC, deliberately sequenced AFTER `rescore_jobs`
+        # (3:00) so resume scores reflect the freshest relevance scores.
+        "rescore_active_resumes": {
+            "task": "app.workers.tasks.resume_score_task.rescore_all_active_resumes",
+            "schedule": crontab(minute=30, hour=3),
+        },
         "decay_scoring_signals": {
             "task": "app.workers.tasks.feedback_task.decay_scoring_signals",
             "schedule": crontab(minute=30, hour=2),
@@ -111,6 +119,12 @@ else:
         "rescore_jobs": {
             "task": "app.workers.tasks.maintenance_task.rescore_jobs",
             "schedule": crontab(minute=0, hour=3),
+        },
+        # Finding 96: resume ATS scores were 11 days stale. Sequenced after
+        # `rescore_jobs` (3:00) so resume scores reflect fresh relevance.
+        "rescore_active_resumes": {
+            "task": "app.workers.tasks.resume_score_task.rescore_all_active_resumes",
+            "schedule": crontab(minute=30, hour=3),
         },
         "decay_scoring_signals": {
             "task": "app.workers.tasks.feedback_task.decay_scoring_signals",
