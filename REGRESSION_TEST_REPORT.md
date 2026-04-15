@@ -129,6 +129,9 @@ one place.
 | 69 | 🟡 | Jobs / Bulk actions | **No "Select all N matching" affordance despite 47,776 matching jobs and 25/page.** After clicking the header checkbox, standard SaaS pattern (Gmail, Zendesk, Linear, Notion, GitHub) is to reveal an inline banner like *"All 25 on this page are selected. **Select all 47,776 matching this filter** · Clear selection"*. `/jobs` has no such affordance. Users who want to bulk-reject every "status=New / role_cluster=qa" job have to page through 1911 pages, click select-all on each, then click Reject — 1911 × 2 clicks minimum — which is also unsafe because of #68. The bulk endpoint already accepts `job_ids: string[]` so the size limit is whatever the client sends | ⬜ open — `JobsPage.tsx`: when `selectedIds.size === data.items.length && total > page_size`, render a small banner below the toolbar: *"All {page_size} on this page selected. Select all {total.toLocaleString()} matching."* Clicking the "Select all N matching" link fires a new bulk mode `selectAllMatching = true` that hides per-row checkboxes and dispatches the bulk call as `filter: currentFilters` rather than `job_ids: [...]`. Backend `/api/v1/jobs/bulk` needs a new branch accepting `{ filter: {...}, action }` that expands server-side (with a safety cap) |
 | 70 | 🟡 | Jobs / Bulk actions / Data safety | **Changing filters doesn't clear the ghost selection — bulk actions silently target hidden rows.** Reproduction: tick row 0 on `/jobs` while `status=All Statuses` (selected job: "Compliance Analyst (Night Shift)", status=new, visible on page 1). Without clearing the selection, change the Status filter to `Rejected` (or any other narrow filter). The table re-renders to show 1 job matching the new filter ("Infrastructure Engineer"), none of whose checkboxes are ticked. **The toolbar still says `1 selected` and the Accept/Reject buttons are still armed.** If the user now clicks Reject (intending to "reject this visible job"), the backend receives `job_ids=[compliance-analyst-id]` — a job that is invisible on the current view, in a totally different status bucket. Root cause: `selectedIds` state has no effect dependency on `filters` / query params in `JobsPage.tsx` | ⬜ open — `JobsPage.tsx`: add a `useEffect` that clears `selectedIds` whenever the filter or sort keys change (`useEffect(() => setSelectedIds(new Set()), [filters.status, filters.platform, filters.role_cluster, filters.geography, filters.search, sort.column, sort.direction])`). Alternatively — but worse UX — show a banner *"N selection(s) hidden by the current filter; clear before acting"* with the action buttons disabled |
 | 71 | 🟡 | Jobs / A11y + Safety | **Bulk Accept/Reject/Reset fire immediately with no confirm dialog; row and header checkboxes have zero a11y attrs.** (a) Clicking `Accept` or `Reject` in the bulk toolbar immediately calls `bulkMutation.mutate(...)` with the current `selectedIds` — no *"Reject 25 jobs?"* confirmation modal. A misclick (the two buttons are 8px apart) commits up to 25 status changes instantly. The toolbar even keeps its ghost selection after a status filter change (#70), amplifying the blast radius. (b) Every checkbox on the page (header `<thead>` selector + 25 row `<tbody>` checkboxes) has `id=""`, `name=""`, `aria-label=null`, `title=""`. Screen readers announce each as "checkbox, not checked" with zero row context | ⬜ open — two fixes. Confirm: wrap the bulk Accept / Reject / Reset handlers in `if (!confirm(\`${action} ${selectedIds.size} job${selectedIds.size > 1 ? "s" : ""}?\`)) return;` — or better, a shadcn/headlessUI `<AlertDialog>` for a non-blocking modal. A11y: give the header checkbox `aria-label="Select all visible jobs"` (line 384), and each row checkbox `aria-label={\`Select ${job.title} at ${job.company_name}\`}` (line 427). Optional: also wire `id={\`job-select-${job.id}\`}` + `name="job_ids"` so a password-manager-like AT can enumerate them |
+| 72 | 🟠 | Review Queue / State | **`selectedTags` and `comment` persist across prev/next navigation — rejection tags from job #N get attached to the submit for job #N+1.** Reproduction on `/review` (20 jobs in queue): on job 1/20 click the "Location" rejection tag pill (it turns red — active), type `TEST COMMENT` into the Comment textarea, click the `ChevronRight` next button. The counter advances to `2 of 20` and shows a different job ("Senior Site Reliability Engineer"), **but the "Location" pill is still highlighted red and the textarea still contains `TEST COMMENT`**. If the reviewer now clicks `Reject`, the backend persists a Review row whose `tags=['location_mismatch']` and `comment='TEST COMMENT'` are attached to job #2 — tags and comment that were composed against a totally different job. Root cause: `ReviewQueuePage.tsx` `ChevronLeft`/`ChevronRight` handlers (lines 236-250) only call `setCurrentIndex(...)`; `setSelectedTags([])` and `setComment("")` are only called inside the mutation's `onSuccess` (lines 50-51). Manual navigation is a missed path | ⬜ open — `ReviewQueuePage.tsx`: extract the reset logic into a `resetReviewState` helper and call it inside both ChevronLeft/Right handlers. Or better: add a `useEffect(() => { setSelectedTags([]); setComment(""); }, [currentIndex])` so the form state is bound to the active job regardless of how the index changed. Will also cover any future keyboard-shortcut handler (#51) |
+| 73 | 🟡 | Review Queue / Data integrity | **"Accept" submits the `selectedTags` rejection-tags array in its payload, and backend persists them without checking decision.** `ReviewQueuePage.tsx` line 69: `payload: { decision, comment, tags: selectedTags }` — tags are sent regardless of `decision === "accept"`. Backend `reviews.py` `submit_review()` line 43: `tags=body.tags` is stored unconditionally on the `Review` row. Consequence: if the reviewer had rejection tags armed from a previous job (see #72), then clicks `Accept`, the resulting review record has `decision="accepted"` + `tags=["location_mismatch", "salary_low", ...]`. Downstream analytics that group rejected-review reasons by tag will double-count: the same "salary_low" tag will appear on both accepted and rejected rows, contaminating the rejection-reason histogram | ⬜ open — two-layer fix. Frontend: change the payload to `tags: decision === "reject" ? selectedTags : []`. Backend: add a guard in `reviews.py` before `Review(...)`: `if normalized != "rejected" and body.tags: raise HTTPException(400, "tags are only allowed on rejected reviews")` — or silently drop them (`tags=body.tags if normalized == "rejected" else []`). Also add a one-shot migration to null out tags on historical `accepted`/`skipped` rows to clean the analytics baseline |
+| 74 | 🟡 | Review Queue / A11y | **ChevronLeft/ChevronRight prev/next buttons are icon-only with no `aria-label`; Comment textarea and `<label>` elements are completely unassociated.** DOM probe on `/review`: (a) the two `<button>` elements containing `<svg>` ChevronLeft/ChevronRight icons have `aria-label=null`, `title=null`, `textContent=""` — screen readers announce them as "button" with no direction. (b) The `<textarea>` for Comment has `id=""`, `name=""`, `aria-label=null`. (c) Both `<label>` elements ("Rejection Tags (optional)" and "Comment (optional)") have `htmlFor=""` — clicking the label does not focus the control, AT has no programmatic label association. (d) The 6 rejection-tag pills are `<button type="button">` with color-only selected state, no `aria-pressed` — same pattern as Finding #44 | ⬜ open — `ReviewQueuePage.tsx`: (a) chevron buttons → add `aria-label="Previous job"` and `aria-label="Next job"` (lines 236 & 242). (b) textarea → add `id="review-comment"` + match `<label htmlFor="review-comment">` at line 225. (c) rejection tag pills → add `aria-pressed={active}` + wrap in `<div role="group" aria-label="Rejection tags">`. (d) rejection-tags label → bind to a notional group via `aria-labelledby` on the wrapper |
 
 ---
 
@@ -2894,6 +2897,241 @@ tools enumerate checkboxes the way they'd enumerate a form field.
 
 #### Cleanup
 None beyond the existing `Cancel` click.
+
+---
+
+## 21. Round 4I — Review Queue deep audit (2026-04-15, late-late)
+
+The `/review` view is the queue-of-one triage workflow where a reviewer
+decides to accept / reject / skip each job. It's the single highest-
+frequency workflow in the product (each reviewer goes through 20-50
+jobs/day). I probed the queue navigation, rejection-tag state, and
+keyboard paths.
+
+### 72. Rejection tags + comment persist across prev/next navigation
+
+#### What I observed
+Reproduction on production (admin login, `/review` with 20 jobs in
+queue):
+
+1. On job 1/20, click the `Location` pill in the "Rejection Tags
+   (optional)" row. It turns red (selected).
+2. Type `TEST COMMENT — platform tester probe` into the Comment textarea.
+3. Click the `ChevronRight` (next) icon button.
+4. Counter advances to `2 of 20`. A totally different job loads
+   ("Senior Site Reliability Engineer" in my test).
+5. **The `Location` pill is still red (armed) and the textarea still
+   contains `TEST COMMENT — platform tester probe`.**
+
+If the reviewer now clicks `Reject`, the backend persists a Review row
+that is attached to job #2 but carries metadata composed against job #1.
+If they click `Accept`, the accepted record still ships the stale tags
+(see #73). Either way, both the review-reason analytics and the per-job
+review history are wrong.
+
+Combined with the very-common pattern of "set up a tag, then realise
+you want to re-read the job description, click back, then forward" —
+this bug silently corrupts reviews on the reviewer's first distraction.
+
+#### Root cause
+`platform/frontend/src/pages/ReviewQueuePage.tsx`:
+
+```tsx
+// Mutation onSuccess (lines 47-62) — resets state correctly
+onSuccess: (_data, variables) => {
+  queryClient.invalidateQueries({ queryKey: ["review", "queue"] });
+  queryClient.invalidateQueries({ queryKey: ["jobs"] });
+  setComment("");
+  setSelectedTags([]);
+  // ...setCurrentIndex(...)
+},
+
+// ChevronLeft / ChevronRight handlers (lines 236-250) — do NOT reset
+<button onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))} ... />
+<button onClick={() => setCurrentIndex(Math.min(queue.length - 1, currentIndex + 1))} ... />
+```
+
+Manual navigation sets only `currentIndex`; `comment` and `selectedTags`
+remain bound to whatever the previous job's interactions left them at.
+
+#### Suggested fix
+Bind the form state to `currentIndex` with a `useEffect`:
+
+```tsx
+useEffect(() => {
+  setSelectedTags([]);
+  setComment("");
+}, [currentIndex]);
+```
+
+This is a one-liner and covers every current and future navigation path
+(chevrons today, keyboard shortcuts when #51 is fixed, a potential
+"jump to job" dropdown later). The mutation `onSuccess` can then drop
+its own `setComment("")` / `setSelectedTags([])` — the `setCurrentIndex`
+change will trigger the `useEffect`.
+
+#### Cleanup
+I un-toggled `Location`, cleared the textarea, and clicked ChevronLeft
+back to job 1 after probing. No review was submitted.
+
+---
+
+### 73. Accept submits rejection tags; backend stores them unconditionally
+
+#### What I observed
+`platform/frontend/src/pages/ReviewQueuePage.tsx` line 65-72:
+
+```tsx
+const handleReview = (decision: "accept" | "reject" | "skip") => {
+  if (!currentJob) return;
+  reviewMutation.mutate({
+    jobId: currentJob.id,
+    payload: { decision, comment, tags: selectedTags },   // ← unconditional
+    decision,
+  });
+};
+```
+
+Backend `platform/backend/app/api/v1/reviews.py` lines 33-45:
+
+```python
+decision_map = {"accept": "accepted", "reject": "rejected", "skip": "skipped"}
+normalized = decision_map.get(body.decision, body.decision)
+
+review = Review(
+    job_id=body.job_id,
+    reviewer_id=user.id,
+    decision=normalized,
+    comment=body.comment,
+    tags=body.tags,      # ← stored regardless of decision
+)
+```
+
+Combined with #72's state-leak: imagine reviewer sets "Salary" rejection
+tag on job 1 → changes their mind → clicks ChevronRight to reconsider →
+decides to accept job 2 → hits Accept. The accepted Review row ships
+`tags=["salary_low"]`, polluting any analytics that group review reasons
+by tag. An `accepted` row claiming "this was rejected because salary_low"
+is nonsensical data.
+
+#### Expected behaviour
+Reject-only fields (`tags`, and optionally `comment` when its content
+is a rejection justification) should not be carried onto `accepted` or
+`skipped` records. Either the client should elide them or the server
+should refuse them.
+
+#### Suggested fix
+Two-layer defence:
+
+**Frontend** (`ReviewQueuePage.tsx` line 69):
+```tsx
+payload: {
+  decision,
+  comment,
+  tags: decision === "reject" ? selectedTags : [],
+},
+```
+
+**Backend** (`reviews.py` around line 41):
+```python
+if normalized != "rejected" and body.tags:
+    # Silently drop — client may be out of date.
+    effective_tags = []
+else:
+    effective_tags = body.tags
+
+review = Review(
+    job_id=body.job_id,
+    reviewer_id=user.id,
+    decision=normalized,
+    comment=body.comment,
+    tags=effective_tags,
+)
+```
+(Or raise `HTTPException(400)` if strictness is preferred, but silent-
+drop is more resilient to stale clients.)
+
+**One-shot cleanup** for historical data:
+```sql
+UPDATE reviews
+SET tags = '[]'::jsonb
+WHERE decision IN ('accepted', 'skipped') AND tags <> '[]'::jsonb;
+```
+Wrap in an `app/clear_stale_accepted_tags.py` script with a `--dry-run`
+flag, matching the existing `close_legacy_duplicate_feedback.py` pattern.
+
+#### Cleanup
+Read-only probe — no review was submitted.
+
+---
+
+### 74. Review Queue a11y: chevrons unlabelled, textarea unassociated, tag pills missing `aria-pressed`
+
+#### What I observed
+Four distinct a11y gaps — bundled because they share one `ReviewQueuePage.tsx`:
+
+**(a) ChevronLeft / ChevronRight prev-next buttons** (lines 235-251):
+```tsx
+<button onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
+        disabled={...} className="...">
+  <ChevronLeft className="h-5 w-5" />
+</button>
+```
+`aria-label=null`, `title=null`, `textContent=""`. Screen reader
+announces both as "button, dimmed" / "button" with no direction.
+
+**(b) Comment textarea** (lines 225-231):
+```tsx
+<label className="label">Comment (optional)</label>
+<textarea className="input ..." placeholder="Add a note about this job..." ... />
+```
+- `<label>` has `htmlFor=""` → clicking the label does not focus the textarea.
+- `<textarea>` has `id=""`, `name=""`, `aria-label=null`.
+
+**(c) Rejection-tag pills** (lines 201-221): six `<button type="button">`
+with no `aria-pressed` attribute. Selected state is conveyed only by
+Tailwind colour classes (`bg-red-100 text-red-700 ring-1 ring-red-300`).
+Same pattern as Finding #44 (feedback Priority radio group).
+
+**(d) Rejection Tags group heading**: the `<label>Rejection Tags (optional)</label>`
+doesn't wrap or programmatically relate to the six pills, so AT users
+hear "Rejection Tags" as a stray heading and then six unassociated
+toggle buttons.
+
+#### Suggested fix
+```tsx
+// (a) Prev/Next chevrons
+<button aria-label="Previous job" ... ><ChevronLeft ... /></button>
+<button aria-label="Next job" ... ><ChevronRight ... /></button>
+
+// (b) Comment
+<label htmlFor="review-comment" className="label">Comment (optional)</label>
+<textarea id="review-comment" name="review-comment" ... />
+
+// (c) + (d) Rejection tag pills wrapped in a labelled group with aria-pressed
+<div role="group" aria-labelledby="review-tags-label">
+  <label id="review-tags-label" className="label mb-1.5">Rejection Tags (optional)</label>
+  <div className="flex flex-wrap gap-1.5">
+    {REJECTION_TAGS.map((tag) => {
+      const active = selectedTags.includes(tag.value);
+      return (
+        <button
+          key={tag.value}
+          type="button"
+          aria-pressed={active}
+          onClick={...}
+          className={...}
+        >
+          {tag.label}
+        </button>
+      );
+    })}
+  </div>
+</div>
+```
+
+#### Cleanup
+Read-only probe.
 
 ---
 
