@@ -211,8 +211,16 @@ action_deploy() {
     die "Backend HTTP probe failure"
   fi
 
-  log "Rolling restart: celery-worker, celery-beat, frontend, nginx"
-  $COMPOSE up -d --no-deps celery-worker celery-beat frontend nginx
+  log "Rolling restart: celery-worker, celery-beat, frontend"
+  $COMPOSE up -d --no-deps celery-worker celery-beat frontend
+
+  # Force-recreate nginx AFTER frontend is up. Without --force-recreate,
+  # docker skips the restart (nginx image hash unchanged) and nginx keeps
+  # its cached DNS pointing at the prior frontend container's IP, causing
+  # 502 Bad Gateway for ~60s until docker's DNS ages out. Recreate fixes it
+  # in <3s.
+  log "Recreate nginx (force) to refresh upstream DNS"
+  $COMPOSE up -d --no-deps --force-recreate nginx
 
   # Record success
   printf '{"release":"%s","previous":"%s","deployed_at":"%s"}\n' \
@@ -261,7 +269,9 @@ action_rollback() {
 
   $COMPOSE up -d --no-deps backend
   wait_for_healthy backend 60 || log "WARN: backend not yet healthy post-rollback"
-  $COMPOSE up -d --no-deps celery-worker celery-beat frontend nginx
+  $COMPOSE up -d --no-deps celery-worker celery-beat frontend
+  # See comment in action_deploy — nginx must be recreated to drop stale DNS
+  $COMPOSE up -d --no-deps --force-recreate nginx
 
   printf '{"release":"%s","previous":"%s","deployed_at":"%s","kind":"rollback"}\n' \
     "$tag" "$prev" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
