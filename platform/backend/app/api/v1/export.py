@@ -14,9 +14,17 @@ from app.models.company import Company
 from app.models.company_contact import CompanyContact
 from app.models.pipeline import PotentialClient
 from app.models.user import User
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 
 router = APIRouter(prefix="/export", tags=["export"])
+
+# Regression finding 61: bulk exports are a data-exfiltration surface —
+# any logged-in viewer could previously download the full jobs / pipeline /
+# contacts table (including internal outreach state and email_status).
+# Gate on admin until product decides whether reviewers should also get
+# export access; easier to loosen later than to claw data back after a
+# compromised viewer account has already dumped it.
+_EXPORT_ROLE_GUARD = require_role("admin")
 
 JOB_CSV_COLUMNS = [
     "company", "title", "url", "platform", "remote_scope",
@@ -57,7 +65,7 @@ async def export_jobs(
     platform: str | None = None,
     geography_bucket: str | None = None,
     role_cluster: str | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(Job).options(joinedload(Job.company))
@@ -107,7 +115,7 @@ async def export_jobs(
 @router.get("/pipeline")
 async def export_pipeline(
     stage: str | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(PotentialClient).options(joinedload(PotentialClient.company))
@@ -143,10 +151,16 @@ async def export_pipeline(
     )
 
 
+# Regression finding 62: `phone` and `telegram_id` were listed in the CSV
+# but populated for 0/3756 rows — the enrichment pipeline has never written
+# to either column on prod. Dropping them from the export (not the model)
+# keeps the CSV honest for CRM/spreadsheet consumers. Restore both entries
+# here once enrichment starts populating the values so the export matches
+# reality again.
 CONTACT_CSV_COLUMNS = [
     "company", "first_name", "last_name", "title", "role_category",
-    "department", "seniority", "email", "email_status", "phone",
-    "linkedin_url", "telegram_id", "is_decision_maker",
+    "department", "seniority", "email", "email_status",
+    "linkedin_url", "is_decision_maker",
     "outreach_status", "outreach_note", "last_outreach_at",
     "source", "confidence_score", "created_at",
 ]
@@ -158,7 +172,7 @@ async def export_contacts(
     outreach_status: str | None = None,
     has_email: bool | None = None,
     is_decision_maker: bool | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     """Export all contacts as CSV with optional filters."""
@@ -183,6 +197,8 @@ async def export_contacts(
     result = await db.execute(query)
     rows = []
     for contact, company_name in result:
+        # Row order must stay in lockstep with CONTACT_CSV_COLUMNS above.
+        # `phone` and `telegram_id` are intentionally omitted — see Finding 62.
         rows.append([
             company_name,
             contact.first_name,
@@ -193,9 +209,7 @@ async def export_contacts(
             contact.seniority,
             contact.email,
             contact.email_status,
-            contact.phone,
             contact.linkedin_url,
-            contact.telegram_id,
             str(contact.is_decision_maker),
             contact.outreach_status,
             contact.outreach_note,

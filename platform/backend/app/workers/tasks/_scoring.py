@@ -128,9 +128,25 @@ def compute_relevance_score(
         Freshness:         10%
 
     feedback_adjustment is added after base score (can be negative).
+
+    Finding 86: jobs that fall outside every configured role cluster
+    (no matched_role AND no role_cluster) get `relevance_score = 0`,
+    honoring the documented contract in CLAUDE.md ("Jobs outside these
+    clusters are saved but unscored"). Prior to the short-circuit the
+    weighted sum still applied 60% of the weight to company/geo/source/
+    freshness, giving unclassified jobs 14-54 and letting e.g. a
+    "Talent Acquisition Coordinator" (score 44) outrank real security
+    jobs with sub-50 scores in the global sort.
     """
+    title_score = _title_match_score(matched_role, role_cluster, approved_roles_set)
+    if title_score == 0.0:
+        # Unclassified → zero. `feedback_adjustment` deliberately does
+        # not apply here: if an operator wants to surface unclassified
+        # jobs later, they should use a separate ranking signal rather
+        # than leaking through the relevance-score contract.
+        return 0.0
     score = (
-        0.40 * _title_match_score(matched_role, role_cluster, approved_roles_set)
+        0.40 * title_score
         + 0.20 * _company_fit_score(is_target)
         + 0.20 * _geography_clarity_score(geography_bucket, remote_scope)
         + 0.10 * _source_priority_score(platform)

@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.12",
     "beautifulsoup4>=4.12",
     "dnspython>=2.6",
+    "bcrypt>=4.2",
 ]
 
 [build-system]

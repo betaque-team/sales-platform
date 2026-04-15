@@ -3,6 +3,7 @@
 import json
 import os
 import uuid
+from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from app.schemas.feedback import (
     VALID_PRIORITIES,
     VALID_STATUSES,
 )
+from app.utils.sql import escape_like
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
@@ -114,7 +116,7 @@ async def create_feedback(
 
 @router.post("/{feedback_id}/attachments")
 async def upload_attachment(
-    feedback_id: str,
+    feedback_id: UUID,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -161,7 +163,7 @@ async def upload_attachment(
 
 @router.delete("/{feedback_id}/attachments/{filename}")
 async def delete_attachment(
-    feedback_id: str,
+    feedback_id: UUID,
     filename: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -191,13 +193,43 @@ async def delete_attachment(
 
 
 @router.get("/attachments/{filename}")
-async def get_attachment(filename: str):
-    """Serve an attachment file."""
+async def get_attachment(
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve an attachment file.
+
+    Authorization: the caller must either own the feedback ticket that lists
+    this filename in its attachments JSON, or be admin/super_admin. Previously
+    this endpoint had no auth dependency at all — any anonymous request could
+    download any attachment by guessing the UUID filename (regression #21).
+    """
     # Sanitize filename to prevent directory traversal
     safe_name = Path(filename).name
     file_path = UPLOAD_DIR / safe_name
     if not file_path.exists():
         raise HTTPException(404, "File not found")
+
+    # Find the feedback row that owns this attachment. The `attachments`
+    # column is a JSON-encoded string, so we LIKE-match the exact
+    # "filename": "<name>" fragment to avoid partial matches. Finding 84:
+    # escape LIKE metachars in `safe_name` so a filename containing a
+    # literal `%` or `_` (legal on disk) doesn't wildcard-match a
+    # different user's attachments row and return the wrong owner_id.
+    like_needle = f'%"filename": "{escape_like(safe_name)}"%'
+    owner_result = await db.execute(
+        select(Feedback.user_id).where(Feedback.attachments.ilike(like_needle, escape="\\")).limit(1)
+    )
+    owner_id = owner_result.scalar_one_or_none()
+    if owner_id is None:
+        # File exists on disk but isn't linked to any feedback row —
+        # treat as not-found rather than leaking its existence.
+        raise HTTPException(404, "File not found")
+
+    if owner_id != user.id and user.role not in ("admin", "super_admin"):
+        raise HTTPException(403, "Not authorized")
+
     return FileResponse(file_path)
 
 
@@ -273,11 +305,13 @@ async def feedback_stats(
 
 @router.get("/{feedback_id}", response_model=FeedbackOut)
 async def get_feedback(
-    feedback_id: str,
+    feedback_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get single feedback item."""
+    # Path param is typed UUID so FastAPI returns 422 on a malformed id
+    # instead of letting SQLAlchemy raise and bubble up as 500.
     fb = await db.get(Feedback, feedback_id)
     if not fb:
         raise HTTPException(404, "Feedback not found")
@@ -290,7 +324,7 @@ async def get_feedback(
 
 @router.patch("/{feedback_id}", response_model=FeedbackOut)
 async def update_feedback(
-    feedback_id: str,
+    feedback_id: UUID,
     body: FeedbackUpdate,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),

@@ -1,4 +1,13 @@
-"""Answer book management endpoints."""
+"""Answer book management endpoints.
+
+Regression finding 80: `POST /answer-book` and `PATCH /answer-book/{id}`
+previously declared `body: dict`. Replaced with explicit Pydantic
+`AnswerCreate` / `AnswerUpdate` schemas which cap `question` at 2 KB
+and `answer` at 8 KB (matching the `_LONG_TEXT_MAX` used elsewhere),
+enforce the category allowlist at parse time, and remove `source`
+from the input surface entirely — the server always sets it based on
+the endpoint, eliminating the provenance-spoofing footgun.
+"""
 
 import re
 import uuid
@@ -14,6 +23,7 @@ from app.models.answer_book import AnswerBookEntry
 from app.models.resume import Resume
 from app.models.user import User
 from app.api.deps import get_current_user
+from app.schemas.answer_book import AnswerCreate, AnswerUpdate
 
 router = APIRouter(prefix="/answer-book", tags=["answer-book"])
 
@@ -82,20 +92,18 @@ async def get_answer_book(
 
 @router.post("")
 async def create_answer(
-    body: dict,
+    body: AnswerCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create an answer book entry."""
-    question = body.get("question", "").strip()
-    answer = body.get("answer", "").strip()
-    category = body.get("category", "custom")
-    resume_id = body.get("resume_id")  # null for base entry
-
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required")
-    if category not in VALID_CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Category must be one of: {', '.join(VALID_CATEGORIES)}")
+    # AnswerCreate has already validated: category is in the allowlist,
+    # question is 1-2000 chars, answer is 0-8000 chars. Any violation
+    # returned 422 before we got here.
+    question = body.question.strip()
+    answer = body.answer.strip()
+    category = body.category
+    resume_id = body.resume_id  # None for base entry
 
     # Verify resume ownership if resume_id provided
     if resume_id:
@@ -129,7 +137,11 @@ async def create_answer(
         question=question,
         question_key=question_key,
         answer=answer,
-        source=body.get("source", "manual"),
+        # `source` is server-controlled — removed from the input schema
+        # to close the provenance-spoofing footgun. Import-from-resume
+        # sets `"resume_extracted"`, DELETE soft-archive sets
+        # `"archived"`; user-created entries are always `"manual"`.
+        source="manual",
     )
     db.add(entry)
     await db.commit()
@@ -148,7 +160,7 @@ async def create_answer(
 @router.patch("/{entry_id}")
 async def update_answer(
     entry_id: str,
-    body: dict,
+    body: AnswerUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -162,13 +174,18 @@ async def update_answer(
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
 
-    if "answer" in body:
-        entry.answer = body["answer"]
-    if "question" in body:
-        entry.question = body["question"]
-        entry.question_key = normalize_question_key(body["question"])
-    if "category" in body and body["category"] in VALID_CATEGORIES:
-        entry.category = body["category"]
+    # AnswerUpdate already validated each supplied field; fields left
+    # unset (None) mean "don't touch". We use `model_fields_set` to
+    # distinguish an explicit `null` (which we still treat as no-op for
+    # these non-nullable DB columns) from omission.
+    fields = body.model_fields_set
+    if "answer" in fields and body.answer is not None:
+        entry.answer = body.answer
+    if "question" in fields and body.question is not None:
+        entry.question = body.question
+        entry.question_key = normalize_question_key(body.question)
+    if "category" in fields and body.category is not None:
+        entry.category = body.category
 
     db.add(entry)
     await db.commit()

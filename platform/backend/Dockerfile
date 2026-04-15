@@ -30,7 +30,8 @@ RUN pip install --no-cache-dir \
     "python-docx>=1.1" \
     "anthropic>=0.40" \
     "beautifulsoup4>=4.12" \
-    "dnspython>=2.6"
+    "dnspython>=2.6" \
+    "bcrypt>=4.2"
 
 # Copy app
 COPY alembic.ini .

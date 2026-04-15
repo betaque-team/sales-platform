@@ -11,6 +11,8 @@ from app.models.company import CompanyATSBoard
 from app.models.scan import ScanLog
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
+from app.utils.company_name import looks_like_junk_company_name
+from app.utils.scan_lock import acquire_scan_lock, release_scan_lock
 
 router = APIRouter(prefix="/platforms", tags=["platforms"])
 
@@ -163,6 +165,19 @@ async def add_board(
     if platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"platform must be one of: {', '.join(valid_platforms)}")
 
+    # Regression finding 37: reject LinkedIn-hashtag / staffing / scratch
+    # names up-front so manual admin adds can't reintroduce the same
+    # junk the ingest filter (scan_task.py) drops automatically.
+    if looks_like_junk_company_name(company_name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "company_name looks like a scraping artifact (hashtag harvest, "
+                "staffing shell, purely numeric, or scratch string). If this "
+                "is a real company, please pass a cleaned display name."
+            ),
+        )
+
     # Find or create company
     result = await db.execute(select(Company).where(Company.name == company_name))
     company = result.scalar_one_or_none()
@@ -229,9 +244,26 @@ async def delete_board(
 async def trigger_full_scan(
     user: User = Depends(require_role("admin")),
 ):
-    """Trigger a full scan of all active platforms."""
+    """Trigger a full scan of all active platforms.
+
+    Regression finding 82: double-click was queueing two tasks that
+    each iterated 871 boards. Redis `SET NX EX` lock now dedups at
+    the endpoint, returning 409 if a full scan is already in flight.
+    """
     from app.workers.tasks.scan_task import scan_all_platforms
-    task = scan_all_platforms.delay()
+
+    if not await acquire_scan_lock("all"):
+        raise HTTPException(
+            status_code=409,
+            detail="A full scan is already running. Wait for it to complete or check /scan/status.",
+        )
+    try:
+        task = scan_all_platforms.delay()
+    except Exception:
+        # `.delay()` pushes to Redis; if that fails we own the lock
+        # but never kicked off work — release so the admin can retry.
+        release_scan_lock("all")
+        raise
     return {"task_id": str(task.id), "status": "queued", "scope": "all_platforms"}
 
 
@@ -257,7 +289,17 @@ async def trigger_platform_scan(
     if board_count == 0:
         raise HTTPException(status_code=400, detail=f"No active boards for platform: {platform}")
 
-    task = scan_platform.delay(platform)
+    scope = f"platform:{platform}"
+    if not await acquire_scan_lock(scope):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A scan of {platform} is already running.",
+        )
+    try:
+        task = scan_platform.delay(platform)
+    except Exception:
+        release_scan_lock(scope)
+        raise
     return {"task_id": str(task.id), "status": "queued", "platform": platform, "boards": board_count}
 
 
@@ -274,7 +316,17 @@ async def trigger_board_scan(
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    task = scan_single_board.delay(str(board_id))
+    scope = f"board:{board_id}"
+    if not await acquire_scan_lock(scope):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A scan of {board.platform}/{board.slug} is already running.",
+        )
+    try:
+        task = scan_single_board.delay(str(board_id))
+    except Exception:
+        release_scan_lock(scope)
+        raise
     return {"task_id": str(task.id), "status": "queued", "board": board.slug, "platform": board.platform}
 
 
@@ -284,7 +336,17 @@ async def trigger_discovery_scan(
 ):
     """Trigger platform discovery: find new ATS boards and auto-add them."""
     from app.workers.tasks.discovery_task import discover_and_add_boards
-    task = discover_and_add_boards.delay()
+
+    if not await acquire_scan_lock("discover"):
+        raise HTTPException(
+            status_code=409,
+            detail="A discovery scan is already running.",
+        )
+    try:
+        task = discover_and_add_boards.delay()
+    except Exception:
+        release_scan_lock("discover")
+        raise
     return {"task_id": str(task.id), "status": "queued", "scope": "platform_discovery"}
 
 

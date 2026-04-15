@@ -16,6 +16,7 @@ from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user
 from app.workers.tasks._resume_parser import extract_text
 from app.workers.tasks._ats_scoring import compute_ats_score
+from app.utils.sql import escape_like
 
 
 async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
@@ -414,10 +415,14 @@ async def get_resume_scores(
         base_query = base_query.where(ResumeScore.overall_score >= min_score)
     if max_score is not None:
         base_query = base_query.where(ResumeScore.overall_score <= max_score)
-    if search:
-        search_term = f"%{search}%"
+    if search and search.strip():
+        # Findings 84+85: escape LIKE metachars + drop whitespace-only input
+        # so `"100%"`, `"dev_ops"`, and `"   "` no longer return wildcard
+        # matches in the resume-score search.
+        search_term = f"%{escape_like(search.strip())}%"
         base_query = base_query.where(
-            (Job.title.ilike(search_term)) | (Company.name.ilike(search_term))
+            (Job.title.ilike(search_term, escape="\\"))
+            | (Company.name.ilike(search_term, escape="\\"))
         )
 
     # Get total count (unfiltered for summary stats)

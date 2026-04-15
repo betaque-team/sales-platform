@@ -23,6 +23,7 @@ from app.schemas.company_contact import (
     CompanyOfficeOut, JobRelevantContact, OutreachUpdate,
 )
 from app.schemas.job import JobOut
+from app.utils.sql import escape_like
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -124,12 +125,17 @@ async def list_companies(
     )
 
     def apply_filters(q):
-        if search:
+        if search and search.strip():
+            # Findings 84+85: escape `%`/`_`/`\\` so user-legal characters
+            # ("100%", "dev_ops") match literally, and guard against
+            # whitespace-only input that previously wildcarded rows with
+            # triple-spaces in their name/industry/headquarters.
+            needle = f"%{escape_like(search.strip())}%"
             q = q.where(
                 or_(
-                    Company.name.ilike(f"%{search}%"),
-                    Company.industry.ilike(f"%{search}%"),
-                    Company.headquarters.ilike(f"%{search}%"),
+                    Company.name.ilike(needle, escape="\\"),
+                    Company.industry.ilike(needle, escape="\\"),
+                    Company.headquarters.ilike(needle, escape="\\"),
                 )
             )
         if is_target is not None:

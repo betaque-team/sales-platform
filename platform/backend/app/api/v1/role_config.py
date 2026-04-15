@@ -1,9 +1,10 @@
 """Admin API for managing configurable role clusters (relevant job positions)."""
 
+import re
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,23 +15,50 @@ from app.api.deps import get_current_user, require_role
 
 router = APIRouter(prefix="/role-clusters", tags=["role-clusters"])
 
+# Role cluster names are used as URL path params (`/jobs?role_cluster=<name>`)
+# and as JSON keys in downstream reports. Restrict to lowercase alphanum +
+# underscore/hyphen so a malicious admin can't slip `?`, `/`, or `..` into
+# what callers assume is a safe slug (regression finding 20).
+_ROLE_CLUSTER_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+
+
+def _normalize_cluster_name(raw: str) -> str:
+    """Lowercase + space→underscore, then enforce the slug allowlist."""
+    candidate = raw.lower().strip().replace(" ", "_")
+    if not candidate:
+        raise HTTPException(
+            status_code=400,
+            detail="Role cluster name cannot be empty",
+        )
+    if len(candidate) > 40:
+        raise HTTPException(
+            status_code=400,
+            detail="Role cluster name too long (max 40 characters)",
+        )
+    if not _ROLE_CLUSTER_NAME_RE.match(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail="Role cluster name must contain only lowercase letters, digits, '_' and '-'",
+        )
+    return candidate
+
 
 class RoleClusterCreate(BaseModel):
-    name: str
-    display_name: str
+    name: str = Field(..., min_length=1, max_length=40)
+    display_name: str = Field(..., min_length=1, max_length=120)
     is_relevant: bool = True
-    keywords: str = ""
-    approved_roles: str = ""
-    sort_order: int = 0
+    keywords: str = Field(default="", max_length=4000)
+    approved_roles: str = Field(default="", max_length=4000)
+    sort_order: int = Field(default=0, ge=0, le=1000)
 
 
 class RoleClusterUpdate(BaseModel):
-    display_name: str | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
     is_relevant: bool | None = None
     is_active: bool | None = None
-    keywords: str | None = None
-    approved_roles: str | None = None
-    sort_order: int | None = None
+    keywords: str | None = Field(default=None, max_length=4000)
+    approved_roles: str | None = Field(default=None, max_length=4000)
+    sort_order: int | None = Field(default=None, ge=0, le=1000)
 
 
 def _serialize(rc: RoleClusterConfig) -> dict:
@@ -73,7 +101,7 @@ async def create_role_cluster(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new role cluster (admin only)."""
-    name = body.name.lower().strip().replace(" ", "_")
+    name = _normalize_cluster_name(body.name)
 
     existing = await db.execute(
         select(RoleClusterConfig).where(RoleClusterConfig.name == name)

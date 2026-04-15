@@ -17,6 +17,7 @@ from app.models.answer_book import AnswerBookEntry
 from app.models.platform_credential import PlatformCredential
 from app.models.user import User
 from app.api.deps import get_current_user
+from app.utils.sql import escape_like
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -385,9 +386,13 @@ async def list_applications(
 
     if status:
         query = query.where(Application.status == status)
-    if search:
-        term = f"%{search}%"
-        query = query.where(or_(Job.title.ilike(term), Company.name.ilike(term)))
+    if search and search.strip():
+        # Findings 84+85: escape LIKE metachars + drop whitespace-only input.
+        term = f"%{escape_like(search.strip())}%"
+        query = query.where(or_(
+            Job.title.ilike(term, escape="\\"),
+            Company.name.ilike(term, escape="\\"),
+        ))
 
     # Count
     count_q = select(func.count()).select_from(query.subquery())
