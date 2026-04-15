@@ -580,7 +580,17 @@ async def warm_leads(user: User = Depends(get_current_user), db: AsyncSession = 
 
 @router.get("/scoring-signals")
 async def get_scoring_signals(user: User = Depends(require_role("admin")), db: AsyncSession = Depends(get_db)):
-    """Get top scoring signals for admin visibility."""
+    """Get top scoring signals for admin visibility.
+
+    Regression finding 102: the response previously omitted ``user_id``,
+    so there was no way for admins to verify Finding 89's per-user
+    isolation was working on prod — every row looked identical whether
+    it belonged to a specific reviewer or to the legacy shared pool.
+    We now return the column verbatim (NULL = legacy shared-pool row,
+    UUID = reviewer-scoped). The frontend can surface it as a small
+    "reviewer" column / badge so ops can see at a glance whether new
+    signals are being written with the expected user attribution.
+    """
     from app.models.scoring_signal import ScoringSignal
     result = await db.execute(
         select(ScoringSignal).order_by(ScoringSignal.weight.desc()).limit(50)
@@ -589,6 +599,7 @@ async def get_scoring_signals(user: User = Depends(require_role("admin")), db: A
     return {
         "signals": [
             {
+                "user_id": str(s.user_id) if s.user_id else None,
                 "signal_type": s.signal_type,
                 "signal_key": s.signal_key,
                 "weight": round(s.weight, 4),
