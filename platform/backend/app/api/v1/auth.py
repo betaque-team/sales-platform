@@ -1,6 +1,7 @@
 """Authentication endpoints: email/password login, register, password management + Google OAuth2."""
 
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,12 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from authlib.integrations.starlette_client import OAuth
 from jose import jwt
+import bcrypt
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.user import UserOut, UserCreate, ChangePassword, ResetPasswordRequest, ResetPasswordConfirm
+from app.utils.rate_limit import login_limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -33,14 +36,68 @@ if settings.google_client_id:
 VALID_ROLES = {"admin", "reviewer", "viewer"}
 
 
+_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+
+
 def _hash_password(password: str) -> str:
-    """SHA-256 hash with salt from jwt_secret. For production use bcrypt instead."""
+    """Hash a new password with bcrypt (cost=12).
+
+    Regression finding 23: this used to be a single-round SHA-256 with a
+    global (jwt_secret-derived) salt — no key stretching, no per-user
+    salt, trivially crackable from a DB dump on consumer GPUs. We now
+    use bcrypt (per-hash random salt, adaptive work factor). Existing
+    SHA-256 hashes are still accepted by `_verify_password` and are
+    transparently re-hashed to bcrypt on the user's next successful
+    login (see the /login handler).
+    """
+    # bcrypt has a 72-byte input cap. Pre-hash with SHA-256 so long
+    # passwords aren't silently truncated — this is the standard
+    # workaround and is safe (SHA-256 output is uniform binary).
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return bcrypt.hashpw(digest, bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+
+def _legacy_sha256(password: str) -> str:
+    """Reproduce the old SHA-256 hash so we can still verify pre-migration users."""
     salted = f"{settings.jwt_secret}:{password}"
     return hashlib.sha256(salted.encode()).hexdigest()
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
-    return _hash_password(password) == password_hash
+    """Verify against either a bcrypt hash or a legacy SHA-256 hash."""
+    if not password_hash:
+        return False
+    if password_hash.startswith(_BCRYPT_PREFIXES):
+        try:
+            digest = hashlib.sha256(password.encode("utf-8")).digest()
+            return bcrypt.checkpw(digest, password_hash.encode("utf-8"))
+        except (ValueError, TypeError):
+            return False
+    # Legacy path — constant-time compare to defeat timing oracles that
+    # the old `==` comparison opened up.
+    return hmac.compare_digest(_legacy_sha256(password), password_hash)
+
+
+def _is_legacy_hash(password_hash: str | None) -> bool:
+    return bool(password_hash) and not password_hash.startswith(_BCRYPT_PREFIXES)
+
+
+def _hash_reset_token(token: str) -> str:
+    """Deterministic keyed hash for password-reset tokens.
+
+    The plaintext token is a 32-byte URL-safe random value, so even a
+    plain SHA-256 would be secure against brute force; using HMAC with
+    `jwt_secret` adds defense-in-depth so a DB dump alone cannot forge a
+    valid reset without also leaking the secret. This MUST stay
+    deterministic (unlike `_hash_password`, which is now bcrypt with a
+    random salt) so that the reset-confirm endpoint can look the hash
+    up by equality.
+    """
+    return hmac.new(
+        settings.jwt_secret.encode("utf-8"),
+        token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _mint_jwt(user: User) -> str:
@@ -57,17 +114,53 @@ class LoginRequest(BaseModel):
     password: str
 
 
+def _rate_limit_key(request: Request, email: str) -> str:
+    """Key the rate limiter on (client IP, email).
+
+    Keying on both means a single attacker can't burn a victim's counter
+    to lock them out, and a victim behind a shared IP (office / VPN)
+    isn't locked out by an unrelated attacker hitting a different email.
+    X-Forwarded-For is honoured when present because the reverse proxy
+    strips the real client IP from the raw socket; if absent we fall
+    back to the socket peer.
+    """
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    ip = fwd or (request.client.host if request.client else "unknown")
+    return f"{ip}|{email.lower()}"
+
+
 @router.post("/login")
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Email/password login. Returns JWT in a cookie and as JSON."""
+    rl_key = _rate_limit_key(request, body.email)
+    limited, retry_after = await login_limiter.is_limited(rl_key)
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Please wait and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     result = await db.execute(select(User).where(User.email == body.email, User.is_active == True))
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash:
+        await login_limiter.record_failure(rl_key)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not _verify_password(body.password, user.password_hash):
+        await login_limiter.record_failure(rl_key)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Successful auth — clear this key's counter so a user who mistyped
+    # a few times isn't still cooling down after they log in correctly.
+    await login_limiter.record_success(rl_key)
+
+    # Lazy migration to bcrypt: if this user's stored hash is still the
+    # legacy SHA-256 format, we just verified the plaintext — take this
+    # one chance to upgrade them without forcing a reset.
+    if _is_legacy_hash(user.password_hash):
+        user.password_hash = _hash_password(body.password)
 
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
@@ -168,7 +261,7 @@ async def request_password_reset(
         return {"ok": True, "message": "If the email exists, a reset token has been generated"}
 
     token = secrets.token_urlsafe(32)
-    user.password_reset_token = _hash_password(token)
+    user.password_reset_token = _hash_reset_token(token)
     user.password_reset_expires = datetime.now(timezone.utc) + timedelta(hours=1)
     await db.commit()
 
@@ -185,7 +278,7 @@ async def confirm_password_reset(
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
 
-    token_hash = _hash_password(body.token)
+    token_hash = _hash_reset_token(body.token)
     result = await db.execute(
         select(User).where(
             User.password_reset_token == token_hash,
