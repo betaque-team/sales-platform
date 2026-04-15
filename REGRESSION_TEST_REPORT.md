@@ -153,6 +153,9 @@ one place.
 | 93 | ✅ | Relevance / Infra FNs | **Infra cluster misses 44/95 (~46%) AWS-mentioning jobs because `INFRA_KEYWORDS` requires the `"aws engineer"` / `"azure engineer"` / `"gcp engineer"` suffix** — plain `"AWS Specialist"`, `"AWS Connect Developer"`, `"Backend Engineer - (Java/Python, AWS)"` all stay unclassified. `_role_matching.py` line 13: `"aws engineer", "azure engineer", "gcp engineer"`. Scoring engine treats all 44 as unclassified → they get unclassified-bucket relevance score (14-54 per #86) rather than 40+ infra baseline. Reviewers never see them in `role_cluster=relevant`. Users manually searching for AWS in Relevant Jobs see 51 results when the true count is 95 | ✅ fixed: added `"aws"`, `"azure"`, `"gcp"` to both `INFRA_KEYWORDS` AND `_WORD_BOUNDARY_KEYWORDS` in `_role_matching.py`. Word-boundary membership ensures `\baws\b` semantics — no FPs from `"laws"` / `"overdraws"`. Also added the compound cloud-provider forms `"google cloud"`, `"alibaba cloud"`, `"oracle cloud"` (safe as compounds, no word-boundary needed). The existing `"aws engineer"`, `"azure engineer"`, `"gcp engineer"` compounds remain for intent clarity but the bare word-boundary tokens are what catch the 44/95 previously-missed titles. `_is_excluded_from_infra()` from Finding #92 still gates the result, so "AWS Sales Specialist" still falls out. Targeted rescore runs via `rescore_jobs` Celery task — or, for an immediate sweep of just AWS/Azure/GCP-titled rows, operators can run the task with a `WHERE title ~* '\y(aws\|azure\|gcp)\y'` scope |
 | 94 | ✅ | ATS / Scoring bias | **Jobs with an empty job description get a 50.0 baseline keyword score for free — scoring-on-curve rewards ATS boards with poor descriptions.** `_ats_scoring.py` `compute_keyword_score()` lines 142-143: `if not job_keywords: return 50.0, list(resume_keywords)[:20], []`. When the `_extract_job_keywords()` call produces zero tech tokens (because the job description is empty, or the JD uses prose only with no tooling), the function short-circuits to 50.0. Combined with the 50% weighting in `compute_ats_score()` line 288, that's **25 "free" points of overall ATS score** for any bad job description. A resume against two equally-relevant jobs — one with a detailed JD and one with none — will score significantly LOWER on the detailed one (because missing keywords penalise) and higher on the empty one. Perverse incentive for sloppy postings. Also: line 273 `keyword_score, matched, missing = compute_keyword_score(resume_keywords, job_keywords)` — when job_keywords is empty, `matched=resume_keywords[:20]` (tests show some resume tokens) so the UI reports "matched: aws, docker, …" — but those weren't actually required for the job | ✅ fixed: applied BOTH recommended fixes. (1) `compute_keyword_score()` short-circuit now returns `0.0, [], []` on empty `job_keywords` — honest zero when the job offered nothing to compare against, and no false "matched" tokens leaking into the UI. (2) `_extract_job_keywords()` now seeds baseline keywords for every known relevant cluster including the previously-missing QA cluster (adds `"quality assurance"`, `"test automation"`, `"sdet"` + top 6 from `TECH_CATEGORIES["qa_testing"]`). Result: the only remaining path to empty `job_keywords` is "unclassified job + empty description + empty title" — which correctly scores 0.0 now. No more free 25 overall-points for sloppy JDs, and the UI no longer displays spurious matched-keyword lists |
 | 95 | ✅ | ATS / Substring matching | **ATS tech-keyword extraction does substring matching for any keyword >2 chars — "aws" matches "laws", "sre" matches "presented", "elk" matches "welkin", etc.** `_ats_scoring.py` `_extract_keywords_from_text()` lines 97-108: `if len(keyword) <= 2: <word-boundary>; else: <substring>`. Keywords like `"aws"`, `"gcp"`, `"dns"`, `"cdn"`, `"vpc"`, `"tcp"`, `"tls"`, `"ssl"`, `"elk"`, `"sre"`, `"iac"`, `"eks"`, `"ecs"`, `"gke"`, `"aks"`, `"sox"`, `"iso"`, `"sap"` are 3 chars so get substring match. Concrete false positives: a resume describing "practicing corporate laws" scores the `aws` keyword; "overseas transit" scores the `eas`-containing tokens. Real-world FP rate is probably low (most text is either tech-dense or clearly non-tech), but inflates ATS `keyword_score` on ambiguous documents | ✅ fixed: bumped `_ATS_WORD_BOUNDARY_MAX_LEN` constant from 2 to 4 in `_ats_scoring.py::_extract_keywords_from_text`. Every short acronym (`aws`, `gcp`, `sre`, `dns`, `cdn`, `vpc`, `tcp`, `tls`, `ssl`, `elk`, `iac`, `eks`, `ecs`, `gke`, `aks`, `sox`, `iso`, `sap`, `helm`, `java`, `ruby`, `perl`, `bash`, `nist`) now uses `\b` word-boundary regex; anything >4 chars keeps the faster substring `in` check. Compound keywords like `"tcp/ip"` still match because `\btcp\b` matches at word/non-word boundaries (the `/` counts as a boundary). No more `aws` in `laws`, `sre` in `presented`, `elk` in `welkin`, `java` in `javascript`. Same named-constant style as `_role_matching.py::_WORD_BOUNDARY_KEYWORDS` |
+| 96 | 🔴 | ATS / Staleness | **ATS resume scores are not auto-refreshed — they go stale the moment any new job is scraped, and a newly-uploaded resume sits at zero scores until the user manually clicks "Rescore".** Live probe on `salesplatform.reventlabs.com` (active resume `0503ae64-…`, "Sarthak Gupta Devops.pdf"): all 2,642 `ResumeScore` rows had `scored_at = 2026-04-05T13:11:01…02 UTC` — one single batch 11 days ago, then nothing. Current relevant pool is 5,206 jobs → **50.7% coverage**; the **top 10 newest** relevant jobs (scraped 2026-04-15) all returned `resume_score: null` + `resume_fit: null` via `/api/v1/jobs/{id}`. Root cause is two-headed: (1) `score_resume_task` is **absent from `celery_app.py` beat_schedule` — every other maintenance task is there (`rescore_jobs`, `decay_scoring_signals`, `nightly_backup`, …) but resume-rescore isn't. (2) `api/v1/resume.py::upload_resume` creates the Resume row with `status="ready"` and returns immediately — it never calls `score_resume_task.delay(resume.id)`, so a new upload shows 0/0 scored until the user finds the rescore UI. A manual `POST /resume/{id}/score` still works (verified: scored 5,206 jobs in ~90s and returned coverage to 100%), which proves the task and algorithm are healthy — this is purely a scheduling/triggering gap. Impact: the whole ATS-scoring feature APPEARS broken to users ("I uploaded my resume and no scores showed up", "the Senior SRE job posted yesterday has no ATS match") when in fact the task just never ran | ⬜ open — two small, independent code changes. **(1) Wire `score_resume_task` into `celery_app.py::beat_schedule`** under both `aggressive` and `normal` modes. Schedule nightly after `rescore_jobs` (e.g. `crontab(minute=30, hour=3)`) and enqueue one call per distinct `User.active_resume_id` via a tiny wrapper task `rescore_all_active_resumes` that fans out `score_resume_task.delay(...)` per active resume. Keep each resume-rescore at the existing delete-and-replace semantics; for multi-user scale later, switch to incremental (score only jobs whose `first_seen_at > resume.last_scored_at`). **(2) Trigger scoring at upload time**: at the end of `api/v1/resume.py::upload_resume` (just before the `return` on line 138), add `from app.workers.tasks.resume_score_task import score_resume_task; score_resume_task.delay(str(resume.id))`. Same call the manual `POST /resume/{id}/score` endpoint already uses on line 341 — no new task needed. **(3) (optional, defensive)** expose the staleness: add `last_scored_at = MAX(ResumeScore.scored_at)` to the `/resume/active` response so the frontend can surface "scored 11 days ago, rescore" when it's far out of date |
+| 97 | 🟠 | ATS / Scoring discrimination | **Post-rescore ATS scores collapse into 4 distinct buckets across 600+ jobs — scoring is effectively cluster-level, not job-level, because `JobDescription.text_content` is empty or sparse for most jobs.** After a fresh manual rescore (all 5,206 relevant jobs), the `/resume/{id}/scores` summary reports `best_score=66.6, above_70=0, average=41.0`. Pulled 600 jobs across 3 pages: **only 4 distinct `overall_score` values** — `66.6` (22 jobs), `65.6` (178), `58.5` (200), `23.5` (200). Top 20 SRE jobs all have **identically** `overall=66.6, kw=66.7, role=44.1, fmt=100.0`, with **identical matched (12 kw) and missing (6 kw) lists**, despite being 20 different postings at 20 different companies. This means `compute_ats_score` is not actually reading individual JDs — it's falling back to the `TECH_CATEGORIES[role_cluster]` baseline bag of keywords because `_ats_scoring.py::_extract_job_keywords` gets `description_text=""` for most `Job.id`s. Root cause: the fetchers (`greenhouse.py`, `lever.py`, `ashby.py`, `workable.py`, `bamboohr.py`, etc.) create `Job` rows but don't reliably populate the `JobDescription` relation with `text_content`. The `/api/v1/jobs/{id}` response schema doesn't even expose the description (it's a joined relation), so the frontend can't show "Description not fetched" — users just see low identical scores across jobs that obviously differ. **This is the underlying reason the #94 fix produced a "score collapse"**: removing the free 50-point baseline for empty JDs was correct, but it exposed that most JDs ARE empty, so scores dropped from spuriously-high-uniform to honestly-low-uniform without gaining per-job resolution. Finding #94's fix didn't cause this; it surfaced it | ⬜ open — tiered. **(1) Instrument first**: add a one-shot diagnostic script `app/audit_job_descriptions.py` (modelled on `cleanup_stopword_contacts.py`) that prints `SELECT role_cluster, COUNT(*) FILTER (WHERE jd.text_content IS NULL OR LENGTH(jd.text_content) < 100) AS empty_jds, COUNT(*) AS total FROM jobs j LEFT JOIN job_descriptions jd ON jd.job_id = j.id GROUP BY role_cluster` so we know exactly how many rows are empty. Expected: >80% of rows based on current scoring behavior. **(2) Fix each fetcher that's not storing JD text.** Audit `fetchers/greenhouse.py` → `fetchers/lever.py` → `fetchers/ashby.py` → others. Each one's `fetch_jobs(slug)` already returns `description: str` from the upstream API (Greenhouse's `content`, Lever's `descriptionPlain`, Ashby's `description`, Workable's `description`); trace it through `scan_task.py::_upsert_job` to see where it's dropped. Likely culprit: the upsert creates a `Job` row but conditionally creates `JobDescription` only on new inserts (or skips it on updates). **(3) Backfill**: once fetchers are fixed, a one-shot re-scrape pass on the 5,206 relevant jobs will populate descriptions retroactively. Or add a `refresh_job_description(job_id)` Celery task that re-hits the job's source URL for just the description. **(4) Make the gap visible in the UI**: expose `has_description: bool` on the `/jobs/{id}` response, and the resume-score endpoint, so "ATS score 23.5" shows a "limited data" badge when the JD is empty — users understand the score and file better bug reports. HIGH severity because the scoring engine is technically working but producing essentially no signal for per-job ranking; medium-term users will disable the feature |
+| 98 | 🟡 | UI / Data plumbing | **`/api/v1/companies` listing returns `relevant_job_count: null` on every row — frontend renders "?" where a relevance count should be.** Live probe: `GET /companies?page=1&page_size=5` returns 7,940 companies with `job_count` populated (1/3/1/1/2) but **every row's `relevant_job_count` is missing**. Frontend `CompaniesPage.tsx` (via `lib/api.ts`) renders `{company.relevant_job_count ?? "?"}` → literal "?" question marks across the companies table. Admins filtering by "companies with most relevant jobs" can't; reviewers scanning for high-fit companies can't prioritize. Cosmetic in the sense that no data is wrong, but the whole companies-view workflow is defeated. Root cause is in the `/companies` endpoint in `api/v1/companies.py` — it probably has a subquery that either isn't joined or isn't being summed into the response schema `CompanyOut.relevant_job_count` | ⬜ open — small fix in `api/v1/companies.py` list endpoint. Add a subquery that counts `Job.id` where `role_cluster.in_(await _get_relevant_clusters(db))` per `company_id`, left-join into the main companies query, and surface as `relevant_job_count` on `CompanyOut`. Same pattern as the existing `job_count` aggregate. Consider caching the count on `Company.relevant_job_count` (denormalized) if the subquery is slow at 7,940 rows — the nightly `rescore_jobs` task already iterates relevant jobs and can refresh the column cheaply. Also add a `sort_by=relevant_job_count` option so admins can sort companies by relevance-fit |
 
 ---
 
@@ -4316,6 +4319,358 @@ becomes navigable.
 
 #### Cleanup
 Read-only — no filter config changes.
+
+---
+
+## 27. Round 4O — Core-functionality in-depth audit (2026-04-16)
+
+User reported that the three headline features — **Relevant Jobs**, **ATS
+score**, and **Relevance score** — were "not working." Did a deep live
+probe pass with the admin session on `salesplatform.reventlabs.com` to
+isolate root causes.
+
+**Triage verdict:** the scoring engines are healthy; the scoring
+**feeding pipeline** is broken in two places. Three findings (#96 🔴,
+#97 🟠, #98 🟡) add up to: a user uploads a resume, sees zero ATS
+scores, waits, scores never appear; meanwhile the jobs they browse
+show `resume_score: null` on every fresh posting. When a rescore is
+eventually triggered manually, the resulting scores collapse into 4
+distinct values across 600+ jobs because the underlying JD text is
+missing.
+
+### 96. ATS resume scoring is stale by 11 days — no beat schedule + no upload trigger
+
+#### What I observed
+Live probe against `https://salesplatform.reventlabs.com/api/v1`:
+
+| Probe | Result |
+|---|---|
+| `GET /resume/{rid}/scores?page_size=1` (active resume) | `jobs_scored=2642, best=84.2, above_70=1296, avg=59.4` |
+| `GET /jobs?role_cluster=relevant&page_size=1` (relevant pool size) | `total=5206` |
+| Coverage | **2642 / 5206 = 50.7%** |
+| `scored_at` range across 92 sampled `ResumeScore` rows | `2026-04-05T13:11:01 … 2026-04-05T13:11:04 UTC` — one single batch, 11 days ago |
+| `GET /jobs?role_cluster=relevant&sort_by=first_seen_at&sort_dir=desc&page_size=10` (10 newest) | **0/10** have a `resume_score` populated |
+| `GET /jobs/{newest_relevant_id}` (rel=100 security job from today) | `resume_score: null, resume_fit: null` |
+| `POST /resume/{rid}/score` → poll `/score-status/{task_id}` | progressed 0 → 550 → 1750 → 5206 → `status=completed, jobs_scored=5206` in ~90 seconds |
+| After rescore: `/resume/{rid}/scores?page_size=1` | `jobs_scored=5206, coverage=100.0%` across 5 sampled pages |
+
+So the task itself is healthy (one manual call brought coverage from
+51% to 100% in under 2 minutes). The staleness is because the task
+never fires automatically.
+
+#### Root cause
+Two separate triggering gaps:
+
+**(a) No beat schedule entry.** `platform/backend/app/workers/celery_app.py`
+`beat_schedule` has entries for `scan_all_platforms`,
+`check_career_pages`, `run_discovery`, `expire_stale_jobs`,
+`rescore_jobs`, `decay_scoring_signals`, `collect_questions`,
+`enrich_target_companies`, `verify_stale_emails`,
+`auto_target_companies`, `fix_stuck_enrichments`,
+`deduplicate_contacts`, `nightly_backup` — but **no
+`score_resume_task`**. So nothing rescores resumes on a schedule.
+
+**(b) Upload doesn't trigger scoring.** `platform/backend/app/api/v1/resume.py`
+`upload_resume()` (lines 50-148) creates the `Resume` row with
+`status="ready"` and returns. It does NOT enqueue
+`score_resume_task.delay(resume.id)`. Contrast with line 341 inside
+`POST /resume/{id}/score` where the exact same call exists. So:
+
+1. User uploads resume → `status=ready`, `jobs_scored=0`
+2. User opens the Resume Score page → sees "no scores yet"
+3. User has to find and click the manual Rescore button
+4. Meanwhile new jobs get scraped every 30 min (aggressive beat), each
+   one unscored against any existing resume forever
+
+#### Suggested fix
+Three small, independent edits:
+
+1. **Wire beat schedule.** Add to both `aggressive` and `normal` blocks
+   in `celery_app.py::beat_schedule`:
+
+   ```python
+   "rescore_active_resumes": {
+       "task": "app.workers.tasks.resume_score_task.rescore_all_active_resumes",
+       "schedule": crontab(minute=30, hour=3),  # 3:30 AM UTC, after rescore_jobs at 3:00
+   },
+   ```
+
+   Add the wrapper task in `resume_score_task.py`:
+
+   ```python
+   @celery_app.task(name="app.workers.tasks.resume_score_task.rescore_all_active_resumes")
+   def rescore_all_active_resumes():
+       """Enqueue one score_resume_task per distinct User.active_resume_id."""
+       session = SyncSession()
+       try:
+           active_ids = session.execute(
+               select(User.active_resume_id)
+               .where(User.active_resume_id.isnot(None), User.is_active == True)
+               .distinct()
+           ).scalars().all()
+           for rid in active_ids:
+               score_resume_task.delay(str(rid))
+           return {"enqueued": len(active_ids)}
+       finally:
+           session.close()
+   ```
+
+2. **Trigger on upload.** In `api/v1/resume.py::upload_resume`, just
+   before the `return` on line 138:
+
+   ```python
+   from app.workers.tasks.resume_score_task import score_resume_task
+   score_resume_task.delay(str(resume.id))
+   ```
+
+3. **(Optional, defensive)** Add `last_scored_at: datetime | None =
+   MAX(ResumeScore.scored_at)` to the `/resume/active` response so the
+   frontend can show a "scored 11 days ago, rescore" nudge when the
+   batch is stale.
+
+#### Cleanup
+No existing data changes needed beyond a one-time manual
+`rescore_all_active_resumes.delay()` after deploy to catch up. Safe to
+re-run (task is idempotent: delete-and-replace semantics per resume).
+
+---
+
+### 97. ATS scores collapse into 4 distinct values across 600+ jobs — `JobDescription.text_content` is empty for most rows
+
+#### What I observed
+**After** a fresh manual rescore (all 5,206 relevant jobs, all scored
+≤90 seconds ago):
+
+```
+summary: jobs_scored=5206, best=66.6, above_70=0, avg=41.0
+```
+
+`above_70` went from `1,296` (11-day-old scores) to `0` (fresh
+scores). Pulled 600 scored rows across pages 1, 10, 20:
+
+```
+distinct overall_score values: 4
+top:  (58.5, 200 jobs), (23.5, 200 jobs), (65.6, 178 jobs), (66.6, 22 jobs)
+```
+
+Top 20 jobs all tie at `overall=66.6, kw=66.7, role=44.1, fmt=100.0`
+— and have **identical matched + missing keyword lists**:
+
+```
+matched (12): aws, ci/cd, devops, docker, gcp, github actions,
+              gitlab ci, kubernetes, pulumi, site reliability, sre, terraform
+missing  (6): azure, cloud, cloudformation, infrastructure, jenkins, k8s
+```
+
+This is 20 different companies with 20 different JDs producing
+literally byte-identical scoring output. The only way that happens is
+if `_ats_scoring.py::_extract_job_keywords` is getting `description_text=""`
+for all 20 and falling back to the `TECH_CATEGORIES["infra"]` baseline.
+
+#### Root cause
+Follow the chain:
+
+1. `resume_score_task.py` lines 69-73: bulk-loads `JobDescription.text_content`
+   keyed by `job_id`. For jobs with no `JobDescription` row (or
+   `text_content=""`), the dict has `""`.
+2. `_ats_scoring.py::compute_ats_score` line 312:
+   `job_keywords = _extract_job_keywords(job_title, role_cluster, matched_role, description_text)`.
+3. `_extract_job_keywords` with empty `description_text` falls back to
+   the role-cluster baseline keyword set (Finding #94's QA backfill
+   extended this). So every infra job gets the **same 18 baseline
+   infra keywords**. Resume matches 12/18 → kw_score=66.7. Role and
+   format are resume-only (no JD dependency) so they're constant
+   across jobs. Overall = constant.
+
+This is NOT a regression in `_ats_scoring.py`. The scoring code is
+doing exactly what the #94 fix requires when a JD is empty. **The
+data is missing.**
+
+Finding #94's fix (the `return 0.0, [], []` on empty `job_keywords`)
+took away the previously-spurious 50-point baseline, which is why the
+headline `best_score` dropped from 84.2 (pre-fix, fake-high) to 66.6
+(post-fix, honest-cluster-level-only). Losing 18 fake points wasn't
+the regression — it revealed the underlying JD-text gap that was
+being masked for weeks.
+
+Also note: the `/api/v1/jobs/{id}` response schema does **not** expose
+`description` or `has_description` (description is a joined relation
+deliberately excluded from `JobOut`). So the frontend can't show
+"description not yet fetched" — the user just sees low identical
+scores across visibly different jobs.
+
+#### Suggested fix
+Tiered, do them in order:
+
+**(1) Instrument.** One-shot diagnostic script `app/audit_job_descriptions.py`
+(modelled on `app/cleanup_stopword_contacts.py`):
+
+```python
+"""Report JobDescription population rates per cluster + per platform."""
+from sqlalchemy import select, func, case
+from app.database import SessionLocal
+from app.models.job import Job, JobDescription
+
+def main():
+    s = SessionLocal()
+    try:
+        empty_expr = case(
+            (JobDescription.text_content.is_(None), 1),
+            (func.length(JobDescription.text_content) < 100, 1),
+            else_=0,
+        )
+        rows = s.execute(
+            select(
+                Job.role_cluster,
+                Job.platform,
+                func.count(Job.id).label("total"),
+                func.sum(empty_expr).label("empty_or_tiny"),
+            )
+            .outerjoin(JobDescription, JobDescription.job_id == Job.id)
+            .group_by(Job.role_cluster, Job.platform)
+            .order_by(func.count(Job.id).desc())
+        ).all()
+        print(f"{'cluster':<15s} {'platform':<15s} {'total':>8s} {'empty':>8s} {'%':>6s}")
+        for r in rows:
+            pct = 100 * (r.empty_or_tiny or 0) / max(r.total, 1)
+            print(f"{r.role_cluster or '(none)':<15s} {r.platform:<15s} {r.total:>8d} {r.empty_or_tiny or 0:>8d} {pct:>5.1f}%")
+    finally:
+        s.close()
+
+if __name__ == "__main__":
+    main()
+```
+
+Run: `docker compose exec backend python -m app.audit_job_descriptions`.
+Expected output: >80% empty on at least some (cluster, platform)
+combinations. This tells us which fetchers are the culprits.
+
+**(2) Fix each fetcher that drops JD text.** Each fetcher in
+`app/fetchers/` returns a list of dicts from `fetch_jobs(slug)`.
+Upstream APIs all include description fields:
+
+- `greenhouse.py` — upstream has `content` (HTML); should strip to text and store
+- `lever.py` — upstream has `descriptionPlain` or `description`
+- `ashby.py` — upstream has `description` (GraphQL)
+- `workable.py` — upstream has `description` or `full_description`
+- `bamboohr.py` — upstream has `jobOpeningDescription`
+- `smartrecruiters.py` / `jobvite.py` / `recruitee.py` — all have `description`
+- `wellfound.py` — GraphQL `description`
+- `himalayas.py` — upstream `description`
+
+Then trace through `scan_task.py::_upsert_job` — the leak is almost
+certainly here. Current behaviour (hypothesis): the upsert creates a
+`Job` row but **conditionally creates `JobDescription`** (likely only
+on new inserts, or skipped because no commit happens on the relation).
+Confirm with:
+
+```sql
+SELECT j.platform,
+       COUNT(*) AS jobs,
+       COUNT(jd.job_id) AS with_jd_row,
+       COUNT(*) FILTER (WHERE LENGTH(COALESCE(jd.text_content, '')) > 100) AS with_text
+FROM jobs j
+LEFT JOIN job_descriptions jd ON jd.job_id = j.id
+GROUP BY j.platform
+ORDER BY jobs DESC;
+```
+
+Fix: in `_upsert_job`, always `session.merge(JobDescription(...))`
+with the text_content payload from the fetcher dict, regardless of
+whether the `Job` row is new or existing.
+
+**(3) Backfill the 5,206 relevant rows.** Once fetchers are fixed,
+two options:
+
+- **Full re-scan** of every platform (`scan_task.scan_all_platforms`)
+  — natural since new code picks up JD text on every upsert.
+  Operationally simplest but takes the scan cycle (~30 min on
+  aggressive mode).
+- **Targeted backfill task** `refresh_job_description.delay(job_id)`
+  that re-hits the source URL to pull just the description for one
+  Job, callable in batch over relevant rows.
+
+After backfill, re-run `score_resume_task.delay(rid)` to pick up the
+new JD text.
+
+**(4) Expose the gap in the UI.** Add `has_description: bool` to
+`JobOut` (and surface on `/resume/{rid}/scores` rows). Frontend renders
+a "limited data" badge on cards where ATS score was computed with no
+JD — users don't trust a score of 23.5 if they can't tell whether
+they're bad-fit or whether the scoring engine saw nothing.
+
+#### Cleanup
+Safe: fetcher fix is forward-only, backfill via re-scan is idempotent,
+rescore is idempotent.
+
+---
+
+### 98. `/api/v1/companies` list returns `relevant_job_count: null` on every row
+
+#### What I observed
+```
+GET /api/v1/companies?page=1&page_size=5
+  total=7940
+  #WalkAway Campaign             jobs=    1 relevant=   ?
+  #twiceasnice Recruiting        jobs=    3 relevant=   ?
+  0x                             jobs=    1 relevant=   ?
+  1-800 Contacts                 jobs=    1 relevant=   ?
+  10000 solutions llc            jobs=    2 relevant=   ?
+```
+
+Every row's `relevant_job_count` is `null`. Frontend `CompaniesPage.tsx`
+renders `{company.relevant_job_count ?? "?"}` so the "Relevant Jobs"
+column on the Companies page is a sea of question marks across all
+133 pages.
+
+This is cosmetic in the strict sense (no data is lost) but it
+defeats the whole Companies workflow: admins can't sort/filter by
+"companies with the most relevant postings", reviewers can't
+prioritise outreach to high-fit companies, and the column header
+just mocks the user with "?" everywhere.
+
+#### Root cause
+`api/v1/companies.py` list endpoint computes `job_count` via a
+subquery but does not compute an analogous `relevant_job_count`. The
+`CompanyOut` schema has the field declared (optional), so the frontend
+type-checks — it's just always `None`.
+
+#### Suggested fix
+In `api/v1/companies.py` list endpoint, add a second subquery:
+
+```python
+from app.api.v1.jobs import _get_relevant_clusters
+relevant_clusters = await _get_relevant_clusters(db)
+
+relevant_job_count_sq = (
+    select(Job.company_id, func.count(Job.id).label("rc"))
+    .where(Job.role_cluster.in_(relevant_clusters))
+    .group_by(Job.company_id)
+    .subquery()
+)
+# Left-join into the main companies query, coalesce to 0
+query = query.outerjoin(
+    relevant_job_count_sq,
+    Company.id == relevant_job_count_sq.c.company_id,
+)
+# Surface on CompanyOut as relevant_job_count=func.coalesce(relevant_job_count_sq.c.rc, 0)
+```
+
+Or cheaper: denormalise on `Company.relevant_job_count` (Integer,
+default 0) and have the nightly `rescore_jobs` task refresh it in the
+same pass that iterates relevant jobs. Drops per-request subquery
+cost but adds write coupling.
+
+Also add `sort_by=relevant_job_count` as an allowed sort option so
+admins can sort the Companies page by fit.
+
+#### Cleanup
+Forward-only. Backfill naturally on the first deploy when the
+subquery starts returning non-null counts. If denormalising, a
+one-shot `UPDATE companies SET relevant_job_count = sub.cnt FROM
+(SELECT company_id, COUNT(*) cnt FROM jobs WHERE role_cluster IN
+(:relevant) GROUP BY company_id) sub WHERE companies.id =
+sub.company_id;` seeds the column.
 
 ---
 
