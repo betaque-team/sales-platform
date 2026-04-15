@@ -125,6 +125,10 @@ one place.
 | 65 | 🟡 | Intelligence / Data | **`/api/v1/intelligence/timing` still recommends "Sunday" as the best day to apply despite the per-second workaround from Finding #26.** Live counts:  Sunday 23,696 · Monday 6,496 · Tuesday 5,456 · Wednesday 4,803 · Thursday 3,020 · Friday 2,384 · Saturday 1,921. Sunday is 4.3× the next-highest day. Even with the query's filter `AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 1` (intended to exclude seed-run rows where `posted_at==first_seen_at`), Sunday dominates — so either (a) the bulk seed wrote slightly-different values in both columns, defeating the equality check, or (b) some ATS batches genuinely post en-masse on Sunday (Greenhouse/Lever weekly batch jobs?). Result: the user-facing *"best_day"* recommendation is `"Sunday"`, which is empirically wrong for most user-driven posting workflows (HR teams post Tue/Wed/Thu mornings in North America). The "ideal apply window" text `"Apply within 24-48 hours of posting for best results"` is also static copy with no data backing | ⬜ open — tighten the filter: instead of comparing `posted_at vs first_seen_at` absolute seconds, exclude rows whose `first_seen_at` falls inside a *seed-run window* (look at the `scan_log` table for runs with `jobs_ingested > 1000` and exclude any job whose `first_seen_at` is within those run windows). Alternatively, look at `posted_at.time()` — if 80%+ of same-day jobs share the exact same second/minute, they're programmatically assigned, not truly posted. For the static recommendation copy, tie it to the top-3 `posting_by_hour` entries (`"Apply Mon–Wed 9-11am for X% higher callback rate"`) once enough accepted/rejected data exists |
 | 66 | 🟡 | Intelligence / Salary | **Salary parser in `_parse_salary()` recognises only £/GBP and €/EUR; everything else defaults to `"USD"` — so DKK / SEK / NOK / CAD / AUD / SGD / JPY salaries are mislabelled and skew the "top paying" list.** Live `/api/v1/intelligence/salary` top entry: `{company:"Pandektes", raw:"DKK 780000 - 960000", currency:"USD", mid:870000, title:"Senior Backend Engineer"}`. 780,000 DKK ≈ $112,000 USD — but the Intelligence dashboard displays it as $870,000 USD (~8× over-reported). Same for `{raw:"USD 750000 - 980000", company:"Haldren Group"}` where the raw value is almost certainly an upstream ATS bug (no "Commercial Manager, New Accounts" earns $870K), and `{raw:"DKK …"}` style rows. Source: `_parse_salary()` lines 158-163 — currency detection has only two branches (`"£"/"gbp"`, `"€"/"eur"`), `currency="USD"` default. The numbers are still treated as dollars in the mid/avg/median rollups, so the `overall.avg=$135,740` is inflated, and the `by_cluster.other.max=$870,000` is a Danish krone number misread as dollars | ⬜ open — extend the currency detection in `api/v1/intelligence.py` `_parse_salary()`:  `if "dkk" in s: currency="DKK"` and likewise for `sek, nok, cad, aud, nzd, sgd, hkd, jpy, inr, zar`. Either (a) convert everything to USD at display time using a static FX table committed to the repo (updated monthly), or (b) keep the native currency but **exclude non-USD rows from the "top paying" ranking** (show them in a separate panel grouped by currency). The current state of reporting a DKK salary as USD is actively misleading to the user |
 | 67 | 🔵 | Intelligence / Salary | **Salary insights are dominated by `role_cluster="other"` because the query has no relevance filter.** `/api/v1/intelligence/salary` response: `by_cluster: { other: 875 salaries, infra: 22, security: 10, qa: 10 }` — 95% of the displayed data is from jobs outside the user's target clusters. The Intelligence page is presented as "salary insights for your target roles", but the backend query is `select(Job.salary_range, ...) .where(Job.salary_range != "")` with NO `Job.relevance_score > 0` filter, NO role-cluster filter. Optional `role_cluster` and `geography` query params let the caller narrow, but the default response — which is what the UI fetches — aggregates all jobs. Consequence: the "overall" stats (`avg=$135,740`, `median=$110,000`) are dominated by unrelated roles | ⬜ open — two choices: (a) change the default in `salary_insights()` to filter `.where(Job.relevance_score > 0)` so the base `overall` stats reflect relevant roles, and add an explicit `?include_other=true` param for admins who want the full-DB view, OR (b) keep the default unchanged but have the frontend `IntelligencePage.tsx` always pass `?role_cluster=infra|security|qa` when showing salary stats. Option (a) is cleaner and matches Intelligence page framing |
+| 68 | 🟠 | Jobs / Bulk actions | **Header "Select all" checkbox REPLACES the selected-IDs Set, silently dropping any cross-page curation the user built up.** Reproduction: on `/jobs` tick row 0 of page 1 (toolbar: `1 selected`); click Next → page 2 (toolbar still says `1 selected` ✓ persistence across pages works); tick row 0 of page 2 (toolbar: `2 selected`); now click the header `<input type="checkbox">` in `<thead>` → toolbar shows `25 selected`, **not 26**. The previously curated page-1 row is silently deselected. Root cause in `JobsPage.tsx` `toggleSelectAll()` lines 153-160: `setSelectedIds(new Set(data.items.map((j) => j.id)))` — replaces the Set with ONLY the current page's ids instead of unioning | ⬜ open — `JobsPage.tsx` `toggleSelectAll`: compute a page-scoped diff against the existing Set. If every visible row is already in `selectedIds`, remove just those ids (`data.items.forEach(j => next.delete(j.id))`); otherwise, add them (`data.items.forEach(j => next.add(j.id))`). Also fix the `checked={selectedIds.size === data.items.length}` (line 380) which misreads cross-page state — use `data.items.every(j => selectedIds.has(j.id))` so the header tri-state reflects what's on-screen, not the global count |
+| 69 | 🟡 | Jobs / Bulk actions | **No "Select all N matching" affordance despite 47,776 matching jobs and 25/page.** After clicking the header checkbox, standard SaaS pattern (Gmail, Zendesk, Linear, Notion, GitHub) is to reveal an inline banner like *"All 25 on this page are selected. **Select all 47,776 matching this filter** · Clear selection"*. `/jobs` has no such affordance. Users who want to bulk-reject every "status=New / role_cluster=qa" job have to page through 1911 pages, click select-all on each, then click Reject — 1911 × 2 clicks minimum — which is also unsafe because of #68. The bulk endpoint already accepts `job_ids: string[]` so the size limit is whatever the client sends | ⬜ open — `JobsPage.tsx`: when `selectedIds.size === data.items.length && total > page_size`, render a small banner below the toolbar: *"All {page_size} on this page selected. Select all {total.toLocaleString()} matching."* Clicking the "Select all N matching" link fires a new bulk mode `selectAllMatching = true` that hides per-row checkboxes and dispatches the bulk call as `filter: currentFilters` rather than `job_ids: [...]`. Backend `/api/v1/jobs/bulk` needs a new branch accepting `{ filter: {...}, action }` that expands server-side (with a safety cap) |
+| 70 | 🟡 | Jobs / Bulk actions / Data safety | **Changing filters doesn't clear the ghost selection — bulk actions silently target hidden rows.** Reproduction: tick row 0 on `/jobs` while `status=All Statuses` (selected job: "Compliance Analyst (Night Shift)", status=new, visible on page 1). Without clearing the selection, change the Status filter to `Rejected` (or any other narrow filter). The table re-renders to show 1 job matching the new filter ("Infrastructure Engineer"), none of whose checkboxes are ticked. **The toolbar still says `1 selected` and the Accept/Reject buttons are still armed.** If the user now clicks Reject (intending to "reject this visible job"), the backend receives `job_ids=[compliance-analyst-id]` — a job that is invisible on the current view, in a totally different status bucket. Root cause: `selectedIds` state has no effect dependency on `filters` / query params in `JobsPage.tsx` | ⬜ open — `JobsPage.tsx`: add a `useEffect` that clears `selectedIds` whenever the filter or sort keys change (`useEffect(() => setSelectedIds(new Set()), [filters.status, filters.platform, filters.role_cluster, filters.geography, filters.search, sort.column, sort.direction])`). Alternatively — but worse UX — show a banner *"N selection(s) hidden by the current filter; clear before acting"* with the action buttons disabled |
+| 71 | 🟡 | Jobs / A11y + Safety | **Bulk Accept/Reject/Reset fire immediately with no confirm dialog; row and header checkboxes have zero a11y attrs.** (a) Clicking `Accept` or `Reject` in the bulk toolbar immediately calls `bulkMutation.mutate(...)` with the current `selectedIds` — no *"Reject 25 jobs?"* confirmation modal. A misclick (the two buttons are 8px apart) commits up to 25 status changes instantly. The toolbar even keeps its ghost selection after a status filter change (#70), amplifying the blast radius. (b) Every checkbox on the page (header `<thead>` selector + 25 row `<tbody>` checkboxes) has `id=""`, `name=""`, `aria-label=null`, `title=""`. Screen readers announce each as "checkbox, not checked" with zero row context | ⬜ open — two fixes. Confirm: wrap the bulk Accept / Reject / Reset handlers in `if (!confirm(\`${action} ${selectedIds.size} job${selectedIds.size > 1 ? "s" : ""}?\`)) return;` — or better, a shadcn/headlessUI `<AlertDialog>` for a non-blocking modal. A11y: give the header checkbox `aria-label="Select all visible jobs"` (line 384), and each row checkbox `aria-label={\`Select ${job.title} at ${job.company_name}\`}` (line 427). Optional: also wire `id={\`job-select-${job.id}\`}` + `name="job_ids"` so a password-manager-like AT can enumerate them |
 
 ---
 
@@ -2592,6 +2596,304 @@ But this pushes scope to every caller; backend default is cleaner.
 
 #### Cleanup
 Read-only probe.
+
+---
+
+## 20. Round 4H — Jobs bulk-actions deep audit (2026-04-15, late)
+
+The `/jobs` view carries the heaviest bulk-action surface in the product
+(47,776 rows across 1,912 pages, header select-all, per-row checkboxes,
+Accept / Reject / Reset bulk buttons). I probed it end-to-end and found four
+distinct bugs that compound: a data-loss bug in the select-all handler, a
+missing "select all N matching" affordance that pushes users toward that
+broken select-all, a ghost-selection bug that survives filter changes, and
+an a11y / no-confirm combination that turns accidental clicks into bulk
+mutations.
+
+### 68. Header "Select all" destroys cross-page selection (silent data loss)
+
+#### What I observed
+Reproduction on production:
+
+| Step | Action | Observed toolbar |
+|---|---|---|
+| 1 | Log in as admin, open `/jobs` (`role_cluster=Relevant` → 47,776 rows, 1,912 pages) | *(no toolbar)* |
+| 2 | Tick the row-0 checkbox on page 1 ("Compliance Analyst — Night Shift") | `1 selected` |
+| 3 | Click the `Next` pagination button | `1 selected` ✓ (persistence works) |
+| 4 | Tick row-0 on page 2 ("Senior Application Security Engineer") | `2 selected` ✓ |
+| 5 | Click the header `<thead>` select-all checkbox | **`25 selected`** ← expected `26` |
+
+The two previously selected rows (1 on page 1 + 1 on page 2) are silently
+replaced by the 25 rows on the current page. The user curated a cross-page
+list, then with one click to "select the rest of the page" the prior
+curation is thrown away with no warning. This is a data-loss pattern that
+is especially painful for a bulk-reject flow.
+
+#### Root cause
+`platform/frontend/src/pages/JobsPage.tsx` lines 153-160:
+
+```tsx
+const toggleSelectAll = () => {
+  if (!data) return;
+  if (selectedIds.size === data.items.length) {
+    setSelectedIds(new Set());                         // BUG 1
+  } else {
+    setSelectedIds(new Set(data.items.map((j) => j.id))); // BUG 2
+  }
+};
+```
+
+Two issues:
+
+1. The `else` branch calls `new Set(data.items.map(...))` which *replaces*
+   the whole Set with only the current page's IDs, discarding every cross-
+   page ID in `selectedIds`.
+2. The `if` branch's predicate `selectedIds.size === data.items.length`
+   misreads global state as page state. If I'd curated exactly 25 ids
+   across pages 1-25, then visit page 26 and click header select-all, the
+   predicate would hit the `if` branch and wipe everything — including the
+   25 page-1-to-25 ids I was building toward.
+
+Also, the header checkbox `checked` prop on line 380 suffers the same
+confusion: `checked={data.items.length > 0 && selectedIds.size === data.items.length}`
+shows it as ticked when the global count *happens* to equal the page size,
+even if none of those rows are visible on the current page.
+
+#### Expected behaviour
+Header select-all should be page-scoped:
+- If every row on the current page is already in the Set → unselect just
+  those rows (leave other pages' selections intact)
+- Otherwise → add every row on the current page to the Set (leave other
+  pages' selections intact)
+
+And the `checked` prop should reflect page state, not global state:
+`data.items.every(j => selectedIds.has(j.id))`.
+
+#### Suggested fix (`JobsPage.tsx`)
+```tsx
+const toggleSelectAll = () => {
+  if (!data) return;
+  setSelectedIds((prev) => {
+    const next = new Set(prev);
+    const allChecked = data.items.every((j) => next.has(j.id));
+    if (allChecked) {
+      data.items.forEach((j) => next.delete(j.id));
+    } else {
+      data.items.forEach((j) => next.add(j.id));
+    }
+    return next;
+  });
+};
+
+// ...then in render, line 380:
+checked={data.items.length > 0 && data.items.every((j) => selectedIds.has(j.id))}
+```
+
+Optionally make the header tri-state:
+`ref={(el) => { if (el) el.indeterminate = someChecked && !allChecked; }}`.
+
+#### Cleanup
+After probing I cleared my selection via the `Cancel` button and clicked
+page-1 to revert pagination state. No rows were mutated server-side.
+
+---
+
+### 69. No "Select all 47,776 matching" affordance — users can't bulk-act on a whole filter
+
+#### What I observed
+With 47,776 jobs matching the default filter and 25 per page, the maximum
+reachable selection is **25**. There is no link, button, or banner anywhere
+that lets the user say *"also select the other 47,751 rows matching this
+filter"*. The standard SaaS pattern (Gmail: "All 50 conversations on this
+page are selected · Select all 9,371 conversations in Inbox", Linear:
+"Select all 1,234 issues", GitHub: "Select all N issues", Notion, Zendesk,
+Asana) is absent. Combined with Finding #68, a user who needs to bulk-
+reject every `status=New / role_cluster=qa` job (≈509 rows) would have to:
+
+1. page through ≈21 pages of the qa filter
+2. click header select-all on each page
+3. hit Reject
+4. repeat 20 more times
+
+That's 40+ manual actions, each of which is susceptible to the data-loss
+bug in #68.
+
+#### Suggested fix
+`JobsPage.tsx`, below the existing bulk toolbar (line 362):
+
+```tsx
+{selectedIds.size > 0 &&
+ selectedIds.size >= data.items.length &&
+ data.total > data.items.length && (
+  <div className="bg-primary-50 border border-primary-100 rounded-lg p-2 text-sm text-gray-700 flex items-center gap-4">
+    <span>
+      All {data.items.length} on this page are selected.
+    </span>
+    <button
+      onClick={() => setSelectAllMatching(true)}
+      className="text-primary-600 font-medium hover:underline"
+    >
+      Select all {data.total.toLocaleString()} matching
+    </button>
+  </div>
+)}
+```
+
+Backend `/api/v1/jobs/bulk` then needs a new branch:
+```python
+# schemas/job.py
+class BulkActionRequest(BaseModel):
+    action: Literal["accept", "reject", "reset"]
+    job_ids: list[UUID] | None = None
+    filter: JobFilter | None = None  # new — must provide one of the two
+```
+In `jobs.py` `bulk_action`, when `filter` is set, run the same query the
+list endpoint uses and expand server-side under a hard cap (e.g. 10,000)
+so a malicious client can't nuke the whole table. Return the count of
+affected rows in the response so the UI can confirm.
+
+#### Cleanup
+None — read-only probe.
+
+---
+
+### 70. Filter change doesn't clear selection — bulk actions target invisible ghost rows
+
+#### What I observed
+Reproduction on production:
+
+1. On `/jobs` with `status=All Statuses`, tick row 0 ("Compliance Analyst —
+   Night Shift", `status=new`, visible on page 1). Toolbar: `1 selected`.
+2. Without clearing the selection, change the `Status` filter dropdown from
+   "All Statuses" to "Rejected".
+3. Table re-queries and re-renders with 1 row matching — "Infrastructure
+   Engineer" (a totally different job, `status=rejected`). None of the
+   visible row checkboxes are ticked.
+4. **But the toolbar still says `1 selected` and the Accept / Reject / Reset
+   buttons are still armed.**
+
+If the user now clicks Reject (intending to "reject this visible job"), the
+client sends `job_ids=[compliance-analyst-id]` — a job which is invisible
+on the current view and lives in a totally different status bucket. No
+warning, no visual cue. The action succeeds and the Compliance Analyst job
+gets silently rejected while the user thinks they touched the Infrastructure
+Engineer row.
+
+This is a close cousin of #68: both turn "I thought I was acting on what I
+could see" into "I actually acted on something I'd forgotten about".
+
+#### Root cause
+`JobsPage.tsx` `selectedIds` state is never reset when the filter / sort /
+search / role-cluster params change. Those changes trigger a React Query
+refetch (`useQuery` depends on the filter keys), but `selectedIds` has no
+effect dependency on them.
+
+#### Suggested fix
+Add a `useEffect` that clears the Set on any filter/sort change:
+
+```tsx
+useEffect(() => {
+  setSelectedIds(new Set());
+}, [
+  filters.status,
+  filters.platform,
+  filters.role_cluster,
+  filters.geography,
+  filters.search,
+  sort.column,
+  sort.direction,
+]);
+```
+
+Alternatively, keep the selection but *disable* the Accept/Reject/Reset
+buttons when `selectedIds.size > 0 && !selectedIds.every(id => data.items.some(j => j.id === id))`,
+and show a banner "N selection(s) hidden by current filter — clear before
+acting". The `useEffect` wipe is simpler, safer, and matches Gmail /
+Linear behaviour.
+
+#### Cleanup
+I reset the status filter to "All Statuses" and cleared the selection via
+`Cancel` after probing.
+
+---
+
+### 71. Bulk accept/reject fires with no confirmation; all checkboxes have zero a11y attrs
+
+#### What I observed
+Two bugs that compound — they're one ticket because they share the same
+four lines of JSX.
+
+**(a) No-confirm bulk destructive actions.** Clicking `Reject` (or Accept,
+or Reset) in the bulk toolbar (`JobsPage.tsx` lines 329-352) immediately
+calls `bulkMutation.mutate({ job_ids: Array.from(selectedIds), action })`.
+There is no confirmation dialog, no *"Reject 25 jobs?"* prompt, no undo.
+The Accept and Reject buttons are 8px apart (same `gap-2` Tailwind class,
+different colour variants) and react-query's `loading` spinner replaces
+their labels during the request — so a misclick is easy and un-cancellable.
+Combined with #70's ghost selection, one click can silently reject a job
+the user has never seen.
+
+**(b) Zero a11y attrs on checkboxes.** DOM probe at `/jobs`:
+
+```js
+document.querySelector('thead input[type="checkbox"]')
+  // { id: "", name: "", ariaLabel: null, title: "" }
+document.querySelectorAll('tbody input[type="checkbox"]').length    // 25
+document.querySelectorAll('tbody input[type="checkbox"][aria-label]')
+                                                              .length  // 0
+```
+
+Every checkbox is an unlabelled `<input type="checkbox">`. Screen readers
+announce 26 instances of "checkbox, not checked" on the page with no row
+context. A JAWS / NVDA / VoiceOver user navigating the Jobs table has no
+way to know which job they're selecting without row-sweeping their AT
+cursor over the Title / Company columns first. Keyboard-only sighted
+users are only marginally better off — the row is visually adjacent to
+the box, but because Finding #52 (low focus-ring coverage) is still open,
+tabbing into the checkbox doesn't even show which one is focused.
+
+#### Suggested fix
+`JobsPage.tsx`:
+
+```tsx
+// (a) Confirmation — replace the three bulk handlers' click targets:
+const handleBulkAction = (action: "accept" | "reject" | "reset") => {
+  const n = selectedIds.size;
+  const verb = action.charAt(0).toUpperCase() + action.slice(1);
+  if (!window.confirm(`${verb} ${n} job${n === 1 ? "" : "s"}?`)) return;
+  bulkMutation.mutate({ job_ids: Array.from(selectedIds), action });
+};
+```
+Better: a shadcn/headlessUI `<AlertDialog>` for a non-blocking modal that
+also shows the first 3 selected job titles so the user can eyeball what
+they're about to mutate.
+
+```tsx
+// (b) A11y — header checkbox (line 376):
+<input
+  type="checkbox"
+  id="jobs-select-all"
+  aria-label="Select all visible jobs"
+  checked={...}
+  onChange={toggleSelectAll}
+  ...
+/>
+
+// Row checkbox (line 421):
+<input
+  type="checkbox"
+  id={`jobs-select-${job.id}`}
+  name="job_ids"
+  aria-label={`Select ${job.title} at ${job.company_name}`}
+  checked={selectedIds.has(job.id)}
+  ...
+/>
+```
+`name="job_ids"` is optional but lets browser extensions / scraping
+tools enumerate checkboxes the way they'd enumerate a form field.
+
+#### Cleanup
+None beyond the existing `Cancel` click.
 
 ---
 
