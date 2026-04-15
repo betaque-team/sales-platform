@@ -102,6 +102,24 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
         select(Job).where(Job.external_id == external_id)
     ).scalar_one_or_none()
 
+    # Regression finding 88: aggregator boards (e.g. Jobgether on Lever)
+    # re-post the same logical role with a new Lever job-id every few
+    # hours, producing rows with distinct `external_id` but identical
+    # `(company_id, title)`. The unique constraint on `external_id`
+    # can't help here. Before inserting a brand-new row, look for an
+    # existing Job that already covers this `(company_id, title)` — if
+    # found, treat it as an update of that row (refresh `last_seen_at`,
+    # re-score, etc.) and skip the insert entirely. This keeps the DB
+    # at one row per logical role without requiring per-platform
+    # "is_aggregator" annotations.
+    if not existing and title:
+        existing = session.execute(
+            select(Job).where(
+                Job.company_id == company.id,
+                Job.title == title,
+            ).limit(1)
+        ).scalar_one_or_none()
+
     # Geography classification
     geography_bucket = classify_geography(location_raw, remote_scope)
 
