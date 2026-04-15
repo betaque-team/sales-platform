@@ -24,6 +24,75 @@ logger = logging.getLogger(__name__)
 # Thread pool for running async fetchers from sync Celery context
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# Regression finding 7 (auto-deactivation): after this many *clean*
+# zero-job scans in a row, flip the board's `is_active` to False.
+# "Clean" = fetcher returned [] with no exception, so we know the slug
+# is live and just empty. Fetcher errors (Cloudflare 403, network)
+# never count toward or reset this streak — see `_update_board_health`.
+#
+# Threshold tuned for the daily scan cadence: 5 days of genuine empty
+# responses is enough signal that the company has left the ATS, without
+# deactivating boards that happen to be temporarily empty between
+# posting cycles. Keep this constant (not a setting) — ops changes the
+# behavior via manual `is_active` toggles, not by re-tuning the knob.
+_STALE_BOARD_ZERO_SCAN_THRESHOLD = 5
+
+
+def _update_board_health(board: CompanyATSBoard, stats: dict) -> None:
+    """Advance the staleness counter / auto-deactivate if the streak hits.
+
+    Called from `_scan_board` after a successful fetcher call (the
+    fetcher-raised path never reaches us — it rollbacks via the outer
+    except). Mutates `board` in place; the caller is responsible for
+    committing. No return value — the helper is a pure state machine
+    over the three cases below.
+
+    Cases (in the order they're tested):
+    1. `jobs_found >= 1`: board is alive. Reset the counter to 0 and,
+       as defense-in-depth, clear any prior auto-deactivation reason
+       in case an admin manually reactivated and the board has come
+       back to life on its own.
+    2. `errors > 0` with `jobs_found == 0`: cannot happen in practice
+       today — per-job errors only fire inside the `for raw_job`
+       loop, which only runs when `jobs_found >= 1`. But the guard
+       is cheap and keeps the "errors don't count" invariant
+       explicit for future callers.
+    3. `jobs_found == 0` with `errors == 0`: clean zero return.
+       Increment the counter and, if we've crossed the threshold
+       while still active, flip `is_active=False` and stamp the
+       reason. The `board.is_active` check makes this idempotent —
+       we never re-deactivate an already-deactivated board and
+       overwrite a human-set reason.
+    """
+    jobs_found = stats.get("jobs_found", 0)
+    errors = stats.get("errors", 0)
+
+    if jobs_found >= 1:
+        board.consecutive_zero_scans = 0
+        if board.deactivated_reason:
+            board.deactivated_reason = ""
+        return
+
+    if errors > 0:
+        # Defensive no-op — see docstring case 2.
+        return
+
+    # Clean-zero streak advances.
+    board.consecutive_zero_scans += 1
+    if (
+        board.consecutive_zero_scans >= _STALE_BOARD_ZERO_SCAN_THRESHOLD
+        and board.is_active
+    ):
+        board.is_active = False
+        board.deactivated_reason = (
+            f"auto: {board.consecutive_zero_scans} consecutive zero-job "
+            f"scans (threshold {_STALE_BOARD_ZERO_SCAN_THRESHOLD})"
+        )
+        logger.info(
+            "Auto-deactivated board %s/%s after %d consecutive zero-job scans",
+            board.platform, board.slug, board.consecutive_zero_scans,
+        )
+
 
 def _trigger_alerts_for_new_jobs(session: Session):
     """Find new high-score jobs from the last scan and trigger alert notifications."""
@@ -304,8 +373,13 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
                 logger.error("Error upserting job %s: %s", raw_job.get("external_id", "?"), e, exc_info=True)
                 stats["errors"] += 1
 
-        # Update last_scanned_at on the board
+        # Update last_scanned_at + staleness health on the board.
+        # `_update_board_health` mutates the board row in place (counter,
+        # possibly is_active + deactivated_reason) — both writes share
+        # this single commit so a crash between them can't leave the
+        # counter updated without the deactivation flag (or vice versa).
         board.last_scanned_at = datetime.now(timezone.utc)
+        _update_board_health(board, stats)
         session.commit()
 
     except Exception as e:
