@@ -10,6 +10,7 @@ import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
 import { getCompanies, addToPipeline, exportContactsUrl } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 
 function fundedAgo(fundedAt: string | null): string | null {
   if (!fundedAt) return null;
@@ -82,7 +83,7 @@ export function CompaniesPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Companies</h1>
           <p className="mt-1 text-sm text-gray-500">
-            {data ? `${data.total} companies tracked` : "Loading companies..."}
+            {data ? `${formatCount(data.total)} companies tracked` : "Loading companies..."}
           </p>
         </div>
         <a
@@ -314,11 +315,11 @@ export function CompaniesPage() {
                     <div className="flex items-center gap-4">
                       <div>
                         <span className="text-gray-500">Jobs: </span>
-                        <span className="font-semibold text-gray-900">{company.job_count}</span>
+                        <span className="font-semibold text-gray-900">{formatCount(company.job_count)}</span>
                       </div>
                       <div>
                         <span className="text-gray-500">Accepted: </span>
-                        <span className="font-semibold text-green-600">{company.accepted_count}</span>
+                        <span className="font-semibold text-green-600">{formatCount(company.accepted_count)}</span>
                       </div>
                     </div>
                     <button

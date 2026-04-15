@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type { PipelineItem } from "@/lib/types";
+import { formatCount } from "@/lib/format";
 
 const STAGE_COLORS = [
   "bg-blue-500",
@@ -82,7 +83,7 @@ function PipelineCard({
             </p>
             {item.total_open_roles > 0 && (
               <p className="text-xs text-gray-500 mt-0.5">
-                {item.total_open_roles} open role{item.total_open_roles !== 1 ? "s" : ""}
+                {formatCount(item.total_open_roles)} open role{item.total_open_roles !== 1 ? "s" : ""}
               </p>
             )}
           </div>
@@ -105,10 +106,10 @@ function PipelineCard({
       <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
         <div className="flex items-center gap-1">
           <Briefcase className="h-3 w-3" />
-          <span>{item.accepted_jobs_count} accepted</span>
+          <span>{formatCount(item.accepted_jobs_count)} accepted</span>
         </div>
         <span>&middot;</span>
-        <span>{item.total_open_roles} total</span>
+        <span>{formatCount(item.total_open_roles)} total</span>
       </div>
 
       {item.notes && (

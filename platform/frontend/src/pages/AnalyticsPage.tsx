@@ -33,6 +33,7 @@ import {
   getApplicationsByPlatform,
   getReviewInsights,
 } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 
 const PIE_COLORS = [
   "#6366f1",
@@ -72,7 +73,15 @@ function MetricCard({
         </div>
         <div>
           <p className="text-xs text-gray-500">{label}</p>
-          <p className="text-xl font-bold text-gray-900">{value}</p>
+          {/* Regression finding 49: numeric metrics like `Total Jobs: 47776`
+              rendered without thousand separators on this page while the
+              same number on /platforms showed `47,776`. Format numeric
+              values here through `formatCount` so the default is
+              locale-grouped; callers passing a preformatted string (e.g.
+              "3.5%") pass through untouched. */}
+          <p className="text-xl font-bold text-gray-900">
+            {typeof value === "number" ? formatCount(value) : value}
+          </p>
         </div>
       </div>
     </Card>

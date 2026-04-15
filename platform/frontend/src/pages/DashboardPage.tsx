@@ -43,6 +43,7 @@ import {
   getActiveResume,
   getWarmLeads,
 } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 
 function StatCard({
   label,
@@ -63,7 +64,15 @@ function StatCard({
         </div>
         <div>
           <p className="text-sm text-gray-500">{label}</p>
-          <p className="text-2xl font-bold text-gray-900">{value}</p>
+          {/* Regression finding 36: Dashboard showed `Total Jobs 47776` and
+              `Companies 6639` — raw integers without thousand separators.
+              Numeric values route through `formatCount` so they match the
+              already-formatted counts on /platforms, /monitoring, etc.
+              String values (used when callers pre-format their own display)
+              pass through unchanged. */}
+          <p className="text-2xl font-bold text-gray-900">
+            {typeof value === "number" ? formatCount(value) : value}
+          </p>
         </div>
       </div>
     </Card>
@@ -232,7 +241,7 @@ export function DashboardPage() {
                 Infra / Cloud / DevOps / SRE
               </h3>
             </div>
-            <Badge variant="primary">{infraJobs?.total ?? 0} jobs</Badge>
+            <Badge variant="primary">{formatCount(infraJobs?.total)} jobs</Badge>
           </div>
           {infraJobs && infraJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
@@ -262,7 +271,7 @@ export function DashboardPage() {
                 Security / Compliance / DevSecOps
               </h3>
             </div>
-            <Badge variant="danger">{securityJobs?.total ?? 0} jobs</Badge>
+            <Badge variant="danger">{formatCount(securityJobs?.total)} jobs</Badge>
           </div>
           {securityJobs && securityJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
@@ -292,7 +301,7 @@ export function DashboardPage() {
                 QA / Testing / SDET
               </h3>
             </div>
-            <Badge variant="gray">{qaJobs?.total ?? 0} jobs</Badge>
+            <Badge variant="gray">{formatCount(qaJobs?.total)} jobs</Badge>
           </div>
           {qaJobs && qaJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
@@ -323,7 +332,7 @@ export function DashboardPage() {
               Global Remote Openings
             </h3>
           </div>
-          <Badge variant="success">{globalRemoteJobs?.total ?? 0} jobs</Badge>
+          <Badge variant="success">{formatCount(globalRemoteJobs?.total)} jobs</Badge>
         </div>
         {globalRemoteJobs && globalRemoteJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">
@@ -454,7 +463,7 @@ export function DashboardPage() {
               )}
             </p>
           </div>
-          <Badge variant="primary">{relevantJobs?.total ?? 0} jobs</Badge>
+          <Badge variant="primary">{formatCount(relevantJobs?.total)} jobs</Badge>
         </div>
         {relevantJobs && relevantJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">
@@ -660,7 +669,7 @@ export function DashboardPage() {
             </div>
             <p className="text-xs text-gray-400 mt-0.5">All profiles including non-scored positions</p>
           </div>
-          <Badge variant="default">{recentJobs?.total ?? 0} jobs</Badge>
+          <Badge variant="default">{formatCount(recentJobs?.total)} jobs</Badge>
         </div>
         {recentJobs && recentJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">

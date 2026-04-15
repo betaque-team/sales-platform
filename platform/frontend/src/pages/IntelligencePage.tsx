@@ -8,6 +8,7 @@ import {
 import {
   getSkillGaps, getSalaryInsights, getTimingIntelligence, getNetworkingSuggestions,
 } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 
 const TABS = [
   { key: "skills", label: "Skill Gaps", icon: Brain },
@@ -240,7 +241,7 @@ function SalaryTab({ roleCluster }: { roleCluster: string }) {
               <div key={cluster} className="flex items-center justify-between rounded-lg bg-gray-50 p-3">
                 <div>
                   <span className="text-sm font-medium text-gray-900 capitalize">{cluster || "Other"}</span>
-                  <span className="ml-2 text-xs text-gray-500">{stats.count} jobs</span>
+                  <span className="ml-2 text-xs text-gray-500">{formatCount(stats.count)} jobs</span>
                 </div>
                 <div className="text-right">
                   <span className="text-sm font-semibold text-gray-900">{fmt(stats.median)}</span>
@@ -257,7 +258,7 @@ function SalaryTab({ roleCluster }: { roleCluster: string }) {
               <div key={geo} className="flex items-center justify-between rounded-lg bg-gray-50 p-3">
                 <div>
                   <span className="text-sm font-medium text-gray-900 capitalize">{geo.replace("_", " ") || "Unspecified"}</span>
-                  <span className="ml-2 text-xs text-gray-500">{stats.count} jobs</span>
+                  <span className="ml-2 text-xs text-gray-500">{formatCount(stats.count)} jobs</span>
                 </div>
                 <div className="text-right">
                   <span className="text-sm font-semibold text-gray-900">{fmt(stats.median)}</span>
@@ -357,9 +358,9 @@ function TimingTab() {
             <div key={p.platform} className="flex items-center justify-between rounded-lg bg-gray-50 p-3">
               <span className="text-sm font-medium text-gray-900 capitalize">{p.platform}</span>
               <div className="flex items-center gap-4 text-sm">
-                <span className="text-gray-500">{p.total_90d} total (90d)</span>
-                <span className="font-medium text-green-700">{p.last_7d} this week</span>
-                <span className="text-gray-600">{p.last_30d} this month</span>
+                <span className="text-gray-500">{formatCount(p.total_90d)} total (90d)</span>
+                <span className="font-medium text-green-700">{formatCount(p.last_7d)} this week</span>
+                <span className="text-gray-600">{formatCount(p.last_30d)} this month</span>
               </div>
             </div>
           ))}
@@ -479,7 +480,12 @@ function StatCard({ label, value, color }: { label: string; value: string | numb
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="text-xs text-gray-500 font-medium">{label}</div>
-      <div className={`text-xl font-bold mt-1 ${colorMap[color || ""] || "text-gray-900"}`}>{value}</div>
+      {/* Regression finding 36: stat-card counts like `15865 total (90d)`
+          rendered unformatted. Numeric values route through `formatCount`
+          for locale grouping; pre-formatted strings pass through. */}
+      <div className={`text-xl font-bold mt-1 ${colorMap[color || ""] || "text-gray-900"}`}>
+        {typeof value === "number" ? formatCount(value) : value}
+      </div>
     </div>
   );
 }
