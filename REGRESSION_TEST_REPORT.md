@@ -86,9 +86,10 @@ one place.
 | 26 | 🟡 | Intelligence | `/intelligence/timing` → `posting_by_day`: Sunday 50.3% (23,696/47,142), Mon-Sat 13.8%→4.1%. Smells like a date-parsing fallback landing on day-0, or a bulk-seed weekend import. User-facing recommendation "post on Sundays" would be wrong if data is skewed | ✅ fixed: `intelligence.py /timing` now bases DOW/hour buckets on `posted_at` (the upstream ATS publish date) rather than `first_seen_at` (our scanner ingest time). Also excludes rows where `posted_at` matches `first_seen_at` to the second, which is the signature of a row where the ATS returned no posted date and the scanner back-filled with NOW() at ingest — eliminates the Sunday bulk-seed spike |
 | 27 | 🟡 | Intelligence | `/intelligence/networking` suggestions return corrupted name/title/email concatenations. Example: `{name: "Gartner PeerInsights", title: "Wade BillingsVP, Technology Services, Instructure", company: "BugCrowd", email: "gartner.peerinsights@bugcrowd.com"}` — clearly scraped-from-page strings glued together, with first-word-of-name used to synthesize a company-domain email. Misleading for users doing outreach | 🟡 partial: added `_looks_like_corrupted_contact()` read-side filter on both `/networking` branches — drops rows where first/last name contain `,` `|` `;`, or titles > 120 chars, or titles with 3+ comma-separated segments, or first_name has 2+ internal capitals ("BillingsVP"). Bumped the general-branch `LIMIT` to 60 so the filter can't starve the UI. **Upstream enrichment pipeline (`services/enrichment/orchestrator.py`) still writes the corrupted rows** — follow-up ticket needed to sanitize at ingest time |
 | 28 | 🟡 | Copy / Data | Finding #12 partial: AI Insight now says "Platform has 47,081 jobs indexed across **10** ATS sources" but `/api/v1/platforms` returns **14** distinct platforms (including `bamboohr`, `recruitee`, `wellfound`, `weworkremotely` with 0 jobs). Root cause: `total_sources` uses `COUNT(DISTINCT jobs.platform)` which excludes platforms with no current job rows | ✅ fixed: `analytics.py` `total_sources` now unions `DISTINCT CompanyATSBoard.platform` with `DISTINCT Job.platform` and takes the set size, matching what `/platforms` counts |
-| 29 | 🔵 | Feedback UI | Stats cards at top of `/feedback` show "Total 33 · Open 16 · In Progress 0 · Resolved 12" (sum = 28). The 5 `closed` tickets exist (`GET /feedback/stats` → `by_status.closed: 5`) but there's no card for them. Users see "Total 33" then 28 in cards and can't reconcile | ⬜ open |
-| 30 | 🔵 | Feedback UI | In the ticket detail modal, "Update Ticket" is rendered without visible button styling — appears as plain black text next to the status dropdown. Users can't tell it's clickable. Also, no success toast after save (modal auto-closes silently). Functionality works (PATCH 200, persists, stats update), only discoverability is poor | ⬜ open |
+| 29 | 🔵 | Feedback UI | Stats cards at top of `/feedback` show "Total 33 · Open 16 · In Progress 0 · Resolved 12" (sum = 28). The 5 `closed` tickets exist (`GET /feedback/stats` → `by_status.closed: 5`) but there's no card for them. Users see "Total 33" then 28 in cards and can't reconcile | ✅ fixed: `FeedbackPage.tsx` stats grid now renders **5** cards (Total, Open, In Progress, Resolved, **Closed**) instead of 4, so `Total` always equals the visible bucket sum. Grid switched to `grid-cols-2 md:grid-cols-5` so it stays readable on small screens |
+| 30 | 🔵 | Feedback UI | In the ticket detail modal, "Update Ticket" is rendered without visible button styling — appears as plain black text next to the status dropdown. Users can't tell it's clickable. Also, no success toast after save (modal auto-closes silently). Functionality works (PATCH 200, persists, stats update), only discoverability is poor | ✅ fixed: root cause was that `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger` were referenced in 7 places across `FeedbackPage.tsx` but **never defined** — buttons fell back to browser-default rendering (unstyled black text). Added the missing utility classes to `index.css` via `@apply` (primary/secondary/danger variants, focus rings, hover states, disabled styling). Every `btn btn-*` usage on the feedback page is now styled consistently with the rest of the app theme (dark-gray `primary-600`) |
 | 31 | 🟡 | Feedback | Legacy duplicate tickets from before Finding #11 fix are still present: 8 identical "Resume Score / Relevance" tickets from khushi.jain@ still show as open. Dedup prevents new dupes but doesn't merge/close old ones — queue cleanup task | ✅ fixed: new `app/close_legacy_duplicate_feedback.py` script (modelled on `seed_test_users.py`) retroactively applies the same dedup rule the API now uses on new submissions. For every `(user_id, category, lowercased title)` group of open/in-progress tickets it keeps the OLDEST open and closes the rest with a system note linking back to the canonical id. Idempotent and supports `--dry-run`. Run on prod: `docker compose exec backend python -m app.close_legacy_duplicate_feedback --dry-run`, then rerun without the flag |
+| 32 | 🔴 | Deploy / Release | **Round 3 fixes marked ✅ in this report are NOT live on prod.** Retest on 2026-04-15 confirms the deployed backend is several commits behind `fix/regression-findings` tip. Probes: (#16) `GET /feedback/not-a-uuid` → **500** not 422; (#21) anonymous `GET /feedback/attachments/<valid_filename>` → **200 + file bytes** (confirmed by uploading a fresh PNG as admin then curl'ing without cookies); (#25) `POST /feedback` with 20,000-char description → **200 accepted**; (#26) `/intelligence/timing` still shows Sunday=23,696 / Monday=6,496 (49.6%, unchanged); (#27) first `/intelligence/networking` suggestion is still the corrupted "Gartner PeerInsights / Wade BillingsVP, Technology Services, Instructure / BugCrowd" entry the filter was supposed to drop; (#28) Dashboard AI Insight still says "Platform has 47,776 jobs indexed across **10** ATS sources"; (#19) response headers missing `Content-Security-Policy`, `Strict-Transport-Security`, `Cross-Origin-*`, `Permissions-Policy`. Root cause: CI/CD pipeline commit `5ce5d0b` auto-deploys only on push to `main`; `fix/regression-findings` has 9 fix commits sitting since ~Apr 15 17:13 that were never manually deployed. The report's green checkmarks describe the code state on the branch, not prod behaviour | ⬜ open — either (a) manually deploy the branch to prod again now, or (b) extend the CI workflow to deploy `fix/regression-findings` (feature-branch deploys) or to build a preview image per-PR. Tester can't re-verify fixes while the prod image is stale |
 
 ---
 
@@ -830,5 +831,59 @@ DELETE FROM feedback WHERE user_id=(SELECT id FROM users WHERE email='aditya.bam
 Verify counts after: `/feedback/stats.by_status.open` should drop from 16 → about 6.
 
 ---
+
+## 14. Round 4 Findings (2026-04-15, re-retest + UI/UX deep audit)
+
+### 32. Round 3 fixes marked ✅ are not actually live on prod
+**Severity:** 🔴 BLOCKER · **Area:** Deploy / Release
+
+While starting a Round 4 UI/UX audit I re-probed each Round 3 finding that the branch marks ✅ fixed. Most of them are still reproducing on prod. The code on `fix/regression-findings` is correct, but that code has not been rolled out — prod is running an image that predates commits `85bfa77` / `ba19e50` / `9bdc572` / `34f57b4` / `32d970f` / `d24d2a9`.
+
+Concrete evidence (all as `test-admin@reventlabs.com` on `https://salesplatform.reventlabs.com`):
+
+| Finding | Expected after fix | Observed on prod |
+|---|---|---|
+| #16 | `GET /feedback/not-a-uuid` → **422** (structured validation error) | **500 Internal Server Error** |
+| #21 | `GET /feedback/attachments/<filename>` without cookie → **401** | **HTTP 200 + raw PNG bytes** (reproduced by uploading `probe21.png` as admin then `curl` with no cookies). The endpoint still has no auth check live |
+| #25 | `POST /feedback` with 20,000-char `description` → **422** (max_length=8000) | **HTTP 200** — ticket created with 20 KB payload (also 8,001 and 5,000; all accepted) |
+| #26 | `/intelligence/timing.posting_by_day` — Sunday ≈ 1/7 of total (posted_at based) | Sunday=23,696 (49.6%), Mon=6,496, …, Sat=1,921 — identical to pre-fix distribution |
+| #27 | `/intelligence/networking` strips corrupted rows | First suggestion is still `{name: "Gartner PeerInsights", title: "Wade BillingsVP, Technology Services, Instructure", company: "BugCrowd"}` — the canonical example the filter is supposed to drop |
+| #28 | Dashboard AI Insight: "indexed across **14** ATS sources" | "indexed across **10** ATS sources" (`/analytics/ai-insights` still returns `total_sources=10`) |
+| #19 | Response headers include `Content-Security-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, `Cross-Origin-*` | Only `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. CSP & HSTS both absent — and X-Frame-Options is SAMEORIGIN, not `DENY` as the fix specifies |
+
+Fixes that **are** live (confirmed earlier in Round 3 retest): #1, #2, #3, #4, #5, #6, #8, #9, #11, #13, #14. Those all shipped in earlier commits that pre-date the "deployed on prod" manual deploy.
+
+#### Why this happened
+Commit `5ce5d0b` added a GHCR-based CI/CD pipeline that auto-deploys **only on push to `main`**. All Round 3 fixes live on `fix/regression-findings`, which never gets picked up by CI. Whoever deployed "Changes … deployed on prod" earlier today ran a one-time manual deploy at roughly the tip before `9bdc572`. Every fix commit after that point is in the repo but not in the image running on prod.
+
+#### Repro (most striking probe, #21 anonymous download)
+```bash
+# 1. Log in as admin in the browser; create a fresh feedback ticket; upload probe21.png
+# 2. Note the stored filename, e.g. e66bae2db9e3467e9b960197caa0c2ed.png
+curl -s -o out.png -w "HTTP %{http_code}\n" \
+  "https://salesplatform.reventlabs.com/api/v1/feedback/attachments/e66bae2db9e3467e9b960197caa0c2ed.png"
+# expected: HTTP 401
+# actual:   HTTP 200  (followed by the full PNG bytes)
+```
+Compare to a control endpoint that does require auth:
+```bash
+curl -s -w "HTTP %{http_code}\n" https://salesplatform.reventlabs.com/api/v1/feedback/stats
+# HTTP 401 {"detail":"Not authenticated"}  ← as expected
+```
+Only `/feedback/attachments/{filename}` lets unauthenticated callers through, which matches the pre-fix code on `main` where `get_current_user` was never wired into this route.
+
+#### Side-effect cleanup
+All Round-4 probe tickets (`test round 4 long desc`, `regression probe attachment auth round4`, `probe 25 5000 / 8001 / 20000`, `Attach auth probe 2026-04-15`) were PATCHed to `status=closed` with `admin_notes="[regression cleanup round 4]"`. Uploaded probe PNG was deleted from the ticket. No user-visible rows remain.
+
+#### Suggested fix
+(a) Easiest: manually redeploy the branch image now so the tester can continue. `docker compose -f docker-compose.yml pull && docker compose up -d` on the prod box after pointing the backend image to the tip of `fix/regression-findings`.
+(b) Properly: extend `.github/workflows/*.yml` to build + push an image on pushes to `fix/*` branches and, at minimum, post a deployable image tag in the PR so ops can redeploy with one command. Even better: preview-image-per-PR.
+(c) Until either lands: every Round-3 `✅ fixed` row in §1 above should actually be read as "fixed on branch, not yet verified on prod".
+
+---
+
+## 15. Round 4 In-Flight Notes
+
+This section will be fleshed out with UI/UX findings after the deployment gap above is resolved. Auditing pages against a stale image would double-count bugs the fixer has already closed on the branch.
 
 **End of report.**
