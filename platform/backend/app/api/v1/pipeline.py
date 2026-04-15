@@ -358,6 +358,15 @@ async def update_client(
         raise HTTPException(status_code=404, detail="Client not found")
 
     if body.stage is not None:
+        # Validate against known stage keys — same check as POST — so cards
+        # can't be dropped into a non-existent / deactivated stage via the
+        # API (and then vanish from the kanban board).
+        stage_keys = await _get_stage_keys(db)
+        if body.stage not in stage_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage. Must be one of: {', '.join(stage_keys)}",
+            )
         client.stage = body.stage
     if body.priority is not None:
         client.priority = body.priority

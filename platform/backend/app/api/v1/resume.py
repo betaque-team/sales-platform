@@ -32,10 +32,17 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
 router = APIRouter(prefix="/resume", tags=["resume"])
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MIN_FILE_SIZE = 256  # bytes — anything smaller can't be a real resume
 ALLOWED_TYPES = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
 }
+
+# Minimum number of words we need to pull out of a file to call it a usable
+# resume. Below this we assume extraction failed (scanned PDF, corrupt DOCX,
+# plain-text-renamed-to-.pdf) and reject the upload outright rather than
+# persisting a broken row with status="error".
+MIN_WORD_COUNT = 50
 
 
 @router.post("/upload")
@@ -61,14 +68,49 @@ async def upload_resume(
 
     # Read file
     file_bytes = await file.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(file_bytes) < MIN_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="File is too small to be a valid resume",
+        )
     if len(file_bytes) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File size exceeds 5MB limit")
+
+    # Magic-byte check so a plain .txt renamed to .pdf (or a random binary
+    # with a .pdf extension) gets rejected here instead of silently failing
+    # text extraction downstream and leaving behind a status="error" row.
+    header = file_bytes[:4]
+    if file_type == "pdf" and not file_bytes[:5] == b"%PDF-":
+        raise HTTPException(
+            status_code=400,
+            detail="File is not a valid PDF (missing %PDF header)",
+        )
+    if file_type == "docx" and header != b"PK\x03\x04":
+        # DOCX is a ZIP package; real DOCX files start with the PK ZIP header.
+        raise HTTPException(
+            status_code=400,
+            detail="File is not a valid DOCX (missing ZIP header)",
+        )
 
     # Extract text
     text_content = extract_text(file_bytes, file_type)
     word_count = len(text_content.split()) if text_content else 0
 
-    status = "ready" if word_count >= 50 else "error"
+    # Reject at the API boundary instead of persisting a broken row. Prior
+    # behaviour (status="error" rows in the DB) caused DB clutter and
+    # misleading UX — the user sees an upload succeed and then wonders why
+    # scoring never runs.
+    if word_count < MIN_WORD_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Could not extract readable text from the file "
+                f"(got {word_count} words, need at least {MIN_WORD_COUNT}). "
+                f"Please upload a text-based (not scanned) PDF or DOCX."
+            ),
+        )
 
     resume = Resume(
         id=uuid.uuid4(),
@@ -78,13 +120,13 @@ async def upload_resume(
         file_type=file_type,
         text_content=text_content,
         word_count=word_count,
-        status=status,
+        status="ready",
     )
     db.add(resume)
     await db.flush()  # flush to DB so FK constraint is satisfied
 
     # Auto-set as active if this is the user's first resume
-    if not user.active_resume_id and status == "ready":
+    if not user.active_resume_id:
         user.active_resume_id = resume.id
         db.add(user)
 
