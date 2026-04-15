@@ -125,11 +125,19 @@ jobs:
           fi
 
       - name: Trigger deploy on VM
+        # Pipe GITHUB_TOKEN to the VM over SSH stdin so the `deploy` user can
+        # `docker login ghcr.io` for a private-package pull. Token is scoped to
+        # this run (minted by GH), expires when the job finishes, and never
+        # touches disk on the VM beyond docker's own 600-mode config.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
         run: |
-          ssh -i ~/.ssh/deploy_key \
-              -o BatchMode=yes \
-              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-              "deploy ${{ needs.build.outputs.tag }}"
+          printf '%s\n' "$GH_TOKEN" | \
+            ssh -i ~/.ssh/deploy_key \
+                -o BatchMode=yes \
+                ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+                "deploy ${{ needs.build.outputs.tag }} $GH_ACTOR"
 
       - name: Fetch status
         if: always()
