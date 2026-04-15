@@ -582,14 +582,24 @@ function FeedbackDetail({
 }) {
   const [adminNotes, setAdminNotes] = useState(item.admin_notes || "");
   const [status, setStatus] = useState(item.status);
+  const [savedFlash, setSavedFlash] = useState(false);
   const queryClient = useQueryClient();
 
   const mutation = useMutation({
     mutationFn: (data: { status?: string; admin_notes?: string }) =>
       updateFeedback(item.id, data),
-    onSuccess: () => {
+    onSuccess: (updated) => {
+      // Update local state from the server response so the badge + form reflect
+      // the persisted value before the modal closes.
+      if (updated?.status) setStatus(updated.status as FeedbackStatus);
+      if (typeof updated?.admin_notes === "string") setAdminNotes(updated.admin_notes);
       queryClient.invalidateQueries({ queryKey: ["feedback"] });
-      onClose();
+      setSavedFlash(true);
+      // Keep the modal open for 900ms so the user sees the confirmation, then close.
+      setTimeout(() => {
+        setSavedFlash(false);
+        onClose();
+      }, 900);
     },
   });
 
@@ -729,6 +739,16 @@ function FeedbackDetail({
                   className="input w-full"
                 />
               </div>
+              {savedFlash && (
+                <div className="rounded-md bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-700">
+                  Saved! Status is now <span className="font-semibold">{STATUS_CONFIG[status]?.label || status}</span>.
+                </div>
+              )}
+              {mutation.isError && (
+                <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                  {(mutation.error as Error)?.message || "Failed to update ticket. Please try again."}
+                </div>
+              )}
             </div>
           )}
         </div>

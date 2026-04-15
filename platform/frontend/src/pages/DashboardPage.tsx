@@ -437,7 +437,7 @@ export function DashboardPage() {
 
       {/* Relevant Jobs: Cloud, DevOps, SRE, Compliance, Security */}
       <Card padding="none" className="ring-2 ring-primary-200">
-        <div className="flex items-center justify-between border-b border-primary-100 bg-primary-50 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-primary-100 bg-primary-50 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
               <Star className="h-4 w-4 text-amber-500" />
@@ -482,7 +482,7 @@ export function DashboardPage() {
 
       {/* Warm Leads */}
       <Card padding="none" className="ring-2 ring-orange-200">
-        <div className="flex items-center justify-between border-b border-orange-100 bg-orange-50 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-orange-100 bg-orange-50 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
               <Flame className="h-4 w-4 text-orange-500" />
@@ -650,7 +650,7 @@ export function DashboardPage() {
 
       {/* All Jobs */}
       <Card padding="none">
-        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
               <List className="h-4 w-4 text-gray-500" />

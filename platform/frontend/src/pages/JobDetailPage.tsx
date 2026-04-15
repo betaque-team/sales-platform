@@ -1250,7 +1250,15 @@ function AIToolsPanel({ jobId }: { jobId: string; jobTitle: string; companyName:
             )}
 
             {coverLetterMutation.isError && (
-              <p className="text-xs text-red-600">Failed to generate. Make sure you have an active resume.</p>
+              <div className="rounded bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                <p className="font-medium">Could not generate cover letter</p>
+                <p className="mt-0.5 text-red-600">
+                  {(coverLetterMutation.error as Error)?.message || "Please try again."}
+                </p>
+                <p className="mt-1 text-red-500">
+                  Tip: make sure you have an active resume and that the admin has configured an Anthropic API key.
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -1353,7 +1361,15 @@ function AIToolsPanel({ jobId }: { jobId: string; jobTitle: string; companyName:
             )}
 
             {interviewPrepMutation.isError && (
-              <p className="text-xs text-red-600">Failed to generate. Make sure you have an active resume.</p>
+              <div className="rounded bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                <p className="font-medium">Could not generate interview prep</p>
+                <p className="mt-0.5 text-red-600">
+                  {(interviewPrepMutation.error as Error)?.message || "Please try again."}
+                </p>
+                <p className="mt-1 text-red-500">
+                  Tip: make sure you have an active resume and that the admin has configured an Anthropic API key.
+                </p>
+              </div>
             )}
           </div>
         )}

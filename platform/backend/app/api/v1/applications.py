@@ -471,12 +471,18 @@ async def preview_job_questions(
     ab_result = await db.execute(ab_query)
     ab_entries = ab_result.scalars().all()
 
-    # Merge (resume overrides base)
-    merged = {}
+    # Merge (resume overrides base). Convert ORM objects to plain dicts so the
+    # downstream matcher (which calls .get()) works correctly.
+    merged: dict[str, dict] = {}
     for entry in ab_entries:
         key = entry.question_key
         if key not in merged or entry.resume_id is not None:
-            merged[key] = entry
+            merged[key] = {
+                "question_key": entry.question_key,
+                "answer": entry.answer or "",
+                "category": entry.category or "",
+                "source": entry.source or "base",
+            }
 
     # Match questions to answers
     matched = match_questions_to_answers(ats_questions, list(merged.values()))
