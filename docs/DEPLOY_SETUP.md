@@ -47,10 +47,10 @@ In the `production` environment → **Add secret**:
 
 | Secret name | Value | Notes |
 |---|---|---|
-| `DEPLOY_HOST` | `161.118.207.119` | VM public IP |
-| `DEPLOY_USER` | `deploy` | VM user with docker group only |
+| `DEPLOY_HOST` | *(VM public IP)* | IP of the Oracle VM — from OCI console or `terraform output public_ip` |
+| `DEPLOY_USER` | *(VM deploy user)* | The dedicated SSH user with `docker` group only, no sudo |
 | `DEPLOY_SSH_KEY` | *(paste the full contents of `~/.ssh/sales-platform-ci` from your Mac)* | Include the `-----BEGIN ... END-----` lines |
-| `DEPLOY_HOSTKEY` | `\|1\|SaFx4T6ADdCsBlr8zifAn5ZKQf4=\|uhaqBtgyUlPGaFePJbPhaXE1jMM= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfzjSsZiXrx4zG/Gofm5pYu73V8d3EH69+MDAY/0deE` | Pins the VM host key. Copy verbatim. |
+| `DEPLOY_HOSTKEY` | *(output of `ssh-keyscan -t ed25519 <VM_HOST>`)* | Pins the VM host key. Run the keyscan on your Mac, copy the single-line output verbatim. |
 
 To grab the private key on your Mac:
 ```bash
@@ -125,7 +125,7 @@ If it fails at `docker pull`, the GHCR package is still private and the VM isn't
 **DB restore (opt-in, destructive):**
 Not automated. If you really need to restore the DB (rare — usually the app rollback is enough):
 ```bash
-ssh ubuntu@161.118.207.119
+ssh ubuntu@<VM_HOST>
 cd /opt/sales-platform
 ls backups/pre-deploy-*.sql.gz
 bash scripts/restore.sh <backup-file>
@@ -155,7 +155,7 @@ bash scripts/restore.sh <backup-file>
  └──────────┬───────────────┘
             │   add public to VM, private to GH Secret
             ▼
- ┌─ GitHub Actions ─────────┐      ┌─ Oracle VM (161.118.207.119) ──┐
+ ┌─ GitHub Actions ─────────┐      ┌─ Oracle VM ────────────────────┐
  │                          │      │                                 │
  │  Environment: production │      │   user: deploy (docker only)    │
  │    - DEPLOY_SSH_KEY      │ ssh  │   authorized_keys:              │

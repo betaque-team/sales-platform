@@ -1,0 +1,50 @@
+# =============================================================================
+# Pre-commit hooks — secret-leak defense
+#
+# Install once per clone:
+#   bash scripts/install-hooks.sh
+#
+# Runs automatically on `git commit`. To bypass for a single commit (use
+# sparingly, and only after verifying the match is a false positive):
+#   git commit --no-verify
+#
+# To run manually on all files (e.g. CI):
+#   pre-commit run --all-files
+# =============================================================================
+repos:
+  # ── Broad secret detection ──
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # ── Baseline hygiene ──
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key           # BEGIN RSA/OPENSSH/PGP PRIVATE KEY blocks
+      - id: check-added-large-files      # accidental DB dumps, binaries
+        args: ["--maxkb=1024"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+
+  # ── Repo-specific blocklist ──
+  # Catches known-leaked values we've remediated, so they can't sneak back in,
+  # plus raw public IPs outside RFC1918 ranges. Runs local — no external deps.
+  - repo: local
+    hooks:
+      - id: forbidden-strings
+        name: Block known-leaked secrets and prod identifiers
+        entry: scripts/check-forbidden-strings.sh
+        language: script
+        pass_filenames: true
+        # Skip the checker itself and its config — it literally contains the
+        # forbidden patterns.
+        exclude: ^(scripts/check-forbidden-strings\.sh|\.pre-commit-config\.yaml)$
+
+      - id: no-env-files
+        name: Block .env (only .env.example permitted)
+        entry: scripts/check-no-env-files.sh
+        language: script
+        pass_filenames: true

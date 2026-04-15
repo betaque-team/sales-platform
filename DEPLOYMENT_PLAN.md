@@ -103,7 +103,7 @@ Human admins (me / you) keep their own keys on the `ubuntu` user, unchanged.
 - Wait timer: 2 min (lets you cancel an unwanted auto-deploy)
 - Secrets scoped ONLY to this environment:
   - `DEPLOY_SSH_KEY` (the ed25519 private key)
-  - `DEPLOY_HOST` = `161.118.207.119`
+  - `DEPLOY_HOST` = *(VM public IP — not committed; set in GH Environment only)*
   - `DEPLOY_USER` = `deploy`
 - No repo-wide secrets for anything touching prod
 

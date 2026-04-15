@@ -213,7 +213,7 @@ The app rollback swaps `RELEASE_TAG` in `.env` to a prior image and restarts con
 Only if a migration corrupted data. Rollback image first (above); then if data is still bad:
 
 ```bash
-ssh ubuntu@161.118.207.119
+ssh ubuntu@<VM_HOST>
 cd /opt/sales-platform
 ls -lh backups/pre-deploy-*.sql.gz          # find the right one
 # stop writes
@@ -243,7 +243,7 @@ First, identify which phase failed. Look at the Actions run summary; if inconclu
 | **Migration failed** | `Migration failed -- rolling back` | `.env` auto-reverts to prior tag; no container swap happened. Fix the migration in a PR, re-deploy. Prior version is still serving traffic. |
 | **Backend unhealthy** | `Backend failed to report healthy -- rolling back` | Auto-rollback restarts backend on prior image. Check backend logs: `docker compose logs backend | tail -200`. |
 | **502 after deploy** | `/` returns 502; `/api/...` works | nginx has stale upstream DNS. Fixed automatically by force-recreate step. If not, manually: `docker compose up -d --force-recreate nginx`. |
-| **Deploy hangs** | Actions run stuck at "Trigger deploy on VM" | SSH timeout. Check VM up (ping 161.118.207.119). Cancel run; investigate VM. |
+| **Deploy hangs** | Actions run stuck at "Trigger deploy on VM" | SSH timeout. Check VM up (ping `$PROD_HOST`). Cancel run; investigate VM. |
 
 ### Break-glass — bypass the pipeline
 
@@ -251,7 +251,7 @@ If the pipeline itself is broken (e.g. GH Actions down), deploy manually:
 
 ```bash
 # On your Mac:
-ssh ubuntu@161.118.207.119
+ssh ubuntu@<VM_HOST>
 cd /opt/sales-platform
 sudo -u deploy docker login ghcr.io -u <your-gh-user>   # needs GHCR read
 sudo -u deploy /opt/sales-platform/scripts/ci-deploy.sh
@@ -285,7 +285,7 @@ Then:
 If you rebuild the VM or regenerate sshd host keys:
 
 ```bash
-ssh-keyscan -t ed25519 161.118.207.119
+ssh-keyscan -t ed25519 <VM_HOST>
 ```
 
 Paste the full output (`|1|...|` prefix included) into the `DEPLOY_HOSTKEY` GH environment secret.
@@ -293,9 +293,9 @@ Paste the full output (`|1|...|` prefix included) into the `DEPLOY_HOSTKEY` GH e
 ### Reviewing deploy history
 
 ```bash
-ssh ubuntu@161.118.207.119 'sudo tail -100 /opt/sales-platform/logs/ci-deploy.log'
+ssh ubuntu@<VM_HOST> 'sudo tail -100 /opt/sales-platform/logs/ci-deploy.log'
 # or per-deploy breadcrumbs:
-ssh ubuntu@161.118.207.119 'cat /opt/sales-platform/.last-deploy.json'
+ssh ubuntu@<VM_HOST> 'cat /opt/sales-platform/.last-deploy.json'
 ```
 
 Every deploy writes one line to `.last-deploy.json`: release, previous, timestamp. Keeps a single-entry audit trail of the *current* state; for history, use the log file.
@@ -303,7 +303,7 @@ Every deploy writes one line to `.last-deploy.json`: release, previous, timestam
 ### Verifying fail2ban
 
 ```bash
-ssh ubuntu@161.118.207.119 'sudo fail2ban-client status sshd'
+ssh ubuntu@<VM_HOST> 'sudo fail2ban-client status sshd'
 # Shows: Currently failed / Total failed / Currently banned / Total banned / Banned IP list
 ```
 
@@ -312,7 +312,7 @@ ssh ubuntu@161.118.207.119 'sudo fail2ban-client status sshd'
 Retention is automatic (last 3 tags per repo). To force a deeper clean:
 
 ```bash
-ssh ubuntu@161.118.207.119
+ssh ubuntu@<VM_HOST>
 sudo -u deploy docker image prune -a -f       # rmi untagged + unused
 sudo -u deploy docker system prune -f         # also stopped containers, unused volumes
 ```

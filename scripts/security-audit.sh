@@ -11,10 +11,19 @@
 # =============================================================================
 set -uo pipefail
 
-HOST="${PROD_HOST:-161.118.207.119}"
+# Host is read from the environment — do NOT hardcode prod IPs in the repo.
+# Usage:  PROD_HOST=1.2.3.4 bash scripts/security-audit.sh
+#         PROD_HOST=1.2.3.4 PROD_ADMIN_USER=ubuntu bash scripts/security-audit.sh
+# Or --local on the VM itself (no SSH, no host needed).
 USER_ADMIN="${PROD_ADMIN_USER:-ubuntu}"
 LOCAL=0
 [[ "${1:-}" == "--local" ]] && LOCAL=1
+
+if (( LOCAL == 0 )) && [[ -z "${PROD_HOST:-}" ]]; then
+  echo "ERROR: set PROD_HOST=<vm-ip> (or run with --local on the VM)" >&2
+  exit 2
+fi
+HOST="${PROD_HOST:-localhost}"
 
 pass=0; warn=0; fail=0
 say() {

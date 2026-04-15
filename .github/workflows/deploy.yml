@@ -10,10 +10,11 @@
 #      accepts only `deploy <tag> | rollback <tag> | status`. A stolen deploy
 #      key therefore can't pop a shell or exfil .env.
 #
-# Secrets required (scoped to Environment: production):
-#   DEPLOY_SSH_KEY  -- ed25519 private key matching /home/deploy/.ssh/authorized_keys
-#   DEPLOY_HOST     -- 161.118.207.119
-#   DEPLOY_USER     -- deploy
+# Secrets required (scoped to Environment: production — see docs/DEPLOY_SETUP.md
+# for values; do not inline them here):
+#   DEPLOY_SSH_KEY  -- ed25519 private key matching the VM's authorized_keys
+#   DEPLOY_HOST     -- VM public IP
+#   DEPLOY_USER     -- VM deploy user (no sudo, docker group only)
 #   DEPLOY_HOSTKEY  -- `ssh-keyscan -t ed25519 <host>` output (pins host key)
 # =============================================================================
 name: Deploy

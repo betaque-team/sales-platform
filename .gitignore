@@ -39,5 +39,28 @@ backups/
 .DS_Store
 Thumbs.db
 
-# Cloudflare tunnel credentials
-cloudflared/credentials.json
+# =============================================================================
+# Cloudflare — tunnel credentials & API tokens
+# (rotate immediately if any of these ever appear in a diff)
+# =============================================================================
+**/cloudflared/credentials.json
+**/cloudflared/*.json
+**/cloudflared/cert.pem
+**/cloudflare/creds/
+*cloudflare*token*
+
+# =============================================================================
+# Oracle Cloud Infrastructure — API signing keys
+# =============================================================================
+**/.oci/
+*oci_api_key*
+
+# =============================================================================
+# SSH private keys (public .pub files are OK; private halves never)
+# =============================================================================
+id_rsa
+id_ed25519
+id_ecdsa
+**/sales-platform-ci
+# (explicitly allow the .pub counterpart)
+!*.pub
