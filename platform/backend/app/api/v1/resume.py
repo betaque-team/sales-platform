@@ -14,6 +14,7 @@ from app.models.job import Job, JobDescription
 from app.models.user import User
 from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user
+from app.schemas.resume import CustomizeRequest
 from app.workers.tasks._resume_parser import extract_text
 from app.workers.tasks._ats_scoring import compute_ats_score
 from app.utils.sql import escape_like
@@ -547,25 +548,31 @@ async def get_ai_usage(
 @router.post("/{resume_id}/customize")
 async def customize_resume_for_job(
     resume_id: str,
-    body: dict,
+    body: CustomizeRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """AI-powered resume customization for a specific job.
 
-    Body: { job_id: string, target_score: number (60-95) }
+    Body: { job_id: UUID, target_score: int (60-95, default 85) }
+
+    Regression finding 90: previously `body: dict` with a manual
+    `if not (60 <= target_score <= 95)` guard. A string value such as
+    `target_score="high"` raised a `TypeError` inside the comparison
+    that surfaced as a 500. `CustomizeRequest` now enforces the bounds
+    at parse time (Pydantic returns 422 on bad input) so the request
+    never reaches the handler with a non-int target_score.
     """
     from app.workers.tasks._ai_resume import customize_resume
     from app.models.resume import AICustomizationLog
     from app.config import get_settings
 
-    job_id = body.get("job_id")
-    target_score = body.get("target_score", 85)
-
-    if not job_id:
-        raise HTTPException(status_code=400, detail="job_id is required")
-    if not (60 <= target_score <= 95):
-        raise HTTPException(status_code=400, detail="target_score must be between 60 and 95")
+    # `job_id` comes out of Pydantic as `UUID`; downstream code
+    # (SQLAlchemy `.where(Job.id == job_id)`) accepts UUID directly,
+    # but the `.delay(str(job_id), …)` call into Celery serializes a
+    # string, so we normalize once here.
+    job_id = body.job_id
+    target_score = body.target_score
 
     # Check daily limit
     settings = get_settings()
