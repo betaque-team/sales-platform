@@ -141,6 +141,10 @@ one place.
 | 81 | 🔵 | Answer Book / UX + A11y | **Trash icon deletes with no confirmation; Edit/Trash icons have no `aria-label` or `title`; Category/Scope/Question/Answer labels in Add-Entry form are all unassociated.** Reproducibly: `AnswerBookPage.tsx` line 311 — `onClick={() => deleteMutation.mutate(entry.id)}` fires on single click. Same pattern as #76 (Resume) and #71(b) (Jobs checkboxes). DOM probe on `/answer-book` → click "Add Entry": four `<label>` elements (`Category`, `Scope`, `Question`, `Answer`) all have `htmlFor=""`; the matching `<select>` + `<input>` + `<textarea>` have `id=""`, `name=""`, `aria-label=null`. None have `maxLength` attrs — relies entirely on backend validation which is also absent (see #80). The Import-from-Resume success message uses blocking `window.alert(...)` (line 69). Pressing Enter in the Question input does nothing (no form wrapper, no onKeyDown); Esc does not dismiss the form | ⬜ open — `AnswerBookPage.tsx`: (a) wrap Save button's click in `if (!window.confirm(\`Delete entry "\${entry.question}"?\`)) return;` on the delete handler (line 311); (b) add `aria-label={\`Edit "\${entry.question}"\`}` and `aria-label={\`Delete "\${entry.question}"\`}` to lines 304 & 310; (c) add `id`/`htmlFor` pairs to the Add-Entry form labels & inputs; (d) replace the `alert(...)` with a toast (shadcn `<Toast>` or the existing pattern if any); (e) add an `onKeyDown` handler: Enter submits, Esc dismisses. Low severity because the list is small and the form is inline, but these patterns will keep returning across new pages unless the base `<Card>` and `<Input>` components enforce them |
 | 82 | 🟠 | Monitoring / Scan concurrency | **`POST /api/v1/platforms/scan/all`, `/scan/discover`, `/scan/{platform}`, and `/scan/board/{board_id}` have NO concurrency guard — admin can queue redundant Celery tasks that double-hammer upstream ATS APIs.** `platforms.py` lines 242-302: each endpoint just calls `scan_task.delay()` and returns the Celery task id. No check like `if active_scan_for(scope): raise HTTPException(409, "Scan already running")`. Celery task `scan_all_platforms` in `workers/tasks/scan_task.py` line 301 has no `Lock` acquisition, no Redis mutex, no `unique` queue configuration. Impact at prod scale: clicking "Run Full Scan" twice in five seconds queues two tasks that each iterate 871 active boards. Greenhouse / Lever / Himalayas / Ashby etc. APIs now receive 2× the outbound request rate; at ~47,776 scraped jobs the rate-limit headroom is already tight, and doubling it risks HTTP 429 from upstream, or — worse — an IP-ban that halts all scans for hours. The frontend disables the button only after the first mutation resolves (`MonitoringPage.tsx` line 294 `disabled={!!activeScan && activeScan.status !== "SUCCESS" && "FAILURE"}`), but there's a 300-500 ms race where the click has fired but `activeScan` state hasn't been refetched yet | ⬜ open — server-side dedup is the right layer. Options: **(a)** Use `celery-singleton` (`@singleton` decorator) to make `scan_all_platforms`, `scan_platform`, `discover_and_add_boards` auto-dedup; **(b)** Explicit Redis lock in each endpoint before `.delay()`: `if redis.set(f"lock:scan:{scope}", "1", nx=True, ex=3600): task = ...delay() else: raise HTTPException(409, "A scan of this scope is already running")`; **(c)** Query `celery_app.control.inspect().active()` for queued tasks with the same name, reject if one is present. Follow up with a frontend `<AlertDialog>` on "Run Full Scan" / "Run Discovery" (see #83). Same guard must cover the per-platform and per-board scans |
 | 83 | 🟡 | Monitoring / UX safety | **`Run Full Scan` and `Run Discovery` on `MonitoringPage.tsx` commit on single click — no confirmation dialog despite triggering minutes-to-hours of Celery compute and hundreds of outbound ATS API calls.** `MonitoringPage.tsx` lines 289-298 (Full Scan) and 307-316 (Discovery): both buttons `onClick={() => fullScanMutation.mutate()}` / `discoveryScanMutation.mutate()` fire immediately. The only safety net is the `disabled={!!activeScan && ...}` prop which kicks in AFTER the first mutation dispatches, not before — any misclick starts a scan. Combined with #82's lack of server-side concurrency guard, a double-click in rapid succession actually starts two scans. For context: `Run Full Scan` iterates 871 boards × average ~50 HTTP requests per board = ~43,000 outbound API calls; `Run Discovery` probes unknown slugs across 10 platforms and is even more expensive. Per-platform scan buttons (lines 326-334) have the same one-click-commits pattern | ⬜ open — `MonitoringPage.tsx`: wrap each scan button's onClick in a confirmation. Minimum — `if (!window.confirm("Run a full scan? This kicks off ~871 board fetches and takes 30-60 min. Continue?")) return;`. Better — use a shadcn `<AlertDialog>` with context: last-scan timestamp, next-scheduled-scan (if any), ETA. For per-platform scans, include the board count in the prompt: `"Scan Greenhouse (239 boards)? ~10 min."`. This fix is worthless without the backend #82 guard — a confirm-dialog just moves the surprise from the "Run Full Scan" button to the Confirm button, so #82 must ship alongside or before this one |
+| 84 | 🟠 | Search / Correctness | **`/api/v1/jobs?search=…` passes `%` and `_` unescaped into PostgreSQL ILIKE patterns — users searching for `"100%"` get 98 false matches (titles like `"1005 | Research Specialist"`), users searching for `"dev_ops"` get loose matches like `"Dev Ops"`, `"Dev-Ops"`.** `jobs.py` lines 90-98: `Job.title.ilike(f"%{effective_search}%")` — Python f-string interpolation with no escaping. PostgreSQL ILIKE treats `%` as "zero or more chars" and `_` as "exactly one char"; both user-legal characters (e.g., in `"100%"`, `"dev_ops"`, `"DynamoDB_table"`) get reinterpreted as wildcards. Live reproduction: search `%` → 47,776 matches (all jobs); search `_` → 47,776 matches; search `100%` → 98 matches, 0/5 sampled contain literal `"100%"`; search `dev_ops` → 4 matches, 0/4 contain literal underscore (all are `"Dev Ops"`/`"Dev-Ops"`). Affects title, company_name, location_raw (all three ilike clauses). Not exploitable for data exfil (queries are still parameterised), but actively breaks search-correctness for any term containing a percent or underscore | ⬜ open — escape LIKE metacharacters in `effective_search` before interpolation. Simplest: `safe = effective_search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")` then `Job.title.ilike(f"%{safe}%", escape="\\")` (SQLAlchemy's `ilike` takes an `escape` kwarg so backslash-escaping is honored). Apply to all three ilike clauses (title, company_name, location_raw) AND the `company` query param on line 80 which has the same pattern. Worth also adding a small `escape_like(s: str) -> str` helper in `app/utils/sql.py` since similar patterns appear in `companies.py`, `applications.py`, probably elsewhere |
+| 85 | 🔵 | Search / UX | **Searching for whitespace-only strings matches rows with whitespace rather than "no filter" — 3 consecutive spaces in `/api/v1/jobs?search=%20%20%20` returns 22 matches.** Root cause: `jobs.py` line 90 `if effective_search:` treats any non-empty string as a filter, then wraps it in `%{search}%` for ILIKE. Spaces-only becomes `%   %` which matches any title/company/location containing 3+ consecutive spaces — sometimes present in legitimate titles like `"Senior QA - II   Mobile"`. Cosmetically: user clicks the search box, accidentally types a space before deciding to not search, hits Enter — results shrink to 22 mystery matches. Not security-severe, but reduces search trust | ⬜ open — `jobs.py` line 90 (and analogous spots for company query): change the guard from `if effective_search:` to `if effective_search and effective_search.strip():`, and use `effective_search.strip()` when building the ILIKE pattern so trailing/leading whitespace doesn't become wildcards. Pairs with Finding #84 (LIKE escape) — both are the same class of "search input pipes through to SQL without sanitization" |
+| 86 | 🟡 | Relevance / Scoring | **Unclassified jobs (role_cluster=`""`, 42,966 / 89.9% of the DB) have non-zero `relevance_score` despite the project docs saying "Jobs outside these clusters are saved but unscored (relevance_score = 0)".** Live sample from `/api/v1/jobs?sort_by=first_seen_at&sort_dir=desc`: *"Junior Software Developer"* (cluster=`""`, **score=17**), *"Talent Acquisition Coordinator"* (cluster=`""`, **score=44**), *"Human Data Reviewer"* (cluster=`""`, **score=42**). Root cause in `_scoring.py` `compute_relevance_score()` (lines 132-140): the weighted sum still applies 60% of the total weight to company_fit (0.3-1.0), geography_clarity (0.2-1.0), source_priority (0.3-1.0) and freshness (0.1-1.0) even when `_title_match_score()` returns 0.0. Worst case score for an unclassified job is `0.40*0 + 0.20*0.3 + 0.20*0.2 + 0.10*0.3 + 0.10*0.1 = 0.14 → 14`; best case is ~54. Impact: sorting `/jobs` by `relevance_score desc` shows real relevant jobs (score 100) first, but an unclassified job with `score=54` ranks ABOVE any relevant job with score < 54 — the "Relevant (Infra + Security + QA)" cluster's worst score is 38, so unclassified roles like "Talent Acquisition Coordinator" (44) outrank genuine security jobs in the cross-cluster sort. Dashboard "Avg Relevance Score" of 39.65 is dragged down by the 42,966 unclassified scores contaminating the mean | ⬜ open — two choices. **(a)** Short-circuit in `compute_relevance_score`: if `_title_match_score(matched_role, role_cluster, approved_roles_set) == 0: return 0.0` — matches the documented contract and zeroes out all 42,966 unclassified rows. Downside: drops the freshness/source signals, which might be useful for future "best new unclassified jobs" surfaces. **(b)** Multiplicative scoring: multiply the final score by title_match_score rather than weighted-sum — so a 0-title job gets 0 regardless of other signals. Either way, a one-shot script `app/rescore_unclassified.py` (modelled on `cleanup_stopword_contacts.py`) should recompute and zero out the existing 42,966 rows so the baseline matches new writes. Also fix the CLAUDE.md line "Jobs outside these clusters are saved but unscored" to match whichever choice is shipped |
+| 87 | 🟡 | Jobs / Filter drift | **`/jobs` role-cluster dropdown hardcodes 4 options (`relevant`, `infra`, `security`, `qa`) — doesn't read from `role_cluster_configs` AND has no way to filter the 42,966 (89.9%!) unclassified jobs.** `JobsPage.tsx` lines 262-272 renders a static `<select>` with five `<option>` tags. Two problems: (a) same drift class as Finding #63 — if an admin adds a new cluster via `/role-clusters` (e.g., `"data_science"`), it will be scored in the backend and visible as a badge on job rows, but the `/jobs` filter dropdown won't know about it; (b) there's no `"Unclassified"` option despite 42,966 unclassified jobs existing. If a reviewer wants to triage the unclassified pool (the most likely source of new clusters and feedback-adjustment cases), they have to scroll 1,720 pages through All Jobs, or construct the URL manually with `role_cluster=""`. The Monitoring dashboard prominently shows "unclassified 42,966 (89.9%)" — users will click expecting to filter, but the URL `role_cluster=unclassified` returns 0 results (because the literal string is `""`, not `"unclassified"`) | ⬜ open — `JobsPage.tsx`: (a) fetch `role_cluster_configs` via a `useQuery({queryKey: ["role-clusters"], queryFn: getRoleClusters})` and render dynamically. Keep the synthetic `"relevant"` option (it's union-of-is_relevant) at the top, then one option per active cluster. (b) Add an explicit `<option value="__unclassified__">Unclassified</option>` and in the query-params-to-API translation, convert `__unclassified__` to `role_cluster=` (empty) — or add a new backend param `is_classified=false` that filters `WHERE role_cluster IS NULL OR role_cluster = ''`. (c) On the Monitoring dashboard, make the "unclassified 42,966" card a link to `/jobs?role_cluster=__unclassified__` so the dead-end UI becomes navigable |
 
 ---
 
@@ -4020,6 +4024,290 @@ or before #83.
 
 #### Cleanup
 Read-only — I did not click any scan button on production.
+
+---
+
+## 26. Round 4N — Extreme stress test: resume, relevance, filters (2026-04-15, final)
+
+Ran as a dedicated stress-test pass on the three user-named surfaces
+(`Resume features`, `Relevance of jobs`, `Filters`). Resume upload
+validators held up under all adversarial inputs I threw at them
+(empty, tiny, wrong-magic, mime-spoof, oversized, plain-text-as-PDF
+— all rejected with accurate 400 messages) — no findings there.
+Filters and relevance surfaced four new bugs.
+
+### 84. LIKE wildcard injection in `/api/v1/jobs?search=…`
+
+#### What I observed
+Live probes from admin session, 47,776 total jobs:
+
+| Search input | Total matches | Why |
+|---|---:|---|
+| `%` | 47,776 | LIKE `%%%` matches every string |
+| `_` | 47,776 | LIKE `%_%` matches every non-empty string |
+| `100%` | 98 | `%` → wildcard. 0/5 sampled matches contain literal `"100%"`; all are `"1005 | Research Specialist"`, `"1005 | Content Research…"` — the `%` matched anything after `"100"` |
+| `dev_ops` | 4 | `_` → any-single-char. 0/4 sampled contain literal underscore; all are `"Dev Ops"`, `"Dev-Ops"`, `"Director, ML/Dev Ops"` |
+| `\%` | 80 | Backslash not treated as escape by default in `Job.title.ilike()` |
+| `.*` | 0 | Regex meta not special in ILIKE — good |
+| `[abc]` | 0 | Character class not special — good |
+
+#### Root cause
+`platform/backend/app/api/v1/jobs.py` lines 90-98:
+
+```python
+if effective_search:
+    query = query.where(
+        or_(
+            Job.title.ilike(f"%{effective_search}%"),
+            Job.company.has(Company.name.ilike(f"%{effective_search}%")),
+            Job.location_raw.ilike(f"%{effective_search}%"),
+        )
+    )
+```
+
+Plus line 80 (company param path): `Job.company.has(Company.name.ilike(f"%{company}%"))`.
+
+Python f-string interpolation drops the user's characters straight into
+the ILIKE pattern. PostgreSQL interprets `%` and `_` as wildcards.
+SQLAlchemy's `.ilike()` accepts an `escape=` kwarg but it's not wired up
+here.
+
+Parameterisation is still intact (no SQL injection possible), but
+search correctness is broken for any query containing `%`, `_`, or `\`.
+
+#### Suggested fix
+Create `app/utils/sql.py`:
+
+```python
+def escape_like(s: str) -> str:
+    """Escape LIKE metacharacters so user input is treated literally.
+
+    Must be paired with `.ilike(pattern, escape="\\\\")` at the call site.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+```
+
+Then in `jobs.py`:
+
+```python
+from app.utils.sql import escape_like
+
+if effective_search:
+    safe = escape_like(effective_search)
+    query = query.where(
+        or_(
+            Job.title.ilike(f"%{safe}%", escape="\\"),
+            Job.company.has(Company.name.ilike(f"%{safe}%", escape="\\")),
+            Job.location_raw.ilike(f"%{safe}%", escape="\\"),
+        )
+    )
+```
+
+Same treatment for the `company` param (line 80) and any other ilike
+sites (`companies.py`, `applications.py`, `answer_book.py`) — grep
+for `.ilike(f"%{` across `app/api/v1`.
+
+#### Cleanup
+Read-only API probe — no data mutated.
+
+---
+
+### 85. Whitespace-only search returns 22 spurious matches
+
+#### What I observed
+`/api/v1/jobs?search=%20%20%20` (URL-encoded three spaces) returns
+`{"total": 22, ...}`. The three spaces become the ILIKE pattern
+`"%   %"`, which happens to match 22 titles/companies/locations that
+contain three-or-more consecutive spaces (legitimate values like
+double-spaced hyphens or formatting artifacts from upstream ATS).
+
+UX-wise: user clicks the search box, accidentally types a space before
+committing, hits Enter — results shrink to 22 mystery entries and the
+user spends minutes trying to figure out what they "searched for".
+
+#### Root cause
+`jobs.py` line 90 `if effective_search:` — any truthy string triggers
+the filter, including whitespace-only. No `.strip()` normalisation.
+
+#### Suggested fix
+```python
+effective_search = (search or q or "").strip()
+if effective_search:
+    ...
+```
+
+Or inline: `if effective_search and effective_search.strip():` and use
+`effective_search.strip()` inside the ilike pattern. Pair with #84 —
+both are "search input reaches SQL without normalisation".
+
+#### Cleanup
+Read-only.
+
+---
+
+### 86. Unclassified jobs carry relevance scores 14-54 despite docs saying "unscored = 0"
+
+#### What I observed
+Live sample from `/api/v1/jobs?sort_by=first_seen_at&sort_dir=desc` (as
+admin):
+
+| Title | `role_cluster` | `relevance_score` |
+|---|---|---:|
+| Human Data Reviewer - Fully Remote | `""` | 42 |
+| Junior Software Developer | `""` | 17 |
+| Billing Analyst | `""` | 17 |
+| Talent Acquisition Coordinator | `""` | 44 |
+| Sr. Product Manager I, Security… | `security` | 64 |
+
+The first four are unclassified (empty `role_cluster`) yet carry
+non-zero scores. Project docs (`CLAUDE.md`, "Relevance Scoring" section)
+say: *"Jobs outside these clusters are saved but unscored (relevance_
+score = 0)."* Live data contradicts that contract.
+
+#### Root cause
+`platform/backend/app/workers/tasks/_scoring.py` lines 132-140:
+
+```python
+score = (
+    0.40 * _title_match_score(matched_role, role_cluster, approved_roles_set)
+    + 0.20 * _company_fit_score(is_target)
+    + 0.20 * _geography_clarity_score(geography_bucket, remote_scope)
+    + 0.10 * _source_priority_score(platform)
+    + 0.10 * _freshness_score(posted_at)
+)
+adjusted = score * 100 + feedback_adjustment
+return round(max(0.0, min(100.0, adjusted)), 2)
+```
+
+`_title_match_score` returns 0.0 for unclassified, contributing 0 from
+the 40%-weighted title signal. But the other four signals still
+contribute their minimums:
+
+| Signal | Weight | Minimum | Unclassified min contribution |
+|---|---:|---:|---:|
+| Title | 40% | 0.0 | 0.00 |
+| Company fit | 20% | 0.3 (not target) | 0.06 |
+| Geography clarity | 20% | 0.2 (unknown) | 0.04 |
+| Source priority | 10% | 0.3 (tier 3) | 0.03 |
+| Freshness | 10% | 0.1 (old) | 0.01 |
+| **Total min** | | | **0.14 → 14** |
+| **Total max** | | (target, tier1, fresh) | **0.54 → 54** |
+
+So an unclassified job with a good company+geo+recent+tier1 platform can
+score up to **54**, outranking any *actually* relevant cluster job
+(infra / security / qa) with score < 54. Dashboard "Avg Relevance Score"
+(39.65) is dragged down by the 42,966 contaminating entries.
+
+Concrete impact: sorting `/jobs` by `relevance_score desc` without a
+role_cluster filter mixes in high-scoring unclassified jobs above
+legitimate cluster jobs with score 38-53. The default dashboard sort
+ordering is wrong.
+
+#### Suggested fix
+**Option A — short-circuit (matches doc):**
+```python
+def compute_relevance_score(...):
+    title_score = _title_match_score(matched_role, role_cluster, approved_roles_set)
+    if title_score == 0.0:
+        return 0.0
+    score = (
+        0.40 * title_score
+        + 0.20 * _company_fit_score(is_target)
+        + ...
+    )
+```
+
+**Option B — multiplicative:**
+```python
+score = title_score * (
+    0.40
+    + 0.20 * _company_fit_score(is_target)
+    + 0.20 * _geography_clarity_score(...)
+    + 0.10 * _source_priority_score(platform)
+    + 0.10 * _freshness_score(posted_at)
+)
+```
+(requires a fresh think about normalisation)
+
+Whichever is chosen, add a one-shot `app/rescore_unclassified.py`
+(mirror of `cleanup_stopword_contacts.py`) to zero-out the existing
+42,966 rows so the dashboard average converges to reality. Also update
+the CLAUDE.md line to match the new behaviour.
+
+#### Cleanup
+Read-only probe. I did NOT trigger a rescore task.
+
+---
+
+### 87. `/jobs` role-cluster dropdown is hardcoded and missing "Unclassified"
+
+#### What I observed
+`platform/frontend/src/pages/JobsPage.tsx` lines 262-272:
+
+```tsx
+<select value={filters.role_cluster || ""} onChange={...}>
+  <option value="">All Roles</option>
+  <option value="relevant">Relevant (Infra + Security + QA)</option>
+  <option value="infra">Infra / Cloud / DevOps / SRE</option>
+  <option value="security">Security / Compliance / DevSecOps</option>
+  <option value="qa">QA / Testing / SDET</option>
+</select>
+```
+
+Two problems:
+
+**(a) Same drift class as Finding #63** — the admin-facing `/role-
+clusters` page now supports dynamic clusters (via `role_cluster_configs`
+table), and the scoring engine uses them too. But this dropdown still
+hardcodes four values. If an admin adds `data_science` via
+`/role-clusters`, the scoring engine picks it up and jobs start
+rendering with a `data_science` badge on their rows — but users can't
+filter for them without manually URL-crafting.
+
+**(b) No "Unclassified" option** despite 42,966 unclassified jobs
+(89.9% of the DB). The Monitoring page prominently shows "Jobs by
+Role Cluster: unclassified 42,966 (89.9%)", but clicking or
+URL-navigating to `role_cluster=unclassified` returns 0 — because the
+literal DB value is `""` (empty string), not `"unclassified"`. Even
+a URL like `role_cluster=` is treated as "no filter". Users have no
+first-class way to triage the unclassified pool, which is exactly the
+reviewer's highest-value target for improving scoring.
+
+#### Suggested fix
+```tsx
+const { data: clusters } = useQuery({
+  queryKey: ["role-clusters"],
+  queryFn: getRoleClusterConfigs,  // already exists for /role-clusters page
+});
+
+<select value={filters.role_cluster || ""} onChange={...}>
+  <option value="">All Roles</option>
+  <option value="relevant">Relevant ({clusters?.filter(c => c.is_relevant).map(c => c.display_name).join(" + ")})</option>
+  {clusters?.filter(c => c.is_active).map(c => (
+    <option key={c.name} value={c.name}>{c.display_name}</option>
+  ))}
+  <option value="__unclassified__">Unclassified (42,966)</option>
+</select>
+```
+
+And in `JobsPage.tsx`'s query-param-to-API translation:
+
+```tsx
+const apiRoleCluster =
+  filters.role_cluster === "__unclassified__" ? "" : filters.role_cluster;
+```
+
+Backend needs a new path for this — either (a) a new `is_classified`
+param that maps to `WHERE role_cluster IS NULL OR role_cluster = ''`,
+or (b) on the frontend send `role_cluster=__unclassified__` and add a
+small branch in `jobs.py` that translates it to the NULL/empty check.
+
+Also: on the Monitoring dashboard, turn the "unclassified 42,966" stat
+into a link to `/jobs?role_cluster=__unclassified__` so the card
+becomes navigable.
+
+#### Cleanup
+Read-only — no filter config changes.
 
 ---
 
