@@ -45,13 +45,66 @@ _GENERIC_PREFIXES = frozenset([
     "recruiting", "talent", "engineering", "it", "itsupport",
 ])
 
-# Name patterns in job descriptions: "Contact John Smith" or "Recruiter: Jane Doe"
+# Name patterns in job descriptions: "Contact John Smith" or "Recruiter: Jane Doe".
+#
+# Regression finding 60: the previous version of this pattern used
+# `re.IGNORECASE` globally, which made `[A-Z][a-z]+` match ANY word — not
+# just Capital-Initial ones. Result: "contact us at …" captured `("us", "at")`
+# as first_name / last_name; "help you apply" captured `("help", "you")`; etc.
+# 445 of 3,756 exported contacts were English-stop-word pairs with empty
+# email/phone, all tagged `source=job_description`. Fix is two-layered:
+#
+# 1. Scope IGNORECASE to the trigger alternation via `(?i:...)`. The capture
+#    group `([A-Z][a-z]+ [A-Z][a-z]+)` now genuinely requires uppercase
+#    initials — real names.
+# 2. Even with the case constraint in place, post-filter against a small
+#    stop-word set so obvious noise like "Let Us" / "Read More" / "Join Our"
+#    (which technically satisfy Capital-Initial rules in prose) never reach
+#    the DB. See `_looks_like_real_name()` below.
 _CONTACT_PATTERN = re.compile(
-    r"(?:contact|recruiter|hiring manager|talent partner|reach out to|"
+    r"(?i:contact|recruiter|hiring manager|talent partner|reach out to|"
     r"questions\?.*?email|apply.*?to|send.*?resume.*?to)\s*:?\s*"
     r"([A-Z][a-z]+\s+[A-Z][a-z]+)",
-    re.IGNORECASE,
 )
+
+# Tokens that look name-shaped but are almost always prose noise when they
+# slip through the regex (e.g. "Let Us", "Our Team", "Read More"). Lowercased
+# for comparison. Grows over time as more false positives surface from the
+# export.
+_NAME_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "both", "by",
+    "complex", "each", "for", "from", "help", "here", "how", "if",
+    "in", "is", "it", "its", "join", "just", "learn", "let", "more",
+    "motivated", "now", "of", "on", "or", "our", "read", "should",
+    "team", "that", "the", "their", "them", "they", "this", "to",
+    "us", "very", "was", "we", "were", "what", "when", "where",
+    "who", "with", "you", "your",
+})
+
+
+def _looks_like_real_name(first: str, last: str) -> bool:
+    """Return True iff `(first, last)` passes basic name-shape sanity checks.
+
+    Belt-and-suspenders to the regex: even with scoped IGNORECASE on the
+    trigger clause, generic prose like "Our Team" / "Let Us" can still match
+    the Capital-Initial capture. This filter drops them.
+
+    Rules:
+      - both parts 2-20 chars
+      - first char uppercase ASCII letter
+      - rest (after first char) lowercase ASCII letters only
+      - neither token in _NAME_STOPWORDS
+    """
+    for part in (first, last):
+        if not part or not (2 <= len(part) <= 20):
+            return False
+        if not ("A" <= part[0] <= "Z"):
+            return False
+        if not part[1:].isalpha() or not part[1:].islower():
+            return False
+        if part.lower() in _NAME_STOPWORDS:
+            return False
+    return True
 
 
 def _strip_html(html: str) -> str:
@@ -226,23 +279,27 @@ def _extract_contacts_from_descriptions(raw_jsons: list[dict], domain: str) -> l
             name = match.group(1).strip()
             if name.lower() in seen_names or len(name) > 40:
                 continue
-            seen_names.add(name.lower())
             name_parts = name.split(None, 1)
             first_name = name_parts[0] if name_parts else ""
             last_name = name_parts[1] if len(name_parts) > 1 else ""
-            if first_name and last_name:
-                contacts.append({
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "title": "Recruiter / Hiring Contact",
-                    "role_category": "hiring",
-                    "seniority": "other",
-                    "is_decision_maker": False,
-                    "email": "",
-                    "linkedin_url": "",
-                    "source": "job_description",
-                    "confidence_score": 0.5,
-                })
+            # Regression finding 60: reject prose noise that looks name-shaped
+            # (e.g. "Our Team", "Let Us") before persisting. See the
+            # `_looks_like_real_name` / `_NAME_STOPWORDS` docstrings.
+            if not _looks_like_real_name(first_name, last_name):
+                continue
+            seen_names.add(name.lower())
+            contacts.append({
+                "first_name": first_name,
+                "last_name": last_name,
+                "title": "Recruiter / Hiring Contact",
+                "role_category": "hiring",
+                "seniority": "other",
+                "is_decision_maker": False,
+                "email": "",
+                "linkedin_url": "",
+                "source": "job_description",
+                "confidence_score": 0.5,
+            })
 
     return contacts[:10]
 

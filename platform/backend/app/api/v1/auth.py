@@ -239,8 +239,13 @@ async def change_password(
     if not _verify_password(body.current_password, user.password_hash):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    # Regression finding 43: raise the server-side minimum from 6 to 8 to
+    # match OWASP and NIST SP 800-63B guidance. The Settings password form
+    # used to advertise `minlength="6"`, which was below both standards;
+    # even if a future frontend bug drops that hint, the API now refuses
+    # anything shorter than 8.
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
     user.password_hash = _hash_password(body.new_password)
     await db.commit()
@@ -275,8 +280,11 @@ async def confirm_password_reset(
     db: AsyncSession = Depends(get_db),
 ):
     """Confirm password reset using token."""
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    # Regression finding 43: OWASP/NIST-aligned minimum of 8 chars. Matches
+    # the check on /change-password so either code path enforces the same
+    # floor. Longer existing passwords never hit this branch.
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
     token_hash = _hash_reset_token(body.token)
     result = await db.execute(
