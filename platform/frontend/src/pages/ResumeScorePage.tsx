@@ -474,9 +474,25 @@ export function ResumeScorePage() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              deleteMutation.mutate(r.id);
+                              // Regression finding 76: resume deletion is a
+                              // destructive op that cascades to every
+                              // ResumeScore row (thousands, representing
+                              // ~minutes of Celery scoring time). A misclick
+                              // was enough to wipe everything. Gate the call
+                              // on a native confirm — cheap to add, hard to
+                              // regress, and matches the confirm prompt
+                              // already used by PlatformsPage board-delete.
+                              if (
+                                window.confirm(
+                                  `Delete resume "${r.label || r.filename || "untitled"}"? This also deletes all of its job scores and cannot be undone.`,
+                                )
+                              ) {
+                                deleteMutation.mutate(r.id);
+                              }
                             }}
                             className="p-1 text-gray-400 hover:text-red-500"
+                            aria-label="Delete resume"
+                            title="Delete resume"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
