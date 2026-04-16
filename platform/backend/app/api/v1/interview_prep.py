@@ -1,10 +1,13 @@
 """Interview preparation AI API."""
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.job import Job, JobDescription
 from app.models.company import Company
@@ -16,13 +19,23 @@ router = APIRouter(prefix="/interview-prep", tags=["interview-prep"])
 
 
 class InterviewPrepRequest(BaseModel):
-    job_id: str
-    resume_id: str | None = None
+    # F181: type as `UUID` (not `str`) so non-UUID input 422s at parse
+    # time instead of bubbling a SQL cast error through as 500.
+    job_id: UUID
+    resume_id: UUID | None = None
 
 
 @router.post("/generate")
 async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Generate AI-powered interview preparation for a specific job."""
+    # F183: missing Anthropic key is a config state, not a server
+    # error — return 503 so on-call alerting doesn't trigger.
+    if not get_settings().anthropic_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI interview prep is not configured on this server. Contact an administrator.",
+        )
+
     job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
     if not job:
         raise HTTPException(404, "Job not found")
@@ -65,7 +78,9 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
     )
 
     if result.get("error"):
-        raise HTTPException(500, result.get("error_message", "Generation failed"))
+        # F183: upstream Anthropic API errors (rate limit, upstream
+        # outage, safety refusal) map to 502 Bad Gateway, not 500.
+        raise HTTPException(502, result.get("error_message", "Upstream AI generation failed"))
 
     return {
         "job_title": job.title,

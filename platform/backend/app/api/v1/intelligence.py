@@ -636,12 +636,20 @@ def _looks_like_corrupted_contact(first_name: str, last_name: str, title: str) -
 
 @router.get("/networking")
 async def networking_suggestions(
-    job_id: str = "",
+    # F181: was `job_id: str = ""` — a non-UUID string fell through
+    # to the `Job.id == job_id` cast and surfaced as 500 instead of
+    # the friendly `{"suggestions": [], "error": "Job not found"}`
+    # fallthrough below. Typing as `UUID | None` with default `None`
+    # means garbage 422s at the boundary, and the optional/branching
+    # semantics below stay identical (`if job_id is not None` is the
+    # same as the old truthy-string check now that `""` is ruled
+    # out).
+    job_id: UUID | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Suggest contacts to connect with based on accepted jobs or a specific job."""
-    if job_id:
+    if job_id is not None:
         # Specific job: find contacts at that company
         job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
         if not job:

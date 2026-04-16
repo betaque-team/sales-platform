@@ -14,6 +14,7 @@ Regression findings 77, 78, 79 all landed in the same rewrite:
 """
 
 import uuid
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -38,7 +39,7 @@ SUPPORTED_PLATFORMS = [
 
 @router.get("/{resume_id}")
 async def list_credentials(
-    resume_id: str,
+    resume_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -78,7 +79,7 @@ async def list_credentials(
 
 @router.post("/{resume_id}")
 async def save_credential(
-    resume_id: str,
+    resume_id: UUID,
     body: CredentialCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -141,7 +142,7 @@ async def save_credential(
 
 @router.delete("/{resume_id}/{platform}")
 async def delete_credential(
-    resume_id: str,
+    resume_id: UUID,
     platform: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

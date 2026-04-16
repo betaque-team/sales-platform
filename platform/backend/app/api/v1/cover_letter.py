@@ -1,10 +1,14 @@
 """Cover letter generation API."""
 
+from typing import Literal
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.job import Job, JobDescription
 from app.models.company import Company
@@ -15,15 +19,36 @@ from app.api.deps import get_current_user
 router = APIRouter(prefix="/cover-letter", tags=["cover-letter"])
 
 
+# Regression finding 183: `tone` was a free-form str, so a caller could
+# pass `tone="rude"` / `tone="aggressive_insulting"` and the string
+# would end up verbatim in the Claude prompt. Lock it to the documented
+# enum so invalid tones 422 at parse time instead of reaching the LLM.
+CoverLetterTone = Literal["professional", "enthusiastic", "technical", "conversational"]
+
+
 class CoverLetterRequest(BaseModel):
-    job_id: str
-    resume_id: str | None = None
-    tone: str = "professional"  # professional | enthusiastic | technical | conversational
+    # F181: UUIDs must be typed as `UUID` (not `str`) so non-UUID input
+    # 422s at parse time instead of bubbling a SQL cast error as 500.
+    job_id: UUID
+    resume_id: UUID | None = None
+    tone: CoverLetterTone = "professional"
 
 
 @router.post("/generate")
 async def generate(body: CoverLetterRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Generate an AI-tailored cover letter for a specific job."""
+    # Regression finding 183: raise HTTP 503 (Service Unavailable) when
+    # the server isn't configured with an Anthropic key, not HTTP 500.
+    # A missing config flag is not a server error — pages at 500 were
+    # waking on-call every time a new environment was stood up without
+    # the key. 503 is the semantically correct response and it doesn't
+    # trip the error budget / alerting threshold for 5xx.
+    if not get_settings().anthropic_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI cover letter generation is not configured on this server. Contact an administrator.",
+        )
+
     # Load job + description
     job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
     if not job:
@@ -57,7 +82,11 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
     )
 
     if result.get("error"):
-        raise HTTPException(500, result.get("customization_notes", "Generation failed"))
+        # Regression finding 183: upstream Claude API errors (rate
+        # limit, upstream outage, safety refusal) map to 502 Bad
+        # Gateway rather than 500, so dashboards can distinguish
+        # "our bug" (500) from "upstream flaked" (502).
+        raise HTTPException(502, result.get("customization_notes", "Upstream AI generation failed"))
 
     return {
         "cover_letter": result["cover_letter"],
