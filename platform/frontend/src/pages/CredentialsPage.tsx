@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { getCredentials, saveCredential, deleteCredential, getActiveResume } from "@/lib/api";
 import type { PlatformCredential } from "@/lib/types";
 import { KeyRound, Plus, Trash2, Save, X, Check, AlertTriangle, Eye, EyeOff } from "lucide-react";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 
 const PLATFORM_LABELS: Record<string, string> = {
   greenhouse: "Greenhouse",
@@ -26,18 +27,22 @@ export function CredentialsPage() {
   const [formProfileUrl, setFormProfileUrl] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  const { data: activeResume } = useQuery({
+  // F222: both queries previously ignored error state — a /credentials
+  // 500 silently rendered blank rows. Banner surfaces the failure.
+  const activeResumeQ = useQuery({
     queryKey: ["active-resume"],
     queryFn: getActiveResume,
   });
+  const activeResume = activeResumeQ.data;
 
   const resumeId = activeResume?.active_resume?.id;
 
-  const { data, isLoading } = useQuery({
+  const credentialsQ = useQuery({
     queryKey: ["credentials", resumeId],
     queryFn: () => getCredentials(resumeId!),
     enabled: !!resumeId,
   });
+  const { data, isLoading } = credentialsQ;
 
   const saveMutation = useMutation({
     mutationFn: (args: { platform: string; email: string; password: string; profile_url: string }) =>
@@ -126,6 +131,9 @@ export function CredentialsPage() {
           </span>
         </p>
       </div>
+
+      {/* F222: surfaces /credentials failures. */}
+      <BackendErrorBanner queries={[credentialsQ]} />
 
       {isLoading ? (
         <div className="text-center py-8 text-gray-400">Loading...</div>

@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import { User, Mail, Shield, Calendar, Lock, Check, Bell, Trash2, TestTube2, Loader2 } from "lucide-react";
 import { changePassword, getAlerts, createAlert, updateAlert, deleteAlert, testAlert } from "@/lib/api";
 
@@ -258,13 +259,15 @@ function AlertSettings() {
   const [minScore, setMinScore] = useState(70);
   const [testingId, setTestingId] = useState<string | null>(null);
 
-  const { data: alerts } = useQuery({
+  // F222: destructure full query so /alerts failures surface via banner.
+  const alertsQ = useQuery({
     queryKey: ["alerts"],
     // F220(A): getAlerts now accepts {page, page_size} opts — wrap in a
     // thunk so TanStack Query doesn't pass its QueryFunctionContext into
     // the opts slot (TS 2769 on direct passing).
     queryFn: () => getAlerts(),
   });
+  const alerts = alertsQ.data;
 
   const createMutation = useMutation({
     mutationFn: () => createAlert({ webhook_url: webhookUrl, min_relevance_score: minScore }),
@@ -311,6 +314,9 @@ function AlertSettings() {
       <p className="text-sm text-gray-500 mb-4">
         Get notified in Google Chat when new high-scoring jobs are found during scans.
       </p>
+
+      {/* F222: surfaces /alerts failures. */}
+      <BackendErrorBanner queries={[alertsQ]} className="mb-3" />
 
       {/* Existing alerts */}
       {alerts?.items?.map((a) => (

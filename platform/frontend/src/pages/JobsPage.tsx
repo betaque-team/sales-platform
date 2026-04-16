@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import {
   Table,
   TableHeader,
@@ -128,16 +129,19 @@ export function JobsPage() {
     setSelectedIds(new Set());
   }, [filters.search, filters.status, filters.platform, filters.geography, filters.role_cluster, filters.sort_by, filters.sort_dir]);
 
-  const { data: activeResumeData } = useQuery({
+  // F222: destructure full queries so failures surface via the banner.
+  const activeResumeQ = useQuery({
     queryKey: ["active-resume"],
     queryFn: getActiveResume,
   });
+  const activeResumeData = activeResumeQ.data;
   const hasActiveResume = !!activeResumeData?.active_resume;
 
-  const { data, isLoading } = useQuery({
+  const jobsQ = useQuery({
     queryKey: ["jobs", filters],
     queryFn: () => getJobs(filters),
   });
+  const { data, isLoading } = jobsQ;
 
   const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
   const [applyFeedback, setApplyFeedback] = useState<{ jobId: string; msg: string; ok: boolean } | null>(null);
@@ -267,6 +271,9 @@ export function JobsPage() {
           </p>
         </div>
       </div>
+
+      {/* F222: surfaces /jobs failures with a Retry button. */}
+      <BackendErrorBanner queries={[jobsQ, activeResumeQ]} />
 
       <Card padding="sm">
         <div className="flex flex-wrap items-center gap-3">

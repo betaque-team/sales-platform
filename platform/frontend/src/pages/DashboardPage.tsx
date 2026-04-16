@@ -34,6 +34,7 @@ import { Card } from "@/components/Card";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
 import { Badge } from "@/components/Badge";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import {
   getAnalyticsOverview,
   getAnalyticsSources,
@@ -83,78 +84,105 @@ export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: overview, isLoading: overviewLoading } = useQuery({
+  // F222: these 11 queries previously only destructured `data`, so any
+  // 500/502/504/network-abort from the backend silently zeroed the tile
+  // and left the user staring at blank UI. Destructure the FULL query
+  // object into an array below, feed it into `<BackendErrorBanner>` at
+  // the top of the page. Individual render paths keep their existing
+  // `?? 0` / `items.length > 0` guards — the banner only surfaces the
+  // "why is this blank" signal, it doesn't hide legit zero-data states.
+  const overviewQ = useQuery({
     queryKey: ["analytics", "overview"],
     queryFn: getAnalyticsOverview,
   });
+  const overview = overviewQ.data;
+  const overviewLoading = overviewQ.isLoading;
 
-  const { data: sources } = useQuery({
+  const sourcesQ = useQuery({
     queryKey: ["analytics", "sources"],
     queryFn: getAnalyticsSources,
   });
+  const sources = sourcesQ.data;
 
-  const { data: trends } = useQuery({
+  const trendsQ = useQuery({
     queryKey: ["analytics", "trends", 30],
     queryFn: () => getAnalyticsTrends(30),
   });
+  const trends = trendsQ.data;
 
-  const {
-    data: aiInsights,
-    isLoading: insightsLoading,
-    isFetching: insightsFetching,
-  } = useQuery({
+  const aiInsightsQ = useQuery({
     queryKey: ["analytics", "ai-insights"],
     queryFn: getAiInsights,
     staleTime: 1000 * 60 * 60, // 1 hour
   });
+  const aiInsights = aiInsightsQ.data;
+  const insightsLoading = aiInsightsQ.isLoading;
+  const insightsFetching = aiInsightsQ.isFetching;
 
   // Relevant jobs: infra/security roles sorted by score
-  const { data: infraJobs } = useQuery({
+  const infraJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-infra"],
     queryFn: () => getJobs({ role_cluster: "infra", sort_by: "relevance_score", sort_dir: "desc", page_size: 5 }),
   });
+  const infraJobs = infraJobsQ.data;
 
-  const { data: securityJobs } = useQuery({
+  const securityJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-security"],
     queryFn: () => getJobs({ role_cluster: "security", sort_by: "relevance_score", sort_dir: "desc", page_size: 5 }),
   });
+  const securityJobs = securityJobsQ.data;
 
-  const { data: qaJobs } = useQuery({
+  const qaJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-qa"],
     queryFn: () => getJobs({ role_cluster: "qa", sort_by: "relevance_score", sort_dir: "desc", page_size: 5 }),
   });
+  const qaJobs = qaJobsQ.data;
 
   // Global remote jobs
-  const { data: globalRemoteJobs } = useQuery({
+  const globalRemoteJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-global-remote"],
     queryFn: () => getJobs({ geography: "global_remote", sort_by: "relevance_score", sort_dir: "desc", page_size: 5 }),
   });
+  const globalRemoteJobs = globalRemoteJobsQ.data;
 
   // Relevant jobs (infra + security combined, sorted by score)
-  const { data: relevantJobs } = useQuery({
+  const relevantJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-relevant"],
     queryFn: () => getJobs({ role_cluster: "relevant", sort_by: "relevance_score", sort_dir: "desc", page_size: 10 }),
   });
+  const relevantJobs = relevantJobsQ.data;
 
   // Recent jobs (all)
-  const { data: recentJobs } = useQuery({
+  const recentJobsQ = useQuery({
     queryKey: ["jobs", "dashboard-recent"],
     queryFn: () => getJobs({ sort_by: "first_seen_at", sort_dir: "desc", page_size: 10 }),
   });
+  const recentJobs = recentJobsQ.data;
 
   // Warm leads: companies with active hiring + verified contacts
-  const { data: warmLeads } = useQuery({
+  const warmLeadsQ = useQuery({
     queryKey: ["analytics", "warm-leads"],
     queryFn: getWarmLeads,
   });
+  const warmLeads = warmLeadsQ.data;
 
   // Active resume for ATS scores
-  const { data: activeResumeData } = useQuery({
+  const activeResumeQ = useQuery({
     queryKey: ["active-resume"],
     queryFn: getActiveResume,
   });
+  const activeResumeData = activeResumeQ.data;
 
   const hasActiveResume = !!activeResumeData?.active_resume;
+
+  // F222: full list of query handles for the error banner. Order only
+  // matters insofar as the banner surfaces the first error it finds;
+  // keep the dashboard-critical overview query first.
+  const dashboardQueries = [
+    overviewQ, sourcesQ, trendsQ, aiInsightsQ,
+    infraJobsQ, securityJobsQ, qaJobsQ, globalRemoteJobsQ,
+    relevantJobsQ, recentJobsQ, warmLeadsQ, activeResumeQ,
+  ];
 
   if (overviewLoading) {
     return (
@@ -205,6 +233,9 @@ export function DashboardPage() {
           Overview of your job search pipeline
         </p>
       </div>
+
+      {/* F222: surfaces any failed query out of the 12 on this page. */}
+      <BackendErrorBanner queries={dashboardQueries} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard

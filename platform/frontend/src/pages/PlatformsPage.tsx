@@ -20,6 +20,7 @@ import {
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { Badge } from "@/components/Badge";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import { useAuth } from "@/lib/auth";
 import {
   getPlatforms,
@@ -88,28 +89,40 @@ export function PlatformsPage() {
   const [selectedDisc, setSelectedDisc] = useState<Set<string>>(new Set());
   const [importErrorMsg, setImportErrorMsg] = useState<string | null>(null);
 
-  const { data: platformData, isLoading } = useQuery({
+  // F222: 4 silent queries surfaced through `<BackendErrorBanner>`. The
+  // boards / logs queries are admin-gated (F223) and only fire when a
+  // row is expanded — enabled:false queries never errorIOSo they're
+  // safe to include in the banner-queries array.
+  const platformsQ = useQuery({
     queryKey: ["platforms"],
     queryFn: getPlatforms,
   });
+  const platformData = platformsQ.data;
+  const isLoading = platformsQ.isLoading;
 
-  const { data: boardsData } = useQuery({
+  const boardsQ = useQuery({
     queryKey: ["platform-boards", expandedPlatform],
     queryFn: () => getPlatformBoards(expandedPlatform || undefined),
     enabled: !!expandedPlatform,
   });
+  const boardsData = boardsQ.data;
 
-  const { data: logsData } = useQuery({
+  const logsQ = useQuery({
     queryKey: ["scan-logs", showLogs],
     queryFn: () => getScanLogs(showLogs || undefined),
     enabled: !!showLogs,
   });
+  const logsData = logsQ.data;
 
-  const { data: discovered, isLoading: discLoading } = useQuery({
+  const discoveredQ = useQuery({
     queryKey: ["discovered-companies", discFilter, discPage],
     queryFn: () => getDiscoveredCompanies({ status: discFilter || undefined, page: discPage, per_page: 50 }),
     enabled: activeTab === "discovered",
   });
+  const discovered = discoveredQ.data;
+  const discLoading = discoveredQ.isLoading;
+
+  const platformsQueries = [platformsQ, boardsQ, logsQ, discoveredQ];
 
   const toggleMutation = useMutation({
     mutationFn: (boardId: string) => toggleBoard(boardId),
@@ -254,6 +267,9 @@ export function PlatformsPage() {
           </Button>
         )}
       </div>
+
+      {/* F222: 4 previously-silent queries surface as a single banner. */}
+      <BackendErrorBanner queries={platformsQueries} />
 
       {/* Tab buttons */}
       <div className="flex gap-1 border-b border-gray-200">

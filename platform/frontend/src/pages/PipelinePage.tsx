@@ -15,6 +15,8 @@ import {
 import { Link } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
+import { QueryBoundary } from "@/components/QueryBoundary";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import {
   getPipeline,
   updatePipelineClient,
@@ -288,16 +290,20 @@ export function PipelinePage() {
   const queryClient = useQueryClient();
   const [showAddStage, setShowAddStage] = useState(false);
 
-  const { data: pipeline, isLoading } = useQuery({
+  // F222: previously only destructured `data` — a 500/network error on
+  // /pipeline silently rendered blank kanban columns with no error state.
+  const pipelineQ = useQuery({
     queryKey: ["pipeline"],
     queryFn: getPipeline,
   });
+  const { data: pipeline } = pipelineQ;
 
-  const { data: stagesData } = useQuery({
+  const stagesQ = useQuery({
     queryKey: ["pipeline-stages"],
     queryFn: getPipelineStages,
     enabled: isAdmin,
   });
+  const stagesData = stagesQ.data;
 
   const moveMutation = useMutation({
     mutationFn: ({ id, stage }: { id: string; stage: string }) =>
@@ -337,10 +343,14 @@ export function PipelinePage() {
     moveMutation.mutate({ id, stage });
   };
 
-  if (isLoading) {
+  // F222: loading OR error routed through the shared boundary so a 500
+  // on /pipeline surfaces "Try again" instead of an empty kanban board.
+  if (pipelineQ.isLoading || pipelineQ.isError) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <div className="spinner h-8 w-8" />
+      <div className="mx-auto max-w-2xl pt-10">
+        <QueryBoundary query={pipelineQ}>
+          <></>
+        </QueryBoundary>
       </div>
     );
   }
@@ -380,6 +390,10 @@ export function PipelinePage() {
           </button>
         )}
       </div>
+
+      {/* F222: stages query is admin-only and non-critical (kanban still
+          renders without it) — surface via banner rather than blocking. */}
+      {isAdmin && <BackendErrorBanner queries={[stagesQ]} />}
 
       <div className="flex gap-4 overflow-x-auto pb-4">
         {stagesConfig.map((stage) => {
