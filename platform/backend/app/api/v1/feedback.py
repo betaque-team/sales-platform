@@ -6,6 +6,7 @@ import uuid
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import FileResponse
@@ -354,6 +355,26 @@ async def list_feedback(
     priority: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    # Regression finding 220(C): previously `sort_by` and `feedback_type`
+    # were undeclared query params. The handler hardcoded
+    # `order_by(desc(Feedback.created_at))` at every request, but clients
+    # sending `?sort_by=priority` got 200 + default sort with NO signal
+    # that their sort was ignored. Declaring the Literal here matches the
+    # F198 pattern on /jobs (Literal-typed sort_by) — typos 422 with the
+    # allowed columns listed, and legit values apply. Columns chosen
+    # match Feedback model fields that are reasonable to sort by
+    # (created_at, updated_at, priority, status); fields like
+    # `description` or `title` are free-text and don't warrant sort UX.
+    #
+    # `feedback_type` has no matching column on the Feedback model (the
+    # tester observed the UI sending it as a leftover from an earlier
+    # design) so it's NOT added here — the right fix is to stop sending
+    # it from the client, which the current FeedbackPage already does.
+    # A cross-cutting forbid_extra middleware (F220 sketch D) would 422
+    # any client still sending `feedback_type` or `per_page`; that's
+    # orthogonal to this round.
+    sort_by: Literal["created_at", "updated_at", "priority", "status"] = "created_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
 ):
     """List feedback. Admin/super_admin see all, others see only their own."""
     # Regression finding 162: filter params were being passed straight into the
@@ -394,7 +415,12 @@ async def list_feedback(
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
-    items_q = query.order_by(desc(Feedback.created_at)).offset((page - 1) * page_size).limit(page_size)
+    # F220(C): Literal-validated sort_by → safe to look up by name on
+    # the Feedback class (Pydantic guaranteed the string is one of the
+    # allowed column names). `desc`/`asc` applied per sort_dir.
+    sort_col = getattr(Feedback, sort_by)
+    sort_expr = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+    items_q = query.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(items_q)
     items = result.scalars().all()
 
