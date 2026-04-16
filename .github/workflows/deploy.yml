@@ -2,13 +2,30 @@
 # CD — build images on GHCR and trigger VM-side ci-deploy.sh on push to main.
 #
 # Design:
-#   1. Build job: docker buildx builds backend + frontend, pushes both to
+#   1. Precheck job: fast, native-arch (x86_64) tsc/build/pip verification.
+#      Catches the "phantom deploy" bug where a silent TS error kills the
+#      slow arm64 Docker build 10 min in. Fails in ~2 min on issues.
+#   2. Build job: docker buildx builds backend + frontend, pushes both to
 #      ghcr.io/<owner>/sales-platform/{backend,frontend}:sha-<short>
-#   2. Deploy job: SSHes to VM as `deploy` user. The authorized_keys forced
+#   3. Deploy job: SSHes to VM as `deploy` user. The authorized_keys forced
 #      command (/opt/sales-platform/scripts/ci-deploy.sh) ignores whatever we
 #      type as the SSH command -- the script parses $SSH_ORIGINAL_COMMAND and
 #      accepts only `deploy <tag> | rollback <tag> | status`. A stolen deploy
 #      key therefore can't pop a shell or exfil .env.
+#   4. Verify job: curls the live URL after the VM reports success and
+#      confirms the bundle hash actually changed. Catches the failure mode
+#      where ci-deploy.sh reports success but pulled the wrong tag or the
+#      container didn't actually restart.
+#
+# History:
+#   2026-04-16 Round 27.2 post-mortem: a silent TS error (`import { X }`,
+#   unused) in Layout.tsx failed `tsc && vite build` inside the arm64
+#   Dockerfile for ~4 hours. Previous deploy.yml version ran the slow
+#   arm64 build directly — by the time it failed, the operator had
+#   already moved on, and the failing deploy looked like a "phantom"
+#   (prod still serving old bundle). Fix: precheck on x86_64 FIRST,
+#   gate arm64 build behind it, then verify the live deploy actually
+#   picked up the new bundle hash.
 #
 # Secrets required (scoped to Environment: production — see docs/DEPLOY_SETUP.md
 # for values; do not inline them here):
@@ -27,6 +44,11 @@ on:
       tag:
         description: "Override image tag to build & deploy (default: sha-<shortsha>)"
         required: false
+      skip_precheck:
+        description: "Skip the fast-fail precheck (only use if precheck is itself broken)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-prod
@@ -36,6 +58,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_BACKEND: ghcr.io/${{ github.repository_owner }}/sales-platform/backend
   IMAGE_FRONTEND: ghcr.io/${{ github.repository_owner }}/sales-platform/frontend
+  PROD_URL: https://salesplatform.reventlabs.com
 
 permissions:
   contents: read
@@ -44,13 +67,120 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Fast-fail precheck on native x86_64.
+  #
+  # Goal: if this commit is unbuildable, know within ~2 min instead of
+  # letting the QEMU arm64 Docker build discover it 5-10 min later. The
+  # arm64 build step on emulated QEMU is expensive — failing fast here
+  # saves runner minutes AND gives the operator a clearer error (`tsc`
+  # output in step log) than the Docker layer failure ("npm run build
+  # returned 1" from inside a cross-compiled container).
+  #
+  # Mirrors the critical bits of ci.yml but trimmed — no DB services,
+  # no full pytest suite. Just "does this code compile and bundle?".
+  # ---------------------------------------------------------------------------
+  precheck:
+    name: Fast-fail precheck
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_precheck }}
+    outputs:
+      frontend_hash: ${{ steps.fe_hash.outputs.hash }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Frontend: the exact path that has bitten us. tsc && vite build.
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: platform/frontend
+        run: npm install --no-audit --no-fund
+
+      - name: Frontend typecheck
+        working-directory: platform/frontend
+        run: npx tsc --noEmit
+
+      - name: Frontend build
+        working-directory: platform/frontend
+        run: npm run build
+
+      # Capture the bundle filename so the verify job can check prod
+      # is actually serving THIS build's hash (not a cached old one).
+      - name: Capture frontend bundle hash
+        id: fe_hash
+        working-directory: platform/frontend
+        run: |
+          # Glob directly (shellcheck SC2010): avoid `ls | grep` so a
+          # filename with spaces or newlines can't break parsing. Vite
+          # currently emits `index-<hash>.js` as the entry chunk;
+          # pattern lifted verbatim from its default manifest config.
+          HASH=""
+          for f in dist/assets/index-*.js; do
+            [ -e "$f" ] || continue
+            HASH="$(basename "$f")"
+            break
+          done
+          if [ -z "$HASH" ]; then
+            echo "::warning::Could not extract frontend bundle hash — verify job will skip"
+          else
+            echo "Frontend bundle: $HASH"
+          fi
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      # Backend: minimal import check. Full tests live in ci.yml.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend deps
+        working-directory: platform/backend
+        run: |
+          pip install --upgrade pip
+          # Mirror the Dockerfile's pip set. Any drift here will be caught
+          # by the arm64 Docker build later, but it's cheaper to find it
+          # now on x86_64.
+          pip install \
+            "fastapi[standard]>=0.115" "uvicorn[standard]>=0.32" \
+            "sqlalchemy[asyncio]>=2.0" "asyncpg>=0.30" "alembic>=1.14" \
+            "pydantic-settings>=2.6" "authlib>=1.4" "httpx>=0.28" \
+            "python-jose[cryptography]>=3.3" "celery[redis]>=5.4" "redis>=5.2" \
+            "pyyaml>=6.0" "openpyxl>=3.1" "python-multipart>=0.0.12" \
+            "itsdangerous>=2.1" "psycopg2-binary>=2.9" \
+            "pdfplumber>=0.11" "python-docx>=1.1" "anthropic>=0.40" \
+            "beautifulsoup4>=4.12" "dnspython>=2.6" "bcrypt>=4.2"
+
+      - name: Backend import smoke test
+        working-directory: platform/backend
+        # Just importing app.main boots the FastAPI app, resolves every
+        # router import, and validates pydantic models at import time.
+        # Catches "missing env var", "alembic schema drift broke an
+        # import", etc. in 5 seconds instead of 10 minutes.
+        env:
+          DATABASE_URL: postgresql+asyncpg://placeholder:placeholder@localhost:5432/placeholder
+          DATABASE_URL_SYNC: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: precheck-placeholder-secret
+        run: |
+          python -c "from app.main import app; print('FastAPI app imports OK:', app.title)"
+
+  # ---------------------------------------------------------------------------
   # Build both images and push to GHCR.
+  # Gated behind precheck so a broken commit can't burn 10 min on QEMU.
   # ---------------------------------------------------------------------------
   build:
     name: Build & push images
     runs-on: ubuntu-latest
+    needs: [precheck]
+    # Allow running via workflow_dispatch with skip_precheck=true in the
+    # edge case where precheck itself is broken (e.g., new Node LTS ships
+    # and breaks setup-node transiently). Otherwise require precheck pass.
+    if: ${{ always() && (needs.precheck.result == 'success' || inputs.skip_precheck) }}
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      frontend_hash: ${{ needs.precheck.outputs.frontend_hash }}
 
     steps:
       - uses: actions/checkout@v4
@@ -167,4 +297,95 @@ jobs:
           echo "| Tag | \`${{ needs.build.outputs.tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SHA | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Ref | \`${{ github.ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| URL | https://salesplatform.reventlabs.com |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL | ${{ env.PROD_URL }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Verify the live deploy actually picked up the new bundle.
+  #
+  # Post-mortem context: the 2026-04-16 phantom-deploy incident showed
+  # that "SSH succeeded" + "ci-deploy.sh reported status OK" + "GHCR has
+  # the new image" can ALL be true while production still serves the old
+  # bundle (because the Docker build itself failed silently in an earlier
+  # round and the VM was pulling the last-successful image tag). The
+  # only authoritative signal is: fetch / from prod, parse the asset
+  # hash from index.html, confirm it matches what we just built.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify live bundle
+    runs-on: ubuntu-latest
+    needs: [build, deploy]
+    if: ${{ always() && needs.deploy.result == 'success' && needs.build.outputs.frontend_hash != '' }}
+    steps:
+      - name: Wait for rollout propagation
+        # ci-deploy.sh returns once `docker compose up -d` dispatches.
+        # Give nginx's old worker ~20s to finish in-flight requests and
+        # let Cloudflare origin-shield pull the new index.html.
+        run: sleep 20
+
+      - name: Fetch live index.html and extract bundle hash
+        id: live
+        run: |
+          # Cache-bust query string: Cloudflare / nginx / any intermediate
+          # cache must fetch fresh. A unique nonce in the URL forces a
+          # MISS. We also send Cache-Control: no-cache as a belt-and-
+          # suspenders measure, though some CDNs ignore request-side
+          # directives.
+          NONCE="$(date +%s)-${{ github.run_id }}"
+          URL="${{ env.PROD_URL }}/?__deployverify=$NONCE"
+          # --compressed: Cloudflare serves gzip, decode it.
+          # -L: follow any http→https or www redirect.
+          # -s: quiet. We want the body for parsing.
+          # --max-time 30: give the origin a generous window on cold start.
+          BODY="$(curl -sL --compressed --max-time 30 \
+              -H 'Cache-Control: no-cache' \
+              -H 'Pragma: no-cache' \
+              "$URL" || true)"
+          if [ -z "$BODY" ]; then
+            echo "::error::Empty body from $URL — origin may be down"
+            exit 1
+          fi
+          # Vite emits: <script type="module" crossorigin src="/assets/index-XXXX.js">
+          # …with the hash our precheck captured. Extract and compare.
+          LIVE_HASH="$(echo "$BODY" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1 | sed 's|/assets/||' || true)"
+          echo "live_hash=$LIVE_HASH" >> "$GITHUB_OUTPUT"
+          echo "Live bundle: $LIVE_HASH"
+          echo "Expected:    ${{ needs.build.outputs.frontend_hash }}"
+
+      - name: Assert live bundle matches built bundle
+        run: |
+          LIVE="${{ steps.live.outputs.live_hash }}"
+          EXPECTED="${{ needs.build.outputs.frontend_hash }}"
+          if [ -z "$LIVE" ]; then
+            echo "::error::Could not parse bundle hash from live index.html — SPA may be broken"
+            exit 1
+          fi
+          if [ "$LIVE" != "$EXPECTED" ]; then
+            echo "::error::PHANTOM DEPLOY — live bundle ($LIVE) does NOT match this build ($EXPECTED)"
+            echo "::error::Possible causes: (1) Cloudflare cache still serving old index.html, (2) container didn't restart, (3) image pulled wrong tag. Investigate VM logs."
+            exit 1
+          fi
+          echo "✓ Live bundle matches build — deploy confirmed."
+
+      - name: Verify backend healthcheck
+        run: |
+          # /api/v1 has no /healthz in the router, but /api/v1/auth/me
+          # reliably returns 401 unauthenticated. A 5xx here means backend
+          # container is wedged.
+          STATUS="$(curl -sL -o /dev/null -w '%{http_code}' --max-time 15 "${{ env.PROD_URL }}/api/v1/auth/me" || echo 000)"
+          case "$STATUS" in
+            200|401) echo "✓ Backend responsive (HTTP $STATUS)";;
+            5*) echo "::error::Backend returned 5xx ($STATUS) — container may be crash-looping"; exit 1;;
+            000) echo "::error::Backend unreachable from GH runner"; exit 1;;
+            *)  echo "::warning::Unexpected backend status $STATUS — not failing the deploy but investigate";;
+          esac
+
+      - name: Verification summary
+        if: always()
+        run: |
+          echo "### Verify — ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Expected bundle | \`${{ needs.build.outputs.frontend_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Live bundle | \`${{ steps.live.outputs.live_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL | ${{ env.PROD_URL }} |" >> "$GITHUB_STEP_SUMMARY"
