@@ -30,7 +30,21 @@ from app.utils.sql import escape_like
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 UPLOAD_DIR = Path("/app/uploads/feedback")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# Don't mkdir at import time — that crashes `python -c "from app.main import
+# app"` on any env where `/app` is read-only, which is every CI runner
+# (GH Actions workspace is /home/runner/work, the precheck job never has
+# /app writable). The Round 28+ deploy pipeline's "Backend import smoke
+# test" silently failed for ~5 hours because of this one line, blocking
+# every merge to main from landing on the VM — including the GET /jobs/{id}
+# hotfix users were waiting on. Defer the mkdir to the upload handler,
+# where `/app/uploads` already exists (bind-mounted in docker-compose)
+# so the cost is one `exists_ok=True` call per request, not zero cost at
+# import vs. an entire broken deploy pipeline.
+try:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # CI / read-only env: handler will retry on first upload
+    pass
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # Regression finding 189: previously included "image/svg+xml". SVG is
@@ -240,9 +254,14 @@ async def upload_attachment(
     # keeping "../../etc/passwd" out of admin UI / audit logs.
     original_name = _sanitize_original_name(file.filename or "unnamed")
 
-    # Save file
+    # Save file. mkdir is idempotent and cheap (a no-op syscall when the
+    # directory already exists) — call it here because the import-time
+    # mkdir above is allowed to fail on CI read-only envs. On prod,
+    # /app/uploads is a bind-mount that exists before the container
+    # starts, so this is a confirmation, not the first creation.
     ext = Path(file.filename or "file").suffix or ""
     stored_name = f"{uuid.uuid4().hex}{ext}"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_path = UPLOAD_DIR / stored_name
     file_path.write_bytes(content)
 
