@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import {
   Activity,
@@ -79,10 +80,17 @@ function BreakdownTable({
   title,
   data,
   total,
+  // Regression finding 87(c): optional href builder lets callers make
+  // each row navigable (e.g. the role-cluster breakdown → /jobs with
+  // the corresponding filter pre-applied). Returning null/undefined
+  // for a key renders the row as plain text like before — so only the
+  // cluster breakdown opts in to clickability.
+  rowHref,
 }: {
   title: string;
   data: Record<string, number>;
   total: number;
+  rowHref?: (key: string) => string | null | undefined;
 }) {
   const sorted = Object.entries(data).sort((a, b) => b[1] - a[1]);
   return (
@@ -91,8 +99,9 @@ function BreakdownTable({
       <div className="space-y-1.5">
         {sorted.map(([key, count]) => {
           const pct = total > 0 ? ((count / total) * 100).toFixed(1) : "0";
-          return (
-            <div key={key} className="flex items-center gap-2">
+          const href = rowHref?.(key);
+          const rowInner = (
+            <>
               <div className="w-32 truncate text-xs text-gray-600">{key}</div>
               <div className="flex-1">
                 <div className="h-2 rounded-full bg-gray-100">
@@ -105,6 +114,20 @@ function BreakdownTable({
               <div className="w-20 text-right text-xs text-gray-500">
                 {count.toLocaleString()} ({pct}%)
               </div>
+            </>
+          );
+          return href ? (
+            <Link
+              key={key}
+              to={href}
+              className="flex items-center gap-2 rounded -mx-1 px-1 py-0.5 hover:bg-primary-50 transition-colors"
+              title={`View ${key} jobs`}
+            >
+              {rowInner}
+            </Link>
+          ) : (
+            <div key={key} className="flex items-center gap-2">
+              {rowInner}
             </div>
           );
         })}
@@ -486,10 +509,21 @@ export function MonitoringPage() {
             <Shield className="h-5 w-5 text-red-500" />
             <h3 className="text-base font-semibold text-gray-900">Jobs by Role Cluster</h3>
           </div>
+          {/* F87(c): make each cluster row a link to the matching
+              /jobs filter. The backend labels empty/null clusters as
+              "unclassified" in this map, so that key maps to the new
+              `is_classified=false` filter; every other key maps to a
+              normal `role_cluster=<name>` URL so the admin can click
+              through to the underlying jobs in a single tap. */}
           <BreakdownTable
             title=""
             data={d.jobs_breakdown.by_role_cluster}
             total={d.data_counts.jobs}
+            rowHref={(key) =>
+              key === "unclassified"
+                ? "/jobs?is_classified=false"
+                : `/jobs?role_cluster=${encodeURIComponent(key)}`
+            }
           />
         </Card>
 

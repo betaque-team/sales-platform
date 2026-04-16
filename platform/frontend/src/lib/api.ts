@@ -135,9 +135,14 @@ async function request<T>(
   return response.json();
 }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
+    // Booleans are allowed through so `is_classified=false` serialises as
+    // the literal string "false" instead of being dropped by the `value
+    // !== ""` guard (the previous `Record<string, string | number | …>`
+    // signature would have coerced `false` to `"false"` but only after
+    // a callsite-side `String(false)`, which callers were forgetting).
     if (value !== undefined && value !== "") {
       searchParams.set(key, String(value));
     }
@@ -156,6 +161,12 @@ export async function getJobs(
     platform: filters.platform,
     geography: filters.geography,
     role_cluster: filters.role_cluster,
+    // F87: wire the backend `is_classified` param so the JobsPage
+    // dropdown's synthetic "Unclassified" option can actually filter
+    // down to the (huge) unclassified pool without hand-crafting a
+    // URL. Backend accepts true/false and filters role_cluster IS
+    // NULL / != '' accordingly.
+    is_classified: filters.is_classified,
     sort_by: filters.sort_by,
     sort_dir: filters.sort_dir,
     page: filters.page,

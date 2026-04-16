@@ -17,9 +17,17 @@ import {
   TableHead,
   TableCell,
 } from "@/components/Table";
-import { getJobs, bulkAction, getActiveResume, prepareApplication } from "@/lib/api";
+import { getJobs, bulkAction, getActiveResume, prepareApplication, getRoleClusters } from "@/lib/api";
 import type { JobFilters, JobStatus } from "@/lib/types";
 import { formatCount } from "@/lib/format";
+
+// Regression finding 87: synthetic dropdown value used for the
+// "Unclassified" option. Keeps the `<select>`'s `value` shape
+// stable (always a string) while translating on the wire to
+// `is_classified=false` + `role_cluster=""`. Picked a `__…__`
+// sentinel so it cannot collide with any admin-defined cluster
+// name (`/role-clusters` rejects names starting with `_`).
+const UNCLASSIFIED_SENTINEL = "__unclassified__";
 
 const STATUS_OPTIONS: { value: JobStatus | ""; label: string }[] = [
   { value: "", label: "All Statuses" },
@@ -71,12 +79,22 @@ export function JobsPage() {
   // Regression finding 34: ref guards against infinite URL ↔ state loops
   const syncingFromUrl = useRef(false);
 
+  // F87: `is_classified` serialises to/from the URL as "true"/"false"/(absent)
+  // alongside `role_cluster`. Parse once here and again inside the URL→state
+  // sync below so direct links (/jobs?is_classified=false) stay sticky.
+  const parseIsClassified = (raw: string | null): boolean | undefined => {
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return undefined;
+  };
+
   const [filters, setFilters] = useState<JobFilters>(() => ({
     search: searchParams.get("search") || "",
     status: (searchParams.get("status") || "") as JobFilters["status"],
     platform: searchParams.get("platform") || "",
     geography: searchParams.get("geography") || "",
     role_cluster: searchParams.get("role_cluster") || "",
+    is_classified: parseIsClassified(searchParams.get("is_classified")),
     sort_by: searchParams.get("sort_by") || "relevance_score",
     sort_dir: searchParams.get("sort_dir") || "desc",
     page: Number(searchParams.get("page")) || 1,
@@ -93,6 +111,7 @@ export function JobsPage() {
       platform: searchParams.get("platform") || "",
       geography: searchParams.get("geography") || "",
       role_cluster: searchParams.get("role_cluster") || "",
+      is_classified: parseIsClassified(searchParams.get("is_classified")),
       sort_by: searchParams.get("sort_by") || "relevance_score",
       sort_dir: searchParams.get("sort_dir") || "desc",
       page: Number(searchParams.get("page")) || 1,
@@ -113,6 +132,12 @@ export function JobsPage() {
     if (filters.platform) params.set("platform", filters.platform);
     if (filters.geography) params.set("geography", filters.geography);
     if (filters.role_cluster) params.set("role_cluster", filters.role_cluster);
+    // F87: only serialise `is_classified` when the user has explicitly
+    // narrowed to it — `undefined` = "both", which is the default and
+    // doesn't need to show up in the URL. `true`/`false` round-trip
+    // via the `parseIsClassified` helper above.
+    if (filters.is_classified === true) params.set("is_classified", "true");
+    else if (filters.is_classified === false) params.set("is_classified", "false");
     if (filters.sort_by && filters.sort_by !== "relevance_score") params.set("sort_by", filters.sort_by);
     if (filters.sort_dir && filters.sort_dir !== "desc") params.set("sort_dir", filters.sort_dir);
     if ((filters.page ?? 1) > 1) params.set("page", String(filters.page));
@@ -124,10 +149,15 @@ export function JobsPage() {
 
   // Regression finding 70: clear checkbox selections when filters change —
   // stale selections from a previous filter-set could silently target
-  // jobs the user can no longer see in the table.
+  // jobs the user can no longer see in the table. F87: `is_classified`
+  // is also a filter axis (Unclassified dropdown option), so toggling
+  // between "classified" and "unclassified" views must likewise reset.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [filters.search, filters.status, filters.platform, filters.geography, filters.role_cluster, filters.sort_by, filters.sort_dir]);
+  }, [
+    filters.search, filters.status, filters.platform, filters.geography,
+    filters.role_cluster, filters.is_classified, filters.sort_by, filters.sort_dir,
+  ]);
 
   // F222: destructure full queries so failures surface via the banner.
   const activeResumeQ = useQuery({
@@ -142,6 +172,31 @@ export function JobsPage() {
     queryFn: () => getJobs(filters),
   });
   const { data, isLoading } = jobsQ;
+
+  // Regression finding 87: the role-cluster dropdown used to hardcode
+  // four options (`relevant` + `infra` + `security` + `qa`). That drifts
+  // the moment an admin adds or removes a cluster via `/role-clusters`,
+  // and it had no affordance for the ~90% of rows with no cluster.
+  // Fetch the live catalog here and build options dynamically: keep
+  // the synthetic "relevant" pseudo at the top, then one option per
+  // active cluster sorted by the admin-defined `sort_order`, then the
+  // new "Unclassified" sentinel that maps to `is_classified=false` on
+  // the wire. `gcTime: Infinity` / long `staleTime` because the cluster
+  // config is low-churn and refetching on every JobsPage mount would
+  // be wasteful; invalidation is manual via the admin RoleClusters UI.
+  const roleClustersQ = useQuery({
+    queryKey: ["role-clusters"],
+    queryFn: getRoleClusters,
+    staleTime: 10 * 60 * 1000,
+  });
+  const activeClusters = (roleClustersQ.data?.items ?? [])
+    .filter((c) => c.is_active)
+    .sort((a, b) => a.sort_order - b.sort_order);
+  // The dropdown carries a single string value. Derive it from the
+  // current filters state: `__unclassified__` if `is_classified=false`,
+  // otherwise the `role_cluster` string (or empty for "All Roles").
+  const roleSelectValue =
+    filters.is_classified === false ? UNCLASSIFIED_SENTINEL : (filters.role_cluster || "");
 
   const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
   const [applyFeedback, setApplyFeedback] = useState<{ jobId: string; msg: string; ok: boolean } | null>(null);
@@ -257,16 +312,20 @@ export function JobsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">
-            {filters.role_cluster === "relevant"
-              ? "Relevant Jobs"
-              : filters.role_cluster
-                ? `${filters.role_cluster.charAt(0).toUpperCase() + filters.role_cluster.slice(1)} Jobs`
-                : "All Jobs"}
+            {filters.is_classified === false
+              ? "Unclassified Jobs"
+              : filters.role_cluster === "relevant"
+                ? "Relevant Jobs"
+                : filters.role_cluster
+                  ? `${(activeClusters.find((c) => c.name === filters.role_cluster)?.display_name) || (filters.role_cluster.charAt(0).toUpperCase() + filters.role_cluster.slice(1))} Jobs`
+                  : "All Jobs"}
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            {filters.role_cluster === "relevant"
-              ? "Cloud, DevOps, SRE, Compliance & Security positions"
-              : data ? `${formatCount(data.total)} jobs found` : "Loading jobs..."}
+            {filters.is_classified === false
+              ? (data ? `${formatCount(data.total)} jobs without a role cluster` : "Loading jobs...")
+              : filters.role_cluster === "relevant"
+                ? "Cloud, DevOps, SRE, Compliance & Security positions"
+                : data ? `${formatCount(data.total)} jobs found` : "Loading jobs..."}
             {data && filters.role_cluster === "relevant" ? ` · ${formatCount(data.total)} jobs found` : ""}
           </p>
         </div>
@@ -320,16 +379,43 @@ export function JobsPage() {
               </option>
             ))}
           </select>
+          {/* F87: role-cluster dropdown is now driven by the admin
+              config (`/role-clusters`) with the synthetic "Relevant"
+              pseudo at the top and a new "Unclassified" option that
+              translates to `is_classified=false` on the wire. */}
           <select
             className="select w-auto"
-            value={filters.role_cluster || ""}
-            onChange={(e) => updateFilter("role_cluster", e.target.value)}
+            value={roleSelectValue}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === UNCLASSIFIED_SENTINEL) {
+                // Unclassified: clear role_cluster, switch is_classified=false.
+                setFilters((prev) => ({
+                  ...prev,
+                  role_cluster: "",
+                  is_classified: false,
+                  page: 1,
+                }));
+              } else {
+                // Any cluster name (including "" for All and "relevant"
+                // for the pseudo): clear is_classified, set role_cluster.
+                setFilters((prev) => ({
+                  ...prev,
+                  role_cluster: v,
+                  is_classified: undefined,
+                  page: 1,
+                }));
+              }
+            }}
           >
             <option value="">All Roles</option>
-            <option value="relevant">Relevant (Infra + Security + QA)</option>
-            <option value="infra">Infra / Cloud / DevOps / SRE</option>
-            <option value="security">Security / Compliance / DevSecOps</option>
-            <option value="qa">QA / Testing / SDET</option>
+            <option value="relevant">Relevant (configured clusters)</option>
+            {activeClusters.map((c) => (
+              <option key={c.id} value={c.name}>
+                {c.display_name || c.name}
+              </option>
+            ))}
+            <option value={UNCLASSIFIED_SENTINEL}>Unclassified</option>
           </select>
           <select
             className="select w-auto"
@@ -352,17 +438,21 @@ export function JobsPage() {
             <option value="platform:asc">Platform A-Z</option>
             <option value="status:asc">Status A-Z</option>
           </select>
-          {(filters.search || filters.status || filters.platform || filters.geography || filters.role_cluster) && (
+          {(filters.search || filters.status || filters.platform || filters.geography || filters.role_cluster || filters.is_classified !== undefined) && (
             <Button
               variant="ghost"
               size="sm"
               onClick={() =>
+                // F87: also reset `is_classified` so Clear truly clears
+                // every filter axis (the Unclassified view used to
+                // survive a Clear and silently narrow the result set).
                 setFilters({
                   search: "",
                   status: "",
                   platform: "",
                   geography: "",
                   role_cluster: "",
+                  is_classified: undefined,
                   sort_by: "relevance_score",
                   sort_dir: "desc",
                   page: 1,
