@@ -415,17 +415,24 @@ export function PlatformsPage() {
             </div>
 
             <div className="flex border-t border-gray-100">
-              <button
-                onClick={() => setExpandedPlatform(expandedPlatform === p.name ? null : p.name)}
-                className="flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
-              >
-                <Briefcase className="h-3 w-3" />
-                Boards
-                {expandedPlatform === p.name ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-              </button>
+              {/* F223: Boards listing is now admin-gated on the backend
+                  (was: open to all authenticated users) because it
+                  reveals the internal scraping registry. Hide the
+                  expand button for non-admins so viewers don't click
+                  into a 403 — matches the F217 Scan Logs pattern. */}
+              {isAdmin && (
+                <button
+                  onClick={() => setExpandedPlatform(expandedPlatform === p.name ? null : p.name)}
+                  className="flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  <Briefcase className="h-3 w-3" />
+                  Boards
+                  {expandedPlatform === p.name ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                </button>
+              )}
               {/* F217: Scan Logs admin-gated on the backend — keep the
                   button hidden for non-admins so they don't click a button
-                  that 403s. Boards listing stays open to all roles. */}
+                  that 403s. */}
               {isAdmin && (
                 <button
                   onClick={() => setShowLogs(showLogs === p.name ? null : p.name)}
