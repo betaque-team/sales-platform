@@ -26,6 +26,15 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     result_expires=3600,
+    # Regression finding 204: persist the task's positional args on the
+    # result row so `AsyncResult(task_id).args` returns the original
+    # inputs. `resume.py`'s `score-status` endpoint cross-validates that
+    # the polled task_id was dispatched by the same resume_id in the URL
+    # path — without `result_extended`, celery strips args during
+    # serialization and the cross-check degrades to "ownership only".
+    # Cost: one extra JSON field per result row in Redis (~30 bytes for a
+    # UUID arg). Retention is capped by `result_expires=3600`.
+    result_extended=True,
 )
 
 # Autodiscover tasks from the tasks subpackage
