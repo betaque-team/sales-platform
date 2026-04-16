@@ -348,7 +348,10 @@ export function PipelinePage() {
   // Use stages_config from API response (dynamic from database)
   const stagesConfig = pipeline?.stages_config || [];
   const stageOrder = stagesConfig.map((s) => s.key);
-  const stages = pipeline?.items || {};
+  // F215: backend renamed `items` (dict-of-lists) → `by_stage` to reclaim
+  // `items` for the canonical flat list. Kanban columns still render from
+  // the per-stage dict.
+  const stages = pipeline?.by_stage || {};
 
   // Build a lookup from key to stage config ID (for rename/delete)
   const stageIdMap: Record<string, string> = {};

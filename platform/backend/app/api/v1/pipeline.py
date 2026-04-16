@@ -214,6 +214,24 @@ async def get_pipeline(
     active_stages = await _get_active_stages(db)
     stage_keys = [s.key for s in active_stages]
 
+    # Regression finding 215(b): `stage` was typed `str | None` with no
+    # check, so `?stage=wat`, `?stage=<script>`, `?stage=INVALID` all
+    # returned HTTP 200 with total=0 and six empty stage groups — same
+    # silent-drop class as F187/F191/F218. A Literal here isn't usable
+    # because stages are user-configurable in the DB (see
+    # `/pipeline/stages` CRUD above); run the check at runtime against
+    # the active stage list we just loaded. `relevant`-style meta-values
+    # aren't defined for pipeline, so only the exact keys are allowed.
+    if stage is not None and stage not in stage_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Invalid stage. Must be one of: "
+                + ", ".join(sorted(stage_keys))
+                + " (configure via /pipeline/stages)."
+            ),
+        )
+
     query = select(PotentialClient).options(
         joinedload(PotentialClient.company),
         joinedload(PotentialClient.applicant),
@@ -314,7 +332,27 @@ async def get_pipeline(
         for s in active_stages
     ]
 
-    return {"stages": stage_keys, "stages_config": stages_config, "items": grouped, "total": len(items_data)}
+    # Regression finding 215(a): previously `items` was a `dict[str,
+    # list[...]]` keyed by stage — a shape drift from the canonical
+    # `{items, total, page, page_size, total_pages}` pagination envelope
+    # documented in CLAUDE.md. A generic `<PaginatedList>` component
+    # that expected `items: Array<T>` crashed on `.map()` / silently
+    # mis-interpreted `.length === 6` (the 6 stage keys) as "6 rows".
+    #
+    # Fix: `items` is now the flat list (canonical shape), `by_stage`
+    # carries the kanban-grouped view for the PipelinePage UI. No
+    # pagination fields yet — the pipeline is expected to stay small
+    # relative to /jobs, and per-row live-metric subqueries wouldn't
+    # benefit from LIMIT/OFFSET at this volume; if it grows past ~1k
+    # rows, add `page`/`page_size` with the same 4-subquery pattern
+    # bounded to just the slice.
+    return {
+        "stages": stage_keys,
+        "stages_config": stages_config,
+        "items": items_data,          # flat canonical list (F215 fix)
+        "by_stage": grouped,          # kanban-grouped view
+        "total": len(items_data),
+    }
 
 
 @router.post("", status_code=201)
