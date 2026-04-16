@@ -3,7 +3,7 @@
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func, or_, case
+from sqlalchemy import select, func, or_, case, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -58,12 +58,18 @@ async def company_scores(
     from sqlalchemy import Float as SAFloat
     from sqlalchemy.sql.expression import cast
 
+    # F177: use the configurable cluster list instead of the hardcoded
+    # `["infra", "security"]` pair, so `relevant_jobs` on this endpoint
+    # stays in sync with what `jobs.py` / `resume.py` / `export.py`
+    # treat as relevant.
+    relevant = await _get_relevant_clusters(db)
+
     # Subquery: for each company, count relevant jobs, global remote jobs, avg score
     scores_q = (
         select(
             Job.company_id,
             func.count(Job.id).label("total_jobs"),
-            func.sum(case((Job.role_cluster.in_(["infra", "security"]), 1), else_=0)).label("relevant_jobs"),
+            func.sum(case((Job.role_cluster.in_(relevant), 1), else_=0)).label("relevant_jobs"),
             func.sum(case((Job.geography_bucket == "global_remote", 1), else_=0)).label("remote_jobs"),
             func.avg(case((Job.relevance_score > 0, Job.relevance_score), else_=None)).label("avg_score"),
         )
@@ -506,11 +512,52 @@ async def trigger_enrichment(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger company enrichment (admin only)."""
-    result = await db.execute(select(Company).where(Company.id == company_id))
-    company = result.scalar_one_or_none()
+    """Trigger company enrichment (admin only).
+
+    Regression finding 161: previously two concurrent POSTs for the same
+    company both returned HTTP 200 with different `task_id`s — Celery
+    ended up with two workers enriching the same row simultaneously,
+    double-spending external API quota (Clearbit etc.) and racing on
+    contact/metadata writes. We now claim the slot atomically in SQL
+    before queueing: an UPDATE that flips the row to `enriching` only
+    if the row isn't already `enriching` (or has been stuck in that
+    state for > 5 minutes — recovery from a crashed worker). If zero
+    rows are updated, another request beat us and we return 409 without
+    queuing a duplicate task.
+
+    The 5-minute staleness window balances "don't queue two workers for
+    the same company" with "don't lock a company forever if a worker
+    dies before setting a terminal status". Normal enrichment runs
+    complete in < 2 minutes.
+    """
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
+
+    # Atomic claim: flip status to `enriching` only if nobody else holds
+    # a recent claim. `updated_at` is already an `onupdate` column, so
+    # setting `enrichment_status` alone bumps it — we set it explicitly
+    # for clarity. The WHERE clause uses `OR updated_at < stale_cutoff`
+    # so a worker that died mid-run doesn't hold the slot forever.
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    claim = await db.execute(
+        update(Company)
+        .where(
+            Company.id == company_id,
+            or_(
+                Company.enrichment_status != "enriching",
+                Company.updated_at < stale_cutoff,
+            ),
+        )
+        .values(enrichment_status="enriching", updated_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+
+    if claim.rowcount == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Enrichment already in progress for this company — wait for it to finish or try again in a few minutes",
+        )
 
     from app.workers.tasks.enrichment_task import enrich_company
     task = enrich_company.delay(str(company_id))
@@ -562,6 +609,48 @@ async def list_contacts(
     return {"items": [CompanyContactOut.model_validate(c) for c in contacts]}
 
 
+# Regression finding 160: company contacts had no (company_id, email)
+# uniqueness guard. In production this allowed the same email to be
+# inserted repeatedly at the same company — bulk CSV imports created
+# 3-5 copies per contact, outreach status would get reset on each
+# duplicate insert, and the UI showed the same person N times with
+# different outreach states. We can't safely add a UNIQUE INDEX in this
+# PR because the table already contains legacy duplicates that would
+# fail the migration; fix at the handler instead so no NEW duplicates
+# sneak in, and flag the backfill for a separate migration PR.
+# Case-insensitive compare because manual entry / CSV imports routinely
+# hit `Jane@acme.com` / `jane@acme.com` variants on the same person.
+def _normalise_email(value: str | None) -> str:
+    if value is None:
+        return ""
+    return value.strip().lower()
+
+
+async def _email_already_exists(
+    db: AsyncSession,
+    company_id: UUID,
+    email: str,
+    *,
+    exclude_contact_id: UUID | None = None,
+) -> UUID | None:
+    """Return the id of an existing contact with this email at this
+    company, or `None` if no duplicate exists. Empty/whitespace-only
+    emails are treated as "no email" — duplicates of empty-string are
+    allowed because they represent separate people with missing data.
+    """
+    normalised = _normalise_email(email)
+    if not normalised:
+        return None
+    query = select(CompanyContact.id).where(
+        CompanyContact.company_id == company_id,
+        func.lower(func.trim(CompanyContact.email)) == normalised,
+    )
+    if exclude_contact_id is not None:
+        query = query.where(CompanyContact.id != exclude_contact_id)
+    existing = (await db.execute(query.limit(1))).scalar_one_or_none()
+    return existing
+
+
 @router.post("/{company_id}/contacts", response_model=CompanyContactOut, status_code=201)
 async def create_contact(
     company_id: UUID,
@@ -572,6 +661,20 @@ async def create_contact(
     result = await db.execute(select(Company).where(Company.id == company_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Company not found")
+
+    # F160: reject duplicate (company_id, email) pairs so bulk CSV imports
+    # can't silently clobber outreach state on re-run. Surfaces the
+    # existing row id so the UI can link the user to it instead of a
+    # generic "already exists".
+    duplicate_id = await _email_already_exists(db, company_id, body.email)
+    if duplicate_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A contact with this email already exists at this company",
+                "existing_contact_id": str(duplicate_id),
+            },
+        )
 
     contact = CompanyContact(
         company_id=company_id,
@@ -603,7 +706,29 @@ async def update_contact(
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    for field, value in body.model_dump(exclude_unset=True).items():
+    update_data = body.model_dump(exclude_unset=True)
+
+    # F160: mirror the duplicate guard on update so you can't rename a
+    # contact's email to collide with another. Exclude the current row
+    # from the check (otherwise updating `jane@acme.com` to itself
+    # would 409). Only check when email actually changes.
+    if "email" in update_data:
+        new_email = _normalise_email(update_data["email"])
+        current_email = _normalise_email(contact.email)
+        if new_email and new_email != current_email:
+            duplicate_id = await _email_already_exists(
+                db, company_id, new_email, exclude_contact_id=contact_id,
+            )
+            if duplicate_id is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "A contact with this email already exists at this company",
+                        "existing_contact_id": str(duplicate_id),
+                    },
+                )
+
+    for field, value in update_data.items():
         setattr(contact, field, value)
 
     await db.commit()

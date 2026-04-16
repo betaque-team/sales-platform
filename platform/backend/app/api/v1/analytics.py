@@ -13,10 +13,33 @@ from app.models.pipeline import PotentialClient
 from app.models.company import Company, CompanyATSBoard
 from app.models.company_contact import CompanyContact
 from app.models.application import Application
+from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
+    """Return the configurable set of relevant role clusters.
+
+    Regression finding 177: `warm-leads` previously hardcoded
+    `["infra", "security"]` inside the jobs subquery, so an admin adding
+    a new cluster (e.g. "data", "qa") via `/role-clusters` would see
+    jobs in that cluster silently excluded from warm-leads — producing
+    pipeline counts that diverged from the rest of the app (which uses
+    the config everywhere). Matches the helper in `jobs.py:_get_relevant_clusters`
+    — same DB source of truth (`role_cluster_configs`), same fallback
+    when no config has been seeded yet.
+    """
+    result = await db.execute(
+        select(RoleClusterConfig.name).where(
+            RoleClusterConfig.is_relevant == True,  # noqa: E712
+            RoleClusterConfig.is_active == True,  # noqa: E712
+        )
+    )
+    clusters = result.scalars().all()
+    return list(clusters) if clusters else ["infra", "security"]
 
 
 @router.get("/overview")
@@ -515,6 +538,11 @@ async def warm_leads(user: User = Depends(get_current_user), db: AsyncSession = 
     cutoff_7d = datetime.now(timezone.utc) - timedelta(days=7)
     cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
 
+    # F177: read configurable clusters from the DB instead of hardcoding
+    # `["infra", "security"]` — admins adding a new cluster now flow
+    # through warm-leads without a code change.
+    relevant = await _get_relevant_clusters(db)
+
     # Subquery: jobs in last 30 days per company
     jobs_sub = (
         select(
@@ -525,7 +553,7 @@ async def warm_leads(user: User = Depends(get_current_user), db: AsyncSession = 
         )
         .where(
             Job.first_seen_at >= cutoff_30d,
-            Job.role_cluster.in_(["infra", "security"]),
+            Job.role_cluster.in_(relevant),
         )
         .group_by(Job.company_id)
         .subquery()

@@ -3,7 +3,7 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,31 @@ from app.api.deps import get_current_user
 
 
 router = APIRouter(prefix="/career-pages", tags=["career-pages"])
+
+
+# Regression finding 174: `career_page.url` had no format validation, so
+# the scraper had been accepting display names (`"Yat Labs"`, `"push AI"`),
+# bare slugs (`"zfnd"`, `"reifyhealth"`), and partial domains
+# (`"speckle.systems"`, `"tinlake.centrifuge"`) as URLs — 117 heterogeneous
+# rows. The scraper couldn't actually fetch any of them (hence `last_hash=""`
+# for all 117 after 134 check rounds — change detection was effectively dead).
+# We can't safely migrate existing rows without domain research per company,
+# but we can stop the bleed: new POST/PATCH must supply a proper http(s) URL.
+def _validate_career_page_url(v: str) -> str:
+    if v is None:
+        return v
+    stripped = v.strip()
+    if not stripped:
+        raise ValueError("url must not be empty")
+    if len(stripped) > 2048:
+        raise ValueError("url too long (max 2048 chars)")
+    low = stripped.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        raise ValueError(
+            "url must be a full URL starting with http:// or https:// — "
+            "slugs and display names are not accepted"
+        )
+    return stripped
 
 
 class CareerPageOut(BaseModel):
@@ -36,11 +61,25 @@ class CareerPageCreate(BaseModel):
     url: str
     is_active: bool = True
 
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v):
+        return _validate_career_page_url(v)
+
 
 class CareerPageUpdate(BaseModel):
     url: str | None = None
     is_active: bool | None = None
     company_id: UUID | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, v):
+        # PATCH: omitted `url` stays None (partial update). If explicitly
+        # provided, apply the same full-URL requirement as POST.
+        if v is None:
+            return v
+        return _validate_career_page_url(v)
 
 
 @router.get("")
