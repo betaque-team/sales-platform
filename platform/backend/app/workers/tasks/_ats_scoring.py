@@ -213,10 +213,26 @@ def compute_keyword_score(resume_keywords: set[str], job_keywords: set[str]) -> 
     return min(score, 100.0), sorted(matched), sorted(missing)
 
 
+# Regression finding 166: role alignment used to be `matches / len(role_keywords) * 100`
+# over the FULL INFRA/SECURITY/QA keyword+role lists (often 40-80 entries) PLUS the
+# resume was also being compared implicitly to every TECH_CATEGORIES keyword via the
+# keyword score — so a DevOps candidate with 18 strong matches (aws, kubernetes,
+# terraform, …) could only score ~39/100 role alignment because the denominator was
+# unreachable. The fraction was effectively "% of ALL role vocabulary you recognise"
+# rather than "are you qualified for this role?". Combined with the 30% role weight
+# that capped the ceiling around 82 even for a perfect resume.
+#
+# Fix: use a saturating threshold — anyone matching `_ROLE_ALIGNMENT_THRESHOLD`
+# role-relevant tokens is treated as fully aligned (100), and linear below that.
+# That gives a strong DevOps/Security/QA candidate a realistic chance at 100 role
+# alignment while still rewarding depth (more keywords → higher score, up to the cap).
+# The +20 bonus for exact matched-role appearance is preserved.
+_ROLE_ALIGNMENT_THRESHOLD = 12
+
+
 def compute_role_alignment(resume_text: str, role_cluster: str, matched_role: str) -> float:
     """Score how well resume aligns with the job's role cluster. Returns 0-100."""
     text_lower = resume_text.lower()
-    score = 0.0
 
     if role_cluster == "infra":
         role_keywords = INFRA_KEYWORDS + [r.lower() for r in INFRA_ROLES]
@@ -228,7 +244,11 @@ def compute_role_alignment(resume_text: str, role_cluster: str, matched_role: st
         return 50.0  # neutral for unclassified
 
     matches = sum(1 for kw in role_keywords if kw in text_lower)
-    score = min((matches / max(len(role_keywords), 1)) * 100, 100.0)  # was * 200
+
+    # Saturating linear score: 0 matches → 0, threshold matches → 100.
+    # Honest candidates with 12+ role-relevant tokens max out at 100 instead
+    # of being capped at 40-50 by the old full-vocabulary denominator.
+    score = min((matches / _ROLE_ALIGNMENT_THRESHOLD) * 100, 100.0)
 
     # Bonus if the exact matched role appears in resume
     if matched_role and matched_role.lower() in text_lower:

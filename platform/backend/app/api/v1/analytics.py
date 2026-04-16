@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,7 +68,16 @@ async def sources(user: User = Depends(get_current_user), db: AsyncSession = Dep
 
 
 @router.get("/trends")
-async def trends(days: int = 30, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def trends(
+    # Regression finding 179: `days: int = 30` had no `ge`/`le` bounds, so
+    # `?days=-5` returned 200 with `[]` (cutoff became a future timestamp,
+    # filter matched nothing). Rejected outright now — a negative window
+    # has no meaningful interpretation, and unbounded large windows let a
+    # caller request years of daily rows from a small endpoint.
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(text("""
         SELECT
             DATE(first_seen_at) AS day,
@@ -411,7 +420,11 @@ async def review_insights(user: User = Depends(get_current_user), db: AsyncSessi
 
 @router.get("/funding-signals")
 async def funding_signals(
-    days: int = 180,
+    # F179: same bounded-window treatment as `/trends` — `?days=-1`
+    # previously produced a 200 with `{items: [], days: -1}` because
+    # the future cutoff never matched. `ge=1, le=365` rejects both
+    # negative inputs and unreasonably large windows.
+    days: int = Query(180, ge=1, le=365),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
