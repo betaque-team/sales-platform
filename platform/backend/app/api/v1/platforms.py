@@ -1,5 +1,6 @@
 """Platform monitoring API endpoints."""
 
+from typing import get_args
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, case
@@ -331,7 +332,21 @@ async def trigger_platform_scan(
 ):
     """Trigger a scan for a specific platform only."""
     from app.workers.tasks.scan_task import scan_platform
-    valid_platforms = ["greenhouse", "lever", "ashby", "workable", "bamboohr", "himalayas", "wellfound", "jobvite", "smartrecruiters", "recruitee"]
+    # Regression finding 118: previously this hardcoded a 10-platform
+    # whitelist that had drifted behind the schema — linkedin (1,644
+    # jobs), weworkremotely (386), remoteok (189), and remotive (25)
+    # had fetchers, had active boards, and had live rows in
+    # Job.platform, but `POST /scan/linkedin` returned 400. An admin
+    # could never trigger a targeted re-scan of 2,244 jobs of data
+    # across 4 platforms. Fix: derive the whitelist from the
+    # `PlatformFilter` Literal (which already covers all 14 known
+    # fetchers — F191 docs that tuple is the single source of truth,
+    # aligned with the `PLATFORM` class attribute on each `BaseFetcher`
+    # subclass in `app/fetchers/`). When a new fetcher is added, updating
+    # `schemas/job.py:PlatformFilter` now flows to every consumer: the
+    # `?platform=` filter on /jobs, /platforms, /scan-logs, AND this
+    # per-platform scan trigger — no more hunting for stale lists.
+    valid_platforms = list(get_args(PlatformFilter))
     if platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"Platform must be one of: {', '.join(valid_platforms)}")
 
