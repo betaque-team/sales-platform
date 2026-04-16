@@ -14,7 +14,10 @@ from app.models.user import User
 from app.models.resume import ResumeScore
 from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user, require_role
-from app.schemas.job import JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest
+from app.schemas.job import (
+    JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest,
+    JobStatusFilter, GeographyBucketFilter, PlatformFilter,
+)
 from app.utils.audit import log_action
 from app.utils.sanitize import sanitize_html
 from app.utils.sql import escape_like
@@ -31,6 +34,21 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
     clusters = result.scalars().all()
     # Fallback to hardcoded if no config exists yet
     return list(clusters) if clusters else ["infra", "security"]
+
+
+async def _get_all_cluster_names(db: AsyncSession) -> list[str]:
+    """Return every configured cluster name (active or not) for F218 filter
+    validation.
+
+    Mirrors the helper in export.py (F187). Clusters are admin-configurable
+    via `RoleClusterConfig`, so we can't hard-code a `Literal` — we load
+    the catalog at request time and reject unknown names with a 400 before
+    they reach the SQL filter. The "relevant" pseudo-value is a UI alias
+    for "all clusters marked relevant" and must be allow-listed explicitly
+    (see F106 and the branching in `list_jobs` below).
+    """
+    result = await db.execute(select(RoleClusterConfig.name))
+    return list(result.scalars().all())
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -74,13 +92,29 @@ JobSortDir = Literal["asc", "desc"]
 
 @router.get("")
 async def list_jobs(
-    status: str | None = None,
-    platform: str | None = None,
-    source_platform: str | None = None,
+    # Regression finding 218: these four filter params were previously typed
+    # `str | None` with no validation — any typo (status=Accepted with a
+    # capital A, geography_bucket=global-remote with a dash, role_cluster=
+    # infraa) silently filtered to `total: 0` and the user saw "no matches"
+    # for what looked like a valid filter. F187 shipped the same fix on the
+    # parallel `/export/jobs` handler; this is the matching fix for the list
+    # endpoint. `sort_by` was already Literal-typed per F198.
+    #
+    # Why Literal for status/geography but runtime validation for
+    # role_cluster: status values are frozen in the code (models/job.py:33
+    # documents them), so Literal gives us parse-time 422s for free.
+    # `geography_bucket` is similarly frozen (models/job.py:25). But role
+    # clusters are admin-configurable via RoleClusterConfig — a `Literal`
+    # here would become stale the moment an admin adds a cluster — so we
+    # load the catalog at request time and 400 on miss. Same split as the
+    # export handler.
+    status: JobStatusFilter | None = None,
+    platform: PlatformFilter | None = None,
+    source_platform: PlatformFilter | None = None,
     company_id: UUID | None = None,
     company: str | None = None,
-    geography_bucket: str | None = None,
-    geography: str | None = None,
+    geography_bucket: GeographyBucketFilter | None = None,
+    geography: GeographyBucketFilter | None = None,
     role_cluster: str | None = None,
     is_classified: bool | None = None,
     search: str | None = None,
@@ -128,6 +162,22 @@ async def list_jobs(
     if geo:
         query = query.where(Job.geography_bucket == geo)
     if role_cluster:
+        # F218: validate role_cluster against the configured cluster catalog
+        # before filtering. Clusters are admin-configurable, so we load the
+        # allowed set from the DB instead of hard-coding a Literal. The
+        # "relevant" pseudo-value is a UI alias for "all clusters marked
+        # relevant" (F106) and must be allow-listed explicitly. Before this
+        # check, role_cluster=infraa silently returned total=0; now it 400s
+        # with the catalog in the detail so the caller can self-correct.
+        allowed_clusters = set(await _get_all_cluster_names(db)) | {"relevant"}
+        if role_cluster not in allowed_clusters:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid role_cluster. Must be one of: "
+                    + ", ".join(sorted(allowed_clusters))
+                ),
+            )
         if role_cluster == "relevant":
             relevant_clusters = await _get_relevant_clusters(db)
             query = query.where(Job.role_cluster.in_(relevant_clusters))
