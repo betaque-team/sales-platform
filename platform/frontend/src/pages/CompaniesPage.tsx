@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   Search, Building2, Star, ExternalLink, Globe, GitBranch, Check,
   Users, MapPin, ChevronRight, UserCheck, Zap, DollarSign, Download,
@@ -215,9 +215,15 @@ export function CompaniesPage() {
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
-                          <h3 className="text-sm font-semibold text-gray-900 group-hover:text-primary-700 transition-colors">
+                          {/* Regression finding 58: company name is a <Link>
+                              so right-click → "Open in new tab" works. */}
+                          <Link
+                            to={`/companies/${company.id}`}
+                            className="text-sm font-semibold text-gray-900 group-hover:text-primary-700 transition-colors"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             {company.name}
-                          </h3>
+                          </Link>
                           <span className={`inline-block h-2 w-2 rounded-full ${dot.color}`} title={dot.label} />
                         </div>
                         {company.website && (

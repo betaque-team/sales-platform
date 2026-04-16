@@ -155,12 +155,17 @@ export function SettingsPage() {
                   {passwordError}
                 </div>
               )}
+              {/* Regression finding 43: added id/name/autocomplete/htmlFor
+                  for password manager autofill and screen-reader a11y. */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="current-password" className="block text-sm font-medium text-gray-700 mb-1">
                   Current Password
                 </label>
                 <input
+                  id="current-password"
+                  name="current-password"
                   type="password"
+                  autoComplete="current-password"
                   required
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
@@ -168,11 +173,14 @@ export function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 mb-1">
                   New Password
                 </label>
                 <input
+                  id="new-password"
+                  name="new-password"
                   type="password"
+                  autoComplete="new-password"
                   required
                   minLength={6}
                   value={newPassword}
@@ -182,11 +190,14 @@ export function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-1">
                   Confirm New Password
                 </label>
                 <input
+                  id="confirm-password"
+                  name="confirm-password"
                   type="password"
+                  autoComplete="new-password"
                   required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}

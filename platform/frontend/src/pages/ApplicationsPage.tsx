@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getApplications, getApplicationStats, updateApplication, deleteApplication } from "@/lib/api";
 import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut } from "lucide-react";
@@ -149,7 +149,18 @@ export function ApplicationsPage() {
             {isLoading ? (
               <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>
             ) : data?.items.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No applications found</td></tr>
+              <tr><td colSpan={7} className="px-4 py-12 text-center">
+                {/* Regression finding 54: instructional empty-state with links */}
+                <Briefcase className="mx-auto h-10 w-10 text-gray-300" />
+                <p className="mt-3 text-sm font-medium text-gray-900">No applications yet</p>
+                <p className="mt-1 text-sm text-gray-500">
+                  Browse the{" "}
+                  <Link to="/review" className="font-medium text-primary-600 hover:text-primary-700 underline">Review Queue</Link>
+                  {" "}to accept jobs, or visit{" "}
+                  <Link to="/jobs?role_cluster=relevant" className="font-medium text-primary-600 hover:text-primary-700 underline">Relevant Jobs</Link>
+                  {" "}and click Apply to get started.
+                </p>
+              </td></tr>
             ) : (
               data?.items.map((app) => (
                 <tr key={app.id} className="border-b border-gray-50 hover:bg-gray-50">

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Search, Filter, CheckSquare, X, Send, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
@@ -56,7 +56,9 @@ const GEOGRAPHY_OPTIONS = [
 export function JobsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Regression finding 34: ref guards against infinite URL ↔ state loops
+  const syncingFromUrl = useRef(false);
 
   const [filters, setFilters] = useState<JobFilters>(() => ({
     search: searchParams.get("search") || "",
@@ -70,9 +72,10 @@ export function JobsPage() {
     page_size: 25,
   }));
 
-  // Re-sync filters when URL params change (e.g. Sidebar navigation between
-  // "All Jobs" and "Relevant Jobs" reuses this component without remounting)
+  // URL → state: re-sync filters when URL params change externally
+  // (e.g. Sidebar navigation between "All Jobs" and "Relevant Jobs")
   useEffect(() => {
+    syncingFromUrl.current = true;
     setFilters({
       search: searchParams.get("search") || "",
       status: (searchParams.get("status") || "") as JobFilters["status"],
@@ -86,7 +89,34 @@ export function JobsPage() {
     });
   }, [searchParams]);
 
+  // State → URL: write filter changes back to the URL so it's shareable.
+  // Skip when the change originated from the URL→state sync above.
+  useEffect(() => {
+    if (syncingFromUrl.current) {
+      syncingFromUrl.current = false;
+      return;
+    }
+    const params = new URLSearchParams();
+    if (filters.search) params.set("search", filters.search);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.platform) params.set("platform", filters.platform);
+    if (filters.geography) params.set("geography", filters.geography);
+    if (filters.role_cluster) params.set("role_cluster", filters.role_cluster);
+    if (filters.sort_by && filters.sort_by !== "relevance_score") params.set("sort_by", filters.sort_by);
+    if (filters.sort_dir && filters.sort_dir !== "desc") params.set("sort_dir", filters.sort_dir);
+    if ((filters.page ?? 1) > 1) params.set("page", String(filters.page));
+    setSearchParams(params, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Regression finding 70: clear checkbox selections when filters change —
+  // stale selections from a previous filter-set could silently target
+  // jobs the user can no longer see in the table.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [filters.search, filters.status, filters.platform, filters.geography, filters.role_cluster, filters.sort_by, filters.sort_dir]);
 
   const { data: activeResumeData } = useQuery({
     queryKey: ["active-resume"],
