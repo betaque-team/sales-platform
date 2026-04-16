@@ -188,7 +188,7 @@ async def create_answer(
 
 @router.patch("/{entry_id}")
 async def update_answer(
-    entry_id: str,
+    entry_id: UUID,
     body: AnswerUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -224,7 +224,7 @@ async def update_answer(
 
 @router.delete("/{entry_id}")
 async def archive_answer(
-    entry_id: str,
+    entry_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -245,7 +245,7 @@ async def archive_answer(
 
 @router.post("/import-from-resume/{resume_id}")
 async def import_from_resume(
-    resume_id: str,
+    resume_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):

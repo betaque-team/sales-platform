@@ -24,7 +24,25 @@ def _normalise_key(text: str) -> str:
 
 
 async def get_or_fetch_questions(db: AsyncSession, job, board_slug: str) -> list[dict]:
-    """Get cached questions or fetch from ATS API, then cache."""
+    """Get cached questions or fetch from ATS API, then cache.
+
+    Regression finding 182: one specific job (Wiz SRE —
+    `6f9371a8-e4f8-4166-8ed8-920682309cd4`) was reproducibly returning
+    HTTP 500 on `GET /applications/questions/{id}`. Root cause wasn't
+    conclusively identified because the 500 body carried no detail,
+    but the most likely candidates were (a) UniqueConstraint clashes
+    on re-insert when two fetched fields shared an empty `field_key`,
+    (b) NULL `options` / `label` / `description` in cached rows
+    triggering a downstream KeyError or `NoneType.get(...)` in the
+    answer-matcher, and (c) an IntegrityError on the flush that
+    poisoned the session for the subsequent `await db.commit()` in
+    the handler. Defence in depth:
+      - dedupe by `field_key` before insert so a malformed upstream
+        response with duplicate keys can never hit the unique index.
+      - coerce any cached `None` into its safe default when reading
+        back (`options` → `[]`, text fields → `""`) so the matcher
+        never receives `None` where it expected a value.
+    """
     # Check cache first
     result = await db.execute(
         select(JobQuestion).where(JobQuestion.job_id == job.id)
@@ -34,11 +52,16 @@ async def get_or_fetch_questions(db: AsyncSession, job, board_slug: str) -> list
     if cached:
         return [
             {
-                "field_key": q.field_key,
-                "label": q.label,
-                "field_type": q.field_type,
-                "required": q.required,
-                "options": q.options or [],
+                # F182 (b): coerce None back to "" / [] — DB columns
+                # are nominally non-null but legacy rows may carry
+                # NULLs from when `default=list` wasn't honoured on
+                # insert. Cheap coercion here prevents a downstream
+                # `.get()` on `None` from 500ing.
+                "field_key": q.field_key or "",
+                "label": q.label or "",
+                "field_type": q.field_type or "text",
+                "required": bool(q.required),
+                "options": q.options if isinstance(q.options, list) else [],
                 "description": q.description or "",
             }
             for q in cached
@@ -48,17 +71,33 @@ async def get_or_fetch_questions(db: AsyncSession, job, board_slug: str) -> list
     from app.fetchers.questions import fetch_application_questions
     questions = fetch_application_questions(job.platform, job.external_id, board_slug)
 
-    # Cache in DB
+    # F182 (a): dedupe fetched questions by `field_key` so we never
+    # try to insert two JobQuestion rows with the same
+    # (job_id, field_key) — the `uq_job_question_field` unique index
+    # would raise IntegrityError on flush, poison the session, and
+    # surface as opaque 500. Also skip rows with empty `field_key`
+    # since an empty key can't match anything downstream anyway and
+    # two empty keys in the same fetch would collide on the index.
+    seen_keys: set[str] = set()
+    deduped: list[dict] = []
     for q in questions:
+        fk = (q.get("field_key") or "").strip()
+        if not fk or fk in seen_keys:
+            continue
+        seen_keys.add(fk)
+        deduped.append(q)
+
+    # Cache in DB
+    for q in deduped:
         jq = JobQuestion(
             id=uuid.uuid4(),
             job_id=job.id,
             field_key=q.get("field_key", ""),
-            label=q.get("label", ""),
-            field_type=q.get("field_type", "text"),
-            required=q.get("required", False),
-            options=q.get("options", []),
-            description=q.get("description", ""),
+            label=q.get("label", "") or "",
+            field_type=q.get("field_type", "text") or "text",
+            required=bool(q.get("required", False)),
+            options=q.get("options") if isinstance(q.get("options"), list) else [],
+            description=q.get("description", "") or "",
             platform=job.platform,
         )
         db.add(jq)
@@ -66,8 +105,15 @@ async def get_or_fetch_questions(db: AsyncSession, job, board_slug: str) -> list
     try:
         await db.flush()
     except Exception:
+        # F182 (c): on flush failure, rollback resets the session
+        # but any pending writes from EARLIER in the handler also
+        # vanish. The handler must be prepared for that (it only
+        # writes answer-book rows AFTER this call, so the answer-book
+        # commit path is unaffected — but we still log with
+        # `exc_info=True` now so the underlying IntegrityError is
+        # visible in logs instead of hidden behind a generic warn.
         await db.rollback()
-        logger.warning("Failed to cache questions for job %s", job.id)
+        logger.warning("Failed to cache questions for job %s", job.id, exc_info=True)
 
     return questions
 

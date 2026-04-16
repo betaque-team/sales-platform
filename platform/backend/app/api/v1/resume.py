@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select, func
@@ -168,7 +169,7 @@ async def upload_resume(
 
 @router.post("/switch/{resume_id}")
 async def switch_active_resume(
-    resume_id: str,
+    resume_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -254,7 +255,7 @@ async def get_active_resume(
 
 @router.patch("/{resume_id}/label")
 async def update_resume_label(
-    resume_id: str,
+    resume_id: UUID,
     body: dict,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -317,7 +318,7 @@ async def list_resumes(
 
 @router.delete("/{resume_id}")
 async def archive_resume(
-    resume_id: str,
+    resume_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -339,7 +340,7 @@ async def archive_resume(
 
 @router.post("/{resume_id}/score")
 async def score_resume(
-    resume_id: str,
+    resume_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -368,7 +369,7 @@ async def score_resume(
 
 @router.get("/{resume_id}/score-status/{task_id}")
 async def get_score_task_status(
-    resume_id: str,
+    resume_id: UUID,
     task_id: str,
     user: User = Depends(get_current_user),
 ):
@@ -397,7 +398,7 @@ async def get_score_task_status(
 
 @router.get("/{resume_id}/scores")
 async def get_resume_scores(
-    resume_id: str,
+    resume_id: UUID,
     page: int = 1,
     page_size: int = 25,
     role_cluster: str | None = None,
@@ -575,7 +576,7 @@ async def get_ai_usage(
 
 @router.post("/{resume_id}/customize")
 async def customize_resume_for_job(
-    resume_id: str,
+    resume_id: UUID,
     body: CustomizeRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

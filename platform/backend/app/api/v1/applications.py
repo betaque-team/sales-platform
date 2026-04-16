@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, or_
@@ -35,7 +36,7 @@ VALID_TRANSITIONS = {
 
 @router.get("/readiness/{job_id}")
 async def get_apply_readiness(
-    job_id: str,
+    job_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -255,7 +256,7 @@ async def prepare_application(
 
 @router.post("/{app_id}/sync-answers")
 async def sync_answers_to_book(
-    app_id: str,
+    app_id: UUID,
     body: dict,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -312,7 +313,7 @@ async def sync_answers_to_book(
 
 @router.get("/by-job/{job_id}")
 async def get_application_by_job(
-    job_id: str,
+    job_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -435,13 +436,38 @@ async def list_applications(
 
 @router.get("/questions/{job_id}")
 async def preview_job_questions(
-    job_id: str,
+    job_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Preview application questions for a job with pre-filled answers from answer book."""
+    """Preview application questions for a job with pre-filled answers from answer book.
+
+    Regression finding 182: this endpoint was returning an opaque
+    HTTP 500 (plain text body, no JSON detail) for the Wiz SRE job
+    across 4 consecutive calls while 3 other Greenhouse jobs
+    returned 200. The symptom was reproducible but the root cause
+    was hidden because (a) any raised exception here bubbled up to
+    FastAPI's default 500 handler with no stack trace in logs, and
+    (b) the inner `db.flush()` in `get_or_fetch_questions` caught and
+    swallowed its own failure, leaving the session in an unpredictable
+    state for the outer `db.commit()`.
+
+    Defensive changes:
+      1. Wrap the session-mutating section in try/except — on any
+         error, rollback and return an HTTP 502 with a specific
+         reason message so the on-call engineer can see what failed
+         without having to hunt through traceback logs.
+      2. Log exceptions with `exc_info=True` so the traceback makes
+         it to the logging pipeline.
+      3. The dedup/coercion in `get_or_fetch_questions` covers the
+         most likely root causes (duplicate `field_key` INSERTs,
+         NULL fields in cached rows).
+    """
+    import logging
     from app.services.question_service import get_or_fetch_questions, auto_populate_answer_book
     from app.workers.tasks._answer_prep import match_questions_to_answers
+
+    logger = logging.getLogger(__name__)
 
     # Load job
     job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
@@ -458,39 +484,61 @@ async def preview_job_questions(
     )).scalar_one_or_none()
     board_slug = board.slug if board else ""
 
-    # Get or fetch questions (cached)
-    ats_questions = await get_or_fetch_questions(db, job, board_slug)
+    try:
+        # Get or fetch questions (cached)
+        ats_questions = await get_or_fetch_questions(db, job, board_slug)
 
-    # Auto-populate answer book
-    new_entries = await auto_populate_answer_book(db, user.id, ats_questions)
-    await db.commit()
+        # Auto-populate answer book
+        new_entries = await auto_populate_answer_book(db, user.id, ats_questions)
+        await db.commit()
 
-    # Load answer book entries
-    ab_query = select(AnswerBookEntry).where(
-        AnswerBookEntry.user_id == user.id,
-        or_(
-            AnswerBookEntry.resume_id.is_(None),
-            AnswerBookEntry.resume_id == user.active_resume_id,
-        ) if user.active_resume_id else AnswerBookEntry.resume_id.is_(None),
-    )
-    ab_result = await db.execute(ab_query)
-    ab_entries = ab_result.scalars().all()
+        # Load answer book entries
+        ab_query = select(AnswerBookEntry).where(
+            AnswerBookEntry.user_id == user.id,
+            or_(
+                AnswerBookEntry.resume_id.is_(None),
+                AnswerBookEntry.resume_id == user.active_resume_id,
+            ) if user.active_resume_id else AnswerBookEntry.resume_id.is_(None),
+        )
+        ab_result = await db.execute(ab_query)
+        ab_entries = ab_result.scalars().all()
 
-    # Merge (resume overrides base). Convert ORM objects to plain dicts so the
-    # downstream matcher (which calls .get()) works correctly.
-    merged: dict[str, dict] = {}
-    for entry in ab_entries:
-        key = entry.question_key
-        if key not in merged or entry.resume_id is not None:
-            merged[key] = {
-                "question_key": entry.question_key,
-                "answer": entry.answer or "",
-                "category": entry.category or "",
-                "source": entry.source or "base",
-            }
+        # Merge (resume overrides base). Convert ORM objects to plain dicts so the
+        # downstream matcher (which calls .get()) works correctly.
+        merged: dict[str, dict] = {}
+        for entry in ab_entries:
+            key = entry.question_key
+            if key not in merged or entry.resume_id is not None:
+                merged[key] = {
+                    "question_key": entry.question_key,
+                    "answer": entry.answer or "",
+                    "category": entry.category or "",
+                    "source": entry.source or "base",
+                }
 
-    # Match questions to answers
-    matched = match_questions_to_answers(ats_questions, list(merged.values()))
+        # Match questions to answers
+        matched = match_questions_to_answers(ats_questions, list(merged.values()))
+    except HTTPException:
+        raise
+    except Exception:
+        # F182: don't let arbitrary exceptions surface as opaque 500s
+        # with no body. Rollback any partial writes, log the trace,
+        # and return a 502 (Bad Gateway / upstream fetch failed) with
+        # a specific message so the client UI can show "couldn't
+        # preview questions — try again" instead of a generic crash.
+        await db.rollback()
+        logger.exception(
+            "Failed to preview questions for job_id=%s platform=%s board=%s",
+            job_id, job.platform, board_slug,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Could not load application questions from the ATS provider. "
+                "This usually means the job posting was removed or the "
+                "ATS API is temporarily unavailable."
+            ),
+        )
 
     # Compute coverage
     total = len(matched)
@@ -510,7 +558,7 @@ async def preview_job_questions(
 
 @router.get("/{app_id}")
 async def get_application(
-    app_id: str,
+    app_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -556,7 +604,7 @@ async def get_application(
 
 @router.patch("/{app_id}")
 async def update_application(
-    app_id: str,
+    app_id: UUID,
     body: dict,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -596,7 +644,7 @@ async def update_application(
 
 @router.delete("/{app_id}")
 async def withdraw_application(
-    app_id: str,
+    app_id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):

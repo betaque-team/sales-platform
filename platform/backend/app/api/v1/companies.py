@@ -832,7 +832,9 @@ async def update_contact_outreach(
 async def draft_contact_email(
     company_id: UUID,
     contact_id: UUID,
-    job_id: str | None = Query(None),
+    # F181: was `str | None` — garbage uuid made it to the SQL cast
+    # and returned 500. UUID validates at the FastAPI boundary.
+    job_id: UUID | None = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):

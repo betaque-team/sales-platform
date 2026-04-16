@@ -36,7 +36,12 @@ DEFAULT_STAGES = [
 
 
 class PipelineCreateRequest(BaseModel):
-    company_id: str
+    # F181: body fields that carry a UUID should be typed as `UUID` so
+    # Pydantic rejects "not-a-uuid" with HTTP 422 before the handler
+    # runs. Previously `str` allowed garbage through, which surfaced
+    # as 500 on the downstream `.where(Company.id == body.company_id)`
+    # lookup when SQLAlchemy couldn't cast the text to a uuid column.
+    company_id: UUID
     stage: str = "new_lead"
     priority: int = Field(default=0, ge=0, le=PIPELINE_MAX_PRIORITY)
     notes: str = Field(default="", max_length=PIPELINE_MAX_NOTES_LENGTH)
@@ -347,7 +352,7 @@ async def create_pipeline_entry(
         action="pipeline.create",
         resource="pipeline",
         request=request,
-        metadata={"client_id": str(client.id), "company_id": body.company_id, "stage": body.stage},
+        metadata={"client_id": str(client.id), "company_id": str(body.company_id), "stage": body.stage},
     )
 
     return {"ok": True, "id": str(client.id), "company_name": company.name}

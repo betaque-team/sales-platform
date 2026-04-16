@@ -3,6 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -74,7 +75,7 @@ async def create_alert(body: AlertConfigCreate, user: User = Depends(get_current
 
 
 @router.put("/{alert_id}")
-async def update_alert(alert_id: str, body: AlertConfigUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def update_alert(alert_id: UUID, body: AlertConfigUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     config = (await db.execute(
         select(AlertConfig).where(AlertConfig.id == alert_id, AlertConfig.user_id == user.id)
     )).scalar_one_or_none()
@@ -98,7 +99,7 @@ async def update_alert(alert_id: str, body: AlertConfigUpdate, user: User = Depe
 
 
 @router.delete("/{alert_id}")
-async def delete_alert(alert_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def delete_alert(alert_id: UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     config = (await db.execute(
         select(AlertConfig).where(AlertConfig.id == alert_id, AlertConfig.user_id == user.id)
     )).scalar_one_or_none()
@@ -110,7 +111,7 @@ async def delete_alert(alert_id: str, user: User = Depends(get_current_user), db
 
 
 @router.post("/{alert_id}/test")
-async def test_alert(alert_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def test_alert(alert_id: UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Send a test alert to verify webhook connectivity."""
     config = (await db.execute(
         select(AlertConfig).where(AlertConfig.id == alert_id, AlertConfig.user_id == user.id)
