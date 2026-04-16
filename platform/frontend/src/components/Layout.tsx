@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Sidebar } from "./Sidebar";
 import { ResumeSwitcher } from "./ResumeSwitcher";
-import { Menu, X } from "lucide-react";
+import { Menu } from "lucide-react";
 
 interface LayoutProps {
   children: ReactNode;
