@@ -11,10 +11,21 @@ from app.database import get_db
 from app.models.job import Job, JobDescription
 from app.models.company import Company, CompanyATSBoard
 from app.models.scan import ScanLog
+from app.models.discovery import DiscoveryRun
 from app.models.user import User
 from app.models.review import Review
 from app.api.deps import get_current_user, require_role
 from app.services.host_stats import get_vm_metrics
+
+# Regression finding 125: if a discovery cycle hasn't run in more than
+# 2× the expected interval, the /monitoring response emits a warning-
+# flagged freshness signal so ops can catch beat-schedule outages
+# without shelling into the DB. Aggressive mode is the default
+# production cadence; in normal (weekly) mode ops should adjust the
+# expected interval in `celery_app.py::beat_schedule` — the stale
+# threshold here tracks the conservative upper bound.
+_DISCOVERY_AGGRESSIVE_INTERVAL_HOURS = 24  # nightly at 00:00 UTC
+_DISCOVERY_STALE_MULTIPLIER = 2            # warn after 2× the interval
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
@@ -93,6 +104,34 @@ async def get_system_health(
         select(func.sum(ScanLog.errors)).where(ScanLog.started_at >= last_24h)
     )).scalar() or 0
 
+    # F125: discovery-run freshness. Before this, nothing on the admin
+    # monitoring page surfaced "discovery is dead" — a missed beat
+    # would go unnoticed for days because the only evidence was
+    # `/discovery/runs` showing no recent rows, and admins don't check
+    # that without a prompt. Now we surface last_run_at + a
+    # `freshness: ok|stale|never_run` flag that the frontend can flip
+    # to a warning badge. Also returns `runs_24h` alongside the
+    # existing `scans_run` so the two cadences are legible side-by-
+    # side.
+    last_discovery = (await db.execute(
+        select(DiscoveryRun).order_by(DiscoveryRun.started_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    discovery_runs_24h = (await db.execute(
+        select(func.count()).select_from(DiscoveryRun).where(
+            DiscoveryRun.started_at >= last_24h
+        )
+    )).scalar() or 0
+
+    if last_discovery is None:
+        discovery_freshness = "never_run"
+    else:
+        age = now - last_discovery.started_at.replace(tzinfo=timezone.utc)
+        stale_threshold = timedelta(
+            hours=_DISCOVERY_AGGRESSIVE_INTERVAL_HOURS
+            * _DISCOVERY_STALE_MULTIPLIER
+        )
+        discovery_freshness = "stale" if age > stale_threshold else "ok"
+
     # --- Database size (PostgreSQL) ---
     try:
         db_size_result = await db.execute(text("SELECT pg_database_size(current_database())"))
@@ -151,6 +190,20 @@ async def get_system_health(
             "errors": errors_24h,
             "last_scan_at": last_scan.started_at.isoformat() if last_scan else None,
             "last_scan_source": last_scan.source if last_scan else None,
+            # F125: discovery-run freshness so admins see missed beats
+            # without shelling into the DB. `freshness` drives a badge
+            # in the MonitoringPage UI (ok → green, stale → yellow,
+            # never_run → red). `last_discovery_at` is the actual
+            # timestamp for the tooltip; `discovery_runs_24h` matches
+            # the existing `scans_run` shape so both cadences are
+            # legible at a glance.
+            "last_discovery_at": (
+                last_discovery.started_at.isoformat()
+                if last_discovery
+                else None
+            ),
+            "discovery_runs_24h": discovery_runs_24h,
+            "discovery_freshness": discovery_freshness,
         },
     }
 
