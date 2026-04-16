@@ -819,8 +819,20 @@ export async function deleteFeedbackAttachment(feedbackId: string, filename: str
 }
 
 // ── Job Alerts ──────────────────────────────────────────────────────────────
-export async function getAlerts(): Promise<{ items: AlertConfig[] }> {
-  return request<{ items: AlertConfig[] }>("/alerts");
+// F220(A): backend now returns canonical pagination envelope
+// `{items,total,page,page_size,total_pages}`. Callers still destructuring
+// only `items` keep working; pagination-aware callers get the counts.
+export async function getAlerts(
+  opts?: { page?: number; page_size?: number }
+): Promise<{
+  items: AlertConfig[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}> {
+  const q = buildQuery({ page: opts?.page, page_size: opts?.page_size });
+  return request(`/alerts${q}`);
 }
 
 export async function createAlert(data: {

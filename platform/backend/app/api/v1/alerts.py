@@ -6,9 +6,9 @@ import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -96,9 +96,39 @@ class AlertConfigUpdate(BaseModel):
 
 
 @router.get("")
-async def list_alerts(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_alerts(
+    # Regression finding 220(A): previous signature declared zero Query(...)
+    # params, so `?type=bogus`, `?limit=-1`, `?limit=999999`, `?junk=x`
+    # all silently dropped and returned the identical body (FastAPI drops
+    # unknown query params by default). Worse, the response envelope was
+    # `{"items":[...]}` with no `total`/`page`/`page_size`/`total_pages`,
+    # so a user with many alert configs could not page back through them.
+    # WHERE user_id = user.id already scopes to the caller's own rows,
+    # so the "unbounded dump" vector is narrower here than on F217
+    # (scan-logs dumps 236k rows across all users) — but the same
+    # envelope-drift and silent-drop class applies.
+    #
+    # Fix: declare canonical page/page_size with bounds (matches F205 on
+    # /applications, F217 on /scan-logs, F108 on /rules). Unknown params
+    # still silently drop without forbid_extra middleware, but typed
+    # params now 422 on typos instead of silently being ignored.
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Cheap COUNT — each user's alert set is small; no concern about
+    # plan-cost here.
+    total = (await db.execute(
+        select(func.count(AlertConfig.id)).where(AlertConfig.user_id == user.id)
+    )).scalar() or 0
+
     result = await db.execute(
-        select(AlertConfig).where(AlertConfig.user_id == user.id).order_by(AlertConfig.created_at.desc())
+        select(AlertConfig)
+        .where(AlertConfig.user_id == user.id)
+        .order_by(AlertConfig.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     configs = result.scalars().all()
     return {
@@ -115,7 +145,11 @@ async def list_alerts(user: User = Depends(get_current_user), db: AsyncSession =
                 "created_at": c.created_at.isoformat(),
             }
             for c in configs
-        ]
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
     }
 
 
