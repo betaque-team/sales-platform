@@ -2,10 +2,11 @@
 
 import re
 import json
+from uuid import UUID
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, text, case, extract
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,10 +15,27 @@ from app.models.job import Job, JobDescription
 from app.models.company import Company
 from app.models.company_contact import CompanyContact
 from app.models.resume import Resume
+from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user
 
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
+
+
+async def _valid_cluster_names(db: AsyncSession) -> set[str]:
+    """Return the set of role cluster names that are currently configured.
+
+    F175 discovered that `/skill-gaps?role_cluster=nonexistent` silently
+    returned `{jobs_analyzed: 0, ...}` — an empty response that looked
+    identical to a legitimate "no jobs matched this cluster yet" outcome.
+    Rejecting unknown clusters at the handler boundary with 400 +
+    valid-cluster list makes the failure explicit and removes a mild
+    information-leak surface (attackers probing valid cluster names).
+    """
+    result = await db.execute(
+        select(RoleClusterConfig.name).where(RoleClusterConfig.is_active == True)  # noqa: E712
+    )
+    return {row[0] for row in result}
 
 # ── Tech skills dictionary for extraction ────────────────────────────────────
 SKILL_CATEGORIES = {
@@ -77,17 +95,41 @@ def _extract_skills_from_text(text_content: str) -> dict[str, int]:
 
 @router.get("/skill-gaps")
 async def skill_gaps(
+    # Regression finding 175: `resume_id` and `top_n` were being passed by
+    # the frontend resume-picker but the handler signature didn't declare
+    # them, so FastAPI silently dropped them and the response was always
+    # computed from `user.active_resume_id` with a hardcoded 50-skill cap.
+    # Clicking a non-active resume in the picker produced data from a
+    # completely different resume, labeled as if it came from the clicked
+    # one. Declaring the params here makes the feature actually work.
     role_cluster: str = "",
+    resume_id: UUID | None = None,
+    top_n: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Analyze skill gaps: what jobs demand vs what your resume has."""
-    # Get user's active resume skills
+    # F175: reject unknown cluster names instead of returning empty results.
+    if role_cluster:
+        valid = await _valid_cluster_names(db)
+        if role_cluster not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role_cluster. Must be one of: {', '.join(sorted(valid)) or '(none configured)'}",
+            )
+
+    # F175: pick the resume to analyse. Explicit `resume_id` overrides the
+    # user's active resume, but must belong to the caller (404 otherwise)
+    # — same ownership check as `/answer-book` to prevent a stranger's
+    # resume text from leaking via this endpoint's extracted-skill set.
     resume_skills: dict[str, int] = {}
-    if user.active_resume_id:
+    target_resume_id = resume_id or user.active_resume_id
+    if target_resume_id is not None:
         resume = (await db.execute(
-            select(Resume).where(Resume.id == user.active_resume_id, Resume.user_id == user.id)
+            select(Resume).where(Resume.id == target_resume_id, Resume.user_id == user.id)
         )).scalar_one_or_none()
+        if resume_id is not None and resume is None:
+            raise HTTPException(status_code=404, detail="Resume not found")
         if resume and resume.text_content:
             resume_skills = _extract_skills_from_text(resume.text_content)
 
@@ -113,9 +155,11 @@ async def skill_gaps(
             for skill in skills:
                 demand[skill] += 1
 
-    # Build skill gap analysis
+    # Build skill gap analysis — F175: honour the `top_n` param instead of
+    # the previous hardcoded 50. Also bounded to 200 at the Query layer so
+    # a caller can't force the server to build an enormous response.
     skills_data = []
-    for skill, jobs_mentioning in demand.most_common(50):
+    for skill, jobs_mentioning in demand.most_common(top_n):
         category = ALL_SKILLS.get(skill, "other")
         pct = round(jobs_mentioning / job_count * 100, 1) if job_count else 0
         have = skill in resume_skills
