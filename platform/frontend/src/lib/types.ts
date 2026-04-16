@@ -336,10 +336,50 @@ export interface JobFilters {
   page_size?: number;
 }
 
-export interface BulkActionPayload {
-  job_ids: string[];
-  action: "accept" | "reject" | "reset";
+// Regression finding 69: the bulk endpoint now accepts either a job_ids
+// list (existing behavior — preserved for per-page select-all) OR a
+// filter criteria object (new — for "Select all N matching"). Callers
+// pick one path and the server rejects ambiguous or empty requests.
+// Using a discriminated union guarantees the TS layer enforces the
+// same XOR at the callsite, so a caller can't accidentally send both
+// and rely on the backend to 400 it.
+export interface BulkFilterCriteria {
+  status?: string;
+  platform?: string;
+  geography_bucket?: string;
+  role_cluster?: string;
+  is_classified?: boolean;
+  search?: string;
+  company_id?: string;
 }
+
+// F69 follow-up — `action` must match the backend's `JobStatusLiteral`
+// (tightened in F99: `new | under_review | accepted | rejected | hidden
+// | archived`). Before this fix, the frontend sent verbs (`accept |
+// reject | reset`) that didn't match the Literal, and every bulk action
+// 422'd in prod with `literal_error` — silently, because the UI showed
+// the loading spinner, logged the error to the console, and invalidated
+// the query regardless. Aligning types here; the verb→status mapping
+// lives at the JobsPage call site so button labels stay human-friendly.
+export type BulkActionStatus =
+  | "new"
+  | "under_review"
+  | "accepted"
+  | "rejected"
+  | "hidden"
+  | "archived";
+
+export type BulkActionPayload =
+  | {
+      job_ids: string[];
+      action: BulkActionStatus;
+      filter?: never;
+    }
+  | {
+      filter: BulkFilterCriteria;
+      action: BulkActionStatus;
+      job_ids?: never;
+    };
 
 export interface ReviewPayload {
   decision: "accept" | "reject" | "skip";

@@ -153,6 +153,43 @@ class JobStatusUpdate(BaseModel):
     status: JobStatusLiteral
 
 
+# Regression finding 69: the bulk endpoint used to accept only `job_ids:
+# list[UUID]`, so "reject every job matching this filter" at 47k rows
+# meant pulling 1,911 pages of 25-row results client-side and POSTing
+# them back in the same shape — fragile, hard to audit, and each round
+# trip re-competed for the tab's network budget. The filter-based
+# branch lets callers send the same query params they'd send to
+# `GET /jobs` + an `action` and let the server enumerate the id set.
+# Either `job_ids` or `filter` must be present (but not both) — the
+# handler validates that and rejects ambiguous requests up front.
+#
+# Safety caps (enforced in the handler, not here, so the cap is a
+# single source of truth): the filter branch is capped at
+# `BULK_FILTER_MAX` rows per request so a misclick on "Select all N
+# matching" with no filters can't mass-mutate the entire 47k corpus
+# in one keystroke. Callers hitting the cap get a 400 with the
+# current matching count + the cap, so they can narrow before retry.
+class BulkFilterCriteria(BaseModel):
+    """Filter criteria for the filter-based bulk branch.
+
+    Mirrors the subset of `GET /jobs` query params that are meaningful
+    for a bulk action. Only fields the user *sees* in the table filter
+    UI are exposed — `sort_by`/`sort_dir`/`page` are not, because they
+    don't affect the matching id set. All fields are optional so the
+    caller can send exactly the filters that were active when they
+    clicked "Select all N matching"."""
+
+    status: str | None = None
+    platform: str | None = None
+    geography_bucket: str | None = None
+    role_cluster: str | None = None
+    is_classified: bool | None = None
+    search: str | None = None
+    company_id: UUID | None = None
+
+
 class BulkActionRequest(BaseModel):
-    job_ids: list[UUID]
+    # At least one must be set (XOR enforced in the handler):
+    job_ids: list[UUID] | None = None
+    filter: BulkFilterCriteria | None = None
     action: JobStatusLiteral
