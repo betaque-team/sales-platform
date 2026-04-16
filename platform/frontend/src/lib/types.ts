@@ -84,9 +84,12 @@ export interface JobDescription {
   id: string;
   job_id: string;
   raw_text: string;
-  parsed_requirements: string[];
-  parsed_nice_to_have: string[];
-  parsed_tech_stack: string[];
+  // Regression finding 168: previously declared `parsed_requirements`,
+  // `parsed_nice_to_have`, `parsed_tech_stack` — backend shipped them
+  // as always-empty arrays (no extraction ever wired up) and the UI
+  // rendered them behind `length > 0` guards that were never true.
+  // Fields removed from both sides of the contract; add back together
+  // with a real parser if that work lands.
 }
 
 export interface Review {

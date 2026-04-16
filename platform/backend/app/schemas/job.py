@@ -87,12 +87,17 @@ class JobOut(BaseModel):
 
 
 class JobDescriptionOut(BaseModel):
+    # Regression finding 168: `parsed_requirements`, `parsed_nice_to_have`,
+    # and `parsed_tech_stack` shipped as `list[str] = []` but were never
+    # populated — the handler hard-coded `[]` at both return sites and the
+    # pipeline had no extraction step. The frontend rendered them behind
+    # `length > 0` guards, so they never appeared on screen either. Removed
+    # rather than stubbed so the API contract reflects what the server
+    # actually produces. If bullet-point extraction lands later, add the
+    # fields back together with the parser that populates them.
     id: UUID | None = None
     job_id: UUID | None = None
     raw_text: str = ""
-    parsed_requirements: list[str] = []
-    parsed_nice_to_have: list[str] = []
-    parsed_tech_stack: list[str] = []
 
     model_config = {"from_attributes": True}
 

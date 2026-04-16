@@ -11,6 +11,7 @@ the endpoint, eliminating the provenance-spoofing footgun.
 
 import re
 import uuid
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, or_
@@ -41,17 +42,45 @@ def normalize_question_key(question: str) -> str:
 @router.get("")
 async def get_answer_book(
     category: str | None = None,
+    resume_id: UUID | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get merged answer book entries (base + active resume overrides)."""
-    # Load base entries (resume_id IS NULL)
+    """Get merged answer book entries (base + resume overrides).
+
+    Regression finding 172: `resume_id` was previously silently dropped
+    by FastAPI (the handler never declared it), so the frontend's
+    `?resume_id=X` calls returned the same response as the no-param
+    call — always merging base + user.active_resume_id. When a user
+    wanted to review overrides for a non-active resume (e.g. while
+    switching resumes, or in the resume-comparison flow), they had no
+    way to get them.
+
+    Contract now:
+      - `resume_id` omitted  → base + user.active_resume_id overrides
+        (unchanged, backward-compatible default)
+      - `resume_id` provided → base + that resume's overrides, after
+        verifying the caller owns the resume (404 otherwise — match
+        the existing pattern on `create_answer`)
+    """
+    # Resolve the effective override resume. None ⇒ "no overrides".
+    override_resume_id = None
+    if resume_id is not None:
+        resume = (await db.execute(
+            select(Resume.id).where(Resume.id == resume_id, Resume.user_id == user.id)
+        )).scalar_one_or_none()
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        override_resume_id = resume_id
+    elif user.active_resume_id:
+        override_resume_id = user.active_resume_id
+
     query = select(AnswerBookEntry).where(
         AnswerBookEntry.user_id == user.id,
         or_(
             AnswerBookEntry.resume_id.is_(None),
-            AnswerBookEntry.resume_id == user.active_resume_id,
-        ) if user.active_resume_id else AnswerBookEntry.resume_id.is_(None),
+            AnswerBookEntry.resume_id == override_resume_id,
+        ) if override_resume_id else AnswerBookEntry.resume_id.is_(None),
     )
     if category:
         query = query.where(AnswerBookEntry.category == category)
