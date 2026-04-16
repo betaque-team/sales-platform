@@ -426,3 +426,48 @@ async def update_client(
     item.company_name = client.company.name if client.company else None
     item.company_website = client.company.website if client.company else None
     return item
+
+
+@router.delete("/{client_id}", status_code=204)
+async def delete_client(
+    client_id: UUID,
+    request: Request,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a pipeline entry (admin-only).
+
+    Regression finding 173: previously the router only exposed PATCH for
+    stage changes, so accidentally-created entries and regression/test
+    probes accumulated indefinitely in the `disqualified` stage. The
+    soft-delete-via-stage workaround preserved sales history for audit
+    but provided no path to remove genuinely junk rows.
+
+    This endpoint is locked to admin (not admin+reviewer) so the normal
+    pipeline workflow still goes through PATCH — only an admin cleaning
+    up test data or mis-created leads can physically remove a row.
+    The action is logged via `log_action` so the deletion itself is
+    still traceable in the audit trail after the row is gone.
+    """
+    client = await db.get(PotentialClient, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    # Capture identity fields for the audit log BEFORE the row is gone.
+    snapshot = {
+        "client_id": str(client.id),
+        "company_id": str(client.company_id) if client.company_id else None,
+        "stage": client.stage,
+    }
+
+    await db.delete(client)
+    await db.commit()
+
+    await log_action(
+        db, user,
+        action="pipeline.delete",
+        resource="pipeline",
+        request=request,
+        metadata=snapshot,
+    )
+    return None

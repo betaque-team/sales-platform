@@ -541,7 +541,16 @@ async def get_ai_usage(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get current user's AI customization usage for today."""
+    """Get current user's AI customization usage for today.
+
+    Regression finding 170: previously the rate-limit counter counted
+    every `AICustomizationLog` row for today regardless of `success`.
+    With `ANTHROPIC_API_KEY` unset, `customize_resume()` returns an
+    error payload — the handler still logged a row and the counter
+    incremented, locking the user out after 10 failed calls they never
+    benefited from. Filter to `success=True` so the quota tracks
+    actual AI work completed.
+    """
     from app.models.resume import AICustomizationLog
     from app.config import get_settings
 
@@ -551,6 +560,7 @@ async def get_ai_usage(
         .where(
             AICustomizationLog.user_id == user.id,
             AICustomizationLog.created_at >= today_start,
+            AICustomizationLog.success == True,  # noqa: E712
         )
     )).scalar() or 0
 
@@ -592,7 +602,10 @@ async def customize_resume_for_job(
     job_id = body.job_id
     target_score = body.target_score
 
-    # Check daily limit
+    # Check daily limit. Regression finding 170: the quota now counts
+    # only `success=True` rows so failed AI calls (missing API key,
+    # upstream 5xx, timeout) don't burn the user's daily budget. Keeps
+    # the quota honest and lets clients retry after transient failures.
     settings = get_settings()
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     used_today = (await db.execute(
@@ -600,6 +613,7 @@ async def customize_resume_for_job(
         .where(
             AICustomizationLog.user_id == user.id,
             AICustomizationLog.created_at >= today_start,
+            AICustomizationLog.success == True,  # noqa: E712
         )
     )).scalar() or 0
 
@@ -668,18 +682,26 @@ async def customize_resume_for_job(
         target_score=target_score,
     )
 
-    # Log usage
+    # Log usage. Rows are recorded for BOTH successful and failed calls
+    # so operators can audit failures without losing visibility — but
+    # only successful rows count against the daily quota (see the
+    # rate-limit query above and the F170 docstring on get_ai_usage).
+    succeeded = not ai_result.get("error", False)
     log_entry = AICustomizationLog(
         user_id=user.id,
         resume_id=resume.id,
         job_id=job.id,
         input_tokens=ai_result.get("input_tokens", 0),
         output_tokens=ai_result.get("output_tokens", 0),
-        success=not ai_result.get("error", False),
+        success=succeeded,
     )
     db.add(log_entry)
     await db.commit()
 
+    # Reflect the same "successful calls only" semantics in the
+    # returned usage block so the UI doesn't lie to the user. A
+    # failed call leaves `used_today` unchanged.
+    delta = 1 if succeeded else 0
     return {
         "resume_id": str(resume.id),
         "job_id": str(job.id),
@@ -690,8 +712,8 @@ async def customize_resume_for_job(
         "improvement_notes": ai_result["improvement_notes"],
         "error": ai_result.get("error", False),
         "usage": {
-            "used_today": used_today + 1,
+            "used_today": used_today + delta,
             "daily_limit": settings.ai_daily_limit_per_user,
-            "remaining": max(0, settings.ai_daily_limit_per_user - used_today - 1),
+            "remaining": max(0, settings.ai_daily_limit_per_user - used_today - delta),
         },
     }

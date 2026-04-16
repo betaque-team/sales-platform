@@ -244,6 +244,29 @@ async def list_feedback(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """List feedback. Admin/super_admin see all, others see only their own."""
+    # Regression finding 162: filter params were being passed straight into the
+    # `where()` clauses with no validation — `?category=bug'+OR+1=1--` returned
+    # HTTP 200 (parameterised query absorbed it, so no SQLi), but invalid values
+    # still reached the DB and produced confusing `total: 0` responses that
+    # masked the typo from the caller. Rejecting unknown filter values with
+    # 422 gives the client a clear signal and denies attackers a useful
+    # zero-result probe.
+    if category is not None and category not in VALID_CATEGORIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid category. Must be one of: {', '.join(sorted(VALID_CATEGORIES))}",
+        )
+    if status is not None and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status. Must be one of: {', '.join(sorted(VALID_STATUSES))}",
+        )
+    if priority is not None and priority not in VALID_PRIORITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid priority. Must be one of: {', '.join(sorted(VALID_PRIORITIES))}",
+        )
+
     query = select(Feedback)
 
     if user.role not in ("admin", "super_admin"):

@@ -45,6 +45,27 @@ def _is_safe_url(value: str) -> bool:
     return stripped.startswith(_SAFE_SCHEMES)
 
 
+def strip_html_tags(raw: str | None) -> str:
+    """Return plain-text version of `raw` with all HTML tags + event attrs stripped.
+
+    Use this for fields rendered AS TEXT (not HTML) — e.g. feedback ticket
+    titles, comment bodies, ticket descriptions — where any markup is noise
+    and a stored `<img onerror=…>` would become XSS only if the frontend
+    ever `dangerouslySetInnerHTML`'d it. Normalising to plain text at the
+    API boundary removes that possibility regardless of the renderer.
+
+    Hard-drop tags (script, style, …) are removed WITH their subtree so
+    their text content doesn't survive. Every remaining tag is unwrapped,
+    keeping its visible text. Returns an empty string for None/empty input.
+    """
+    if not raw:
+        return ""
+    soup = BeautifulSoup(raw, "html.parser")
+    for tag in soup.find_all(list(_HARD_DROP_TAGS)):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=False)
+
+
 def sanitize_html(raw: str) -> str:
     """Return a safe subset of the given HTML.
 

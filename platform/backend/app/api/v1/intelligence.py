@@ -42,28 +42,32 @@ for cat, skills in SKILL_CATEGORIES.items():
 def _extract_skills_from_text(text_content: str) -> dict[str, int]:
     """Extract skill mentions from text, return {skill: count}.
 
-    Regression finding 167: the word-boundary threshold was `<= 3`,
-    which diverged from the ATS scoring engine's `<= 4` (see
-    `_ats_scoring._ATS_WORD_BOUNDARY_MAX_LEN`). 4-char skills like
-    `rust`, `nist`, `bash`, `helm`, `java`, `salt`, `flux` were
-    substring-matched here, counting `"trust"`, `"administrator"`,
-    `"bashful"`, `"helmholtz"`, `"javascript"` as occurrences. That
-    produced "73% of jobs demand Rust" style false signals on the
-    skill-gaps dashboard. Aligning the threshold with the ATS side
-    means `intelligence` and `_ats_scoring` disagree only on
-    keyword-set *membership*, not on *how* they match.
+    Regression finding 176: raising the threshold from `<=3` to `<=4`
+    (F167) eliminated the worst offenders (`rust`, `nist`, `bash`) but
+    left 5+ char tokens like `"scala"`, `"observability"`, `"cloud"`,
+    `"compliance"` in the substring branch — and "scala" still matched
+    "scalable", "observability" still caught shorter "observ..." stems,
+    "cloud" matched "cloudformation" double-counted, etc. The result
+    was systematic on-resume false positives for every user ("Yes, you
+    know scala!") that made the skill-gaps dashboard actively misleading.
+
+    Fix: always use a non-word-character boundary check
+    (negative lookbehind+lookahead on word chars) for every skill
+    regardless of length. This is stricter than a plain word-boundary
+    — word-boundary fails for tokens ending in non-word chars like
+    `c++` (no boundary between `+` and space) — but
+    lookbehind/lookahead on word chars gives us a proper "not
+    preceded/followed by a word char" gate that works for `c++`,
+    `ci/cd`, `tcp/ip`, and every plain-word token. Multi-word skills
+    like `"google cloud"` also work because only the outer boundaries
+    are anchored. No phantom false positives; no lost legitimate
+    matches.
     """
     text_lower = text_content.lower()
     found = {}
     for skill in ALL_SKILLS:
-        # Word boundary match for short skills (<=4 chars). Matches the
-        # ATS engine so a 4-char token like "rust" can't slip into
-        # substring mode and match "trust".
-        if len(skill) <= 4:
-            pattern = r'\b' + re.escape(skill) + r'\b'
-            count = len(re.findall(pattern, text_lower))
-        else:
-            count = text_lower.count(skill)
+        pattern = r'(?<!\w)' + re.escape(skill) + r'(?!\w)'
+        count = len(re.findall(pattern, text_lower))
         if count > 0:
             found[skill] = count
     return found
