@@ -42,12 +42,13 @@ async def list_runs(
     runs = result.scalars().all()
     items = [DiscoveryRunOut.model_validate(r) for r in runs]
 
+    # Regression finding 108: unified pagination keys
     return {
         "items": items,
         "total": total,
         "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
+        "page_size": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
     }
 
 
@@ -95,12 +96,13 @@ async def list_discovered_companies(
     companies = result.scalars().all()
     items = [DiscoveredCompanyOut.model_validate(c) for c in companies]
 
+    # Regression finding 108: unified pagination keys
     return {
         "items": items,
         "total": total,
         "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
+        "page_size": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
     }
 
 

@@ -200,3 +200,51 @@ async def list_backups():
             })
         items.append(entry)
     return {"backups": items, "count": len(items)}
+
+
+@router.get("/scan-errors", dependencies=[Depends(require_role("admin"))])
+async def list_scan_errors(
+    days: int = 7,
+    db: AsyncSession = Depends(get_db),
+):
+    """Regression finding 104: surface per-error detail from ScanLog.
+
+    Returns the most recent scan logs where `errors > 0` or
+    `error_message != ''`, grouped by platform/source, so admins can
+    diagnose silently-failing boards without tailing container logs.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await db.execute(
+        select(ScanLog)
+        .where(ScanLog.started_at >= cutoff)
+        .where((ScanLog.errors > 0) | (ScanLog.error_message != ""))
+        .order_by(ScanLog.started_at.desc())
+        .limit(200)
+    )
+    errors = result.scalars().all()
+
+    items = []
+    for e in errors:
+        items.append({
+            "id": str(e.id),
+            "platform": e.platform,
+            "source": e.source,
+            "started_at": e.started_at.isoformat(),
+            "completed_at": e.completed_at.isoformat() if e.completed_at else None,
+            "errors": e.errors,
+            "error_message": e.error_message,
+            "jobs_found": e.jobs_found,
+            "duration_ms": e.duration_ms,
+        })
+
+    # Summary by platform
+    by_platform: dict[str, int] = {}
+    for item in items:
+        by_platform[item["platform"]] = by_platform.get(item["platform"], 0) + 1
+
+    return {
+        "items": items,
+        "total": len(items),
+        "by_platform": by_platform,
+        "days": days,
+    }

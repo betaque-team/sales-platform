@@ -27,7 +27,7 @@ class PotentialClient(Base):
 
     notes: Mapped[str] = mapped_column(default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     company: Mapped["Company"] = relationship()
     assignee: Mapped["User | None"] = relationship(foreign_keys=[assigned_to])
