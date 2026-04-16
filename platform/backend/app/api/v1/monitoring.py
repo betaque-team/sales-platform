@@ -174,6 +174,27 @@ async def trigger_backup(label: str = "manual"):
     return {"task_id": task.id, "status": "queued", "label": label}
 
 
+@router.post("/reclassify-jobs", dependencies=[Depends(require_role("admin"))])
+async def trigger_reclassify_jobs():
+    """Re-run role matching + geography + relevance scoring on every active job.
+
+    Regression finding 227: historical rows don't get re-classified
+    when the negative-signal lists in `_role_matching.py` are
+    updated (F91/F92/F227 all shipped keyword additions without a
+    follow-up reclassification pass). Admins can trigger this
+    endpoint post-deploy to wash stale classifications through the
+    current matcher. Uses the existing
+    `maintenance_task.reclassify_and_rescore` Celery task (see
+    workers/tasks/maintenance_task.py:132) — the only net-new piece
+    is this admin trigger surface. Admin-only because it touches
+    every active Job row (~13k at writing) and runs for ~30-60
+    seconds; should never be fired by unprivileged callers.
+    """
+    from app.workers.tasks.maintenance_task import reclassify_and_rescore
+    task = reclassify_and_rescore.delay()
+    return {"task_id": task.id, "status": "queued"}
+
+
 @router.get("/backups", dependencies=[Depends(require_role("admin"))])
 async def list_backups():
     """List available backups with manifest metadata."""

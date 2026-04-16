@@ -297,16 +297,48 @@ _SECURITY_NEGATIVE_TITLE_SIGNALS = frozenset([
 # `infra` cluster. Mostly revenue/marketing org roles whose titles
 # happen to contain "cloud" / "systems" / "network". Also: hardware
 # and mechanical engineering where the word "systems" overmatches.
+#
+# Regression finding 227 (extension): the tester's audit of 4,672
+# classified jobs found 315 user-visible rows at relevance ≥ 73 that
+# would correctly unclassify with an expanded negative list. Common
+# FPs: "Fund Monitoring" (finance), "HR Systems Engineer" (people
+# ops), "Recruiting Infrastructure Manager" (talent acquisition),
+# "UX Designer - Infrastructure" (design). Also: "human resources"
+# and "talent acquisition" were only in the security negative list
+# (F91) by copy-paste oversight — infra sees the same FPs.
 _INFRA_NEGATIVE_TITLE_SIGNALS = frozenset([
-    # Revenue / marketing
+    # Revenue / marketing (F92)
     "sales", "account executive", "account manager",
     "marketing", "customer success", "business development",
     "partner development", "go-to-market", "go to market",
     "demand generation", "revenue operations",
     "pre-sales", "pre sales", "presales", "solutions consultant",
-    # Hardware / mechanical — bare "systems engineer" FP class
+    # Hardware / mechanical (F92) — bare "systems engineer" FP class
     "hardware", "mechanical", "electrical", "quality systems",
     "semiconductor", "aerospace", "asic", "embedded hardware",
+    # Finance (F227) — "Fund Monitoring - Associate" etc.
+    "fund monitoring", "fund accounting",
+    # People ops (F227) — parity with _SECURITY_NEGATIVE_TITLE_SIGNALS
+    "human resources", "talent acquisition",
+    "hr compliance", "people compliance",
+    "recruiting infrastructure", "recruiting operations",
+    # Design (F227) — "UX Designer - Infrastructure"
+    "ux designer", "ui designer", "product designer",
+    "visual designer", "graphic designer",
+])
+
+# Regression finding 227: short tokens that must match with word
+# boundaries to avoid false negatives (e.g. "hr" in "share" /
+# "chair" / "thread", "ux" in "luxury" / "xux"). Tested separately
+# from the substring-match set because `in` is O(1) per token and
+# regex is O(n) per title — keep this set minimal.
+_INFRA_NEGATIVE_WORD_BOUNDARY = frozenset([
+    "hr",          # "Sr. HR Systems Engineer" but not "share" / "thread"
+    "ux",          # "UX Designer" but not "luxury"
+    "fund",        # "Fund Monitoring" but not "foundation"
+    "recruiter",   # "Recruiter, Infrastructure" (rarely used alone)
+    "recruiting",  # "Recruiting Coordinator" (substring-safe at 10 chars
+                   # but kept here so related "recruiter" stays grouped)
 ])
 
 
@@ -328,6 +360,21 @@ def _title_has_signal(text: str, signals: frozenset[str]) -> bool:
     return any(sig in text for sig in signals)
 
 
+def _title_has_word_boundary_signal(text: str, signals: frozenset[str]) -> bool:
+    """F227: word-boundary variant for short tokens (2-3 chars) that
+    would over-match with plain `in`.
+
+    Compiles one regex per call (tiny — typical signal set is <10
+    tokens) and tests against the already-lowercased title. Runs in
+    addition to `_title_has_signal` for sets that need both kinds
+    of matching (see `_is_excluded_from_infra`).
+    """
+    if not signals:
+        return False
+    pattern = r"\b(?:" + "|".join(re.escape(s) for s in signals) + r")\b"
+    return bool(re.search(pattern, text))
+
+
 def _is_excluded_from_security(norm_title: str) -> bool:
     """Regression finding 91: disqualify known non-security titles
     that happen to match a security keyword (mostly compliance-like).
@@ -338,8 +385,18 @@ def _is_excluded_from_security(norm_title: str) -> bool:
 def _is_excluded_from_infra(norm_title: str) -> bool:
     """Regression finding 92: disqualify cloud-sales / hardware
     titles that hit an infra keyword.
+
+    F227 extension: also check word-boundary short tokens (`hr`, `ux`,
+    `fund`, etc.) that would produce false negatives if matched via
+    substring `in` (e.g. "hr" would fire on "share", "chair",
+    "thread"). Both sets are checked in order — substring first
+    (cheap `in` per token), regex word-boundary second (one compile
+    per call).
     """
-    return _title_has_signal(norm_title, _INFRA_NEGATIVE_TITLE_SIGNALS)
+    return (
+        _title_has_signal(norm_title, _INFRA_NEGATIVE_TITLE_SIGNALS)
+        or _title_has_word_boundary_signal(norm_title, _INFRA_NEGATIVE_WORD_BOUNDARY)
+    )
 
 
 def load_cluster_config_sync(session) -> dict:
