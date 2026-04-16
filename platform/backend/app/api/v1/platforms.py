@@ -1,5 +1,6 @@
 """Platform monitoring API endpoints."""
 
+from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, case
@@ -13,6 +14,17 @@ from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.utils.company_name import looks_like_junk_company_name
 from app.utils.scan_lock import acquire_scan_lock, release_scan_lock
+
+# Regression finding 191: `?platform=` on the list endpoints wasn't
+# validated, so typos (`GREENHOUSE`, `grenhouse`) silently returned
+# `{"items":[],"total":0}` — same F128 pattern that was already fixed
+# on feedback list (F162). The platform set is fixed in code
+# (BaseFetcher subclasses in app/fetchers/) so Literal is the right
+# tool.
+PlatformFilter = Literal[
+    "greenhouse", "lever", "ashby", "workable", "bamboohr",
+    "smartrecruiters", "jobvite", "recruitee", "wellfound", "himalayas",
+]
 
 router = APIRouter(prefix="/platforms", tags=["platforms"])
 
@@ -94,7 +106,10 @@ async def list_platforms(
 
 @router.get("/boards")
 async def list_boards(
-    platform: str | None = None,
+    # F191: Literal-typed so FastAPI 422s typos like `GREENHOUSE`
+    # (wrong case) or `grenhouse` (typo) instead of silently returning
+    # an empty list.
+    platform: PlatformFilter | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -352,14 +367,24 @@ async def trigger_discovery_scan(
 
 @router.get("/scan/status/{task_id}")
 async def get_scan_status(
-    task_id: str,
+    # Regression finding 190: previously `task_id: str` so callers
+    # could pass any garbage string ("not-a-real-task", SQL fragments,
+    # empty-string path segment) and Celery's default behaviour for
+    # unknown ids is `PENDING` — indistinguishable from a real queued
+    # task. A frontend polling on a dropped task_id would spin
+    # forever. Typing the param as UUID kicks non-UUID inputs out
+    # with a structured 422 at parse time; legitimate task_ids are
+    # always UUIDs (every scan endpoint returns `str(task.id)` from
+    # Celery, which uses uuid4 by default).
+    task_id: UUID,
     user: User = Depends(require_role("admin")),
 ):
     """Check the status of a scan task."""
     from app.workers.celery_app import celery_app
-    result = celery_app.AsyncResult(task_id)
+    task_id_str = str(task_id)
+    result = celery_app.AsyncResult(task_id_str)
     response = {
-        "task_id": task_id,
+        "task_id": task_id_str,
         "status": result.status,
     }
     if result.ready():
@@ -369,7 +394,8 @@ async def get_scan_status(
 
 @router.get("/scan-logs")
 async def get_scan_logs(
-    platform: str | None = None,
+    # F191: same validation as /boards — typos no longer return empty.
+    platform: PlatformFilter | None = None,
     limit: int = 50,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
