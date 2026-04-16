@@ -49,9 +49,20 @@ GeographyBucketFilter = Literal["global_remote", "usa_only", "uae_only"]
 # time. Was originally declared in `api/v1/platforms.py:24`; moved here
 # to avoid duplicate Literals drifting as new fetchers are added. Both
 # `platforms.py` and `jobs.py` import this one definition.
+#
+# F218 follow-up (same round): the initial Literal enumerated only the 10
+# ATS fetchers documented in CLAUDE.md and missed the four aggregator
+# fetchers that were added later (`linkedin`, `remoteok`, `remotive`,
+# `weworkremotely`) — all of which DO write to `Job.platform` and have
+# live rows (linkedin 1.6k, weworkremotely 391, remoteok 197, remotive 25).
+# Shipping the narrow list would have 422'd `?platform=linkedin` on the
+# frontend's real dropdown, breaking 2.2k rows of visible jobs. The source
+# of truth is the `PLATFORM` class-attribute on every `BaseFetcher`
+# subclass in `app/fetchers/` — keep this tuple aligned with that.
 PlatformFilter = Literal[
     "greenhouse", "lever", "ashby", "workable", "bamboohr",
     "smartrecruiters", "jobvite", "recruitee", "wellfound", "himalayas",
+    "linkedin", "remoteok", "remotive", "weworkremotely",
 ]
 
 

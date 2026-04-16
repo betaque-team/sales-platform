@@ -29,21 +29,31 @@ const STATUS_OPTIONS: { value: JobStatus | ""; label: string }[] = [
   { value: "expired", label: "Expired" },
 ];
 
+// F218 (Round 31 follow-up): backend `PlatformFilter` Literal in
+// `platform/backend/app/schemas/job.py` rejects any value outside the set
+// of fetcher `PLATFORM` attributes. The previous dropdown listed `indeed`,
+// `builtin`, `career_page` — none of which are real fetchers — and was
+// missing `bamboohr`, `smartrecruiters`, `jobvite`, `recruitee`. Pre-F218
+// the backend silently returned `total:0` for invalid values and missing
+// ones were un-filterable; post-F218 invalid values 422. This list is the
+// one source of truth for UX and must stay aligned with the backend
+// Literal (14 entries; see comment in schemas/job.py).
 const PLATFORM_OPTIONS = [
   { value: "", label: "All Platforms" },
   { value: "greenhouse", label: "Greenhouse" },
   { value: "lever", label: "Lever" },
   { value: "ashby", label: "Ashby" },
   { value: "workable", label: "Workable" },
-  { value: "linkedin", label: "LinkedIn" },
+  { value: "bamboohr", label: "BambooHR" },
+  { value: "smartrecruiters", label: "SmartRecruiters" },
+  { value: "jobvite", label: "Jobvite" },
+  { value: "recruitee", label: "Recruitee" },
   { value: "wellfound", label: "Wellfound" },
-  { value: "indeed", label: "Indeed" },
-  { value: "builtin", label: "Built In" },
   { value: "himalayas", label: "Himalayas" },
+  { value: "linkedin", label: "LinkedIn" },
   { value: "weworkremotely", label: "WeWorkRemotely" },
   { value: "remoteok", label: "RemoteOK" },
   { value: "remotive", label: "Remotive" },
-  { value: "career_page", label: "Career Page" },
 ];
 
 const GEOGRAPHY_OPTIONS = [
