@@ -230,6 +230,13 @@ _CURRENCY_CODES = (
     "jpy", "inr", "cny", "krw", "zar", "brl", "mxn", "clp",
     "chf", "pln", "czk", "huf", "ron", "bgn", "hrk", "try",
     "dkk", "sek", "nok", "isk", "ils", "aed", "sar",
+    # Regression finding 158: APAC codes added to close enumeration
+    # gaps the F66 fix left open. Philippines (PHP), Thailand (THB),
+    # Indonesia (IDR), Vietnam (VND), Pakistan (PKR), Taiwan (TWD)
+    # were all being reported as USD in the "top paying" rollup, e.g.
+    # "IDR 150,000,000" → misread as $150M. Same defence as F66:
+    # detect them so the rollups can exclude rather than fake-convert.
+    "php", "thb", "idr", "vnd", "pkr", "twd",
 )
 _CURRENCY_CODE_RE = re.compile(r"\b(" + "|".join(_CURRENCY_CODES) + r")\b")
 
@@ -270,15 +277,25 @@ def _parse_salary(salary_str: str) -> dict | None:
         return None
 
     nums = [float(n) for n in numbers]
-    # Normalize: if numbers look like thousands (e.g., "150" means 150k)
-    nums = [n * 1000 if n < 1000 else n for n in nums]
 
-    # Detect period
+    # Regression finding 158: detect the period BEFORE applying the
+    # "< 1000 means thousands" heuristic. Previously the heuristic
+    # ran first, so a posting like "$50/hr" became 50 → 50,000 (the
+    # shorthand expansion) → × 2080 = $104,000,000/yr. Real-world
+    # US examples in the DB were being rolled up as 6–9-figure USD
+    # medians and dragging the `overall` average with them. The
+    # shorthand convention ("150" meaning 150k) only applies to
+    # annual salaries; hourly and monthly values are already in the
+    # correct unit as written.
     period = "year"
     if "/hr" in s or "hour" in s or "/h" in s:
         period = "hour"
     elif "/mo" in s or "month" in s:
         period = "month"
+
+    if period == "year":
+        # Annual shorthand: "150" → 150k, "150000" → stays 150k.
+        nums = [n * 1000 if n < 1000 else n for n in nums]
 
     # Normalize to annual
     if period == "hour":

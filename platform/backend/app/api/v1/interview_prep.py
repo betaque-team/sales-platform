@@ -1,9 +1,10 @@
 """Interview preparation AI API."""
 
+import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,12 @@ router = APIRouter(prefix="/interview-prep", tags=["interview-prep"])
 
 
 class InterviewPrepRequest(BaseModel):
+    # F157: reject unknown fields so a stray `resumeId` (camelCase) or
+    # a copy-pasted `tone=` from the cover-letter client doesn't get
+    # silently ignored. Pydantic v2's default is to accept-and-ignore,
+    # which hides contract bugs on both sides.
+    model_config = ConfigDict(extra="forbid")
+
     # F181: type as `UUID` (not `str`) so non-UUID input 422s at parse
     # time instead of bubbling a SQL cast error through as 500.
     job_id: UUID
@@ -68,8 +75,14 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
     if not resume.text_content:
         raise HTTPException(400, "Resume text not extracted yet.")
 
+    # F157: same event-loop blocking problem as cover-letter — the
+    # Anthropic call underneath is synchronous and can take 5-30s, so
+    # a handful of concurrent requests would otherwise starve every
+    # other endpoint served by the same worker. Run it on the default
+    # asyncio threadpool.
     from app.workers.tasks._interview_prep import generate_interview_prep
-    result = generate_interview_prep(
+    result = await asyncio.to_thread(
+        generate_interview_prep,
         resume_text=resume.text_content,
         job_title=job.title,
         company_name=company_name,
