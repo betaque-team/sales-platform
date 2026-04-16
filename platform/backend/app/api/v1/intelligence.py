@@ -2,6 +2,7 @@
 
 import re
 import json
+from typing import Literal
 from uuid import UUID
 from collections import Counter
 from datetime import datetime, timezone, timedelta
@@ -313,7 +314,14 @@ def _parse_salary(salary_str: str) -> dict | None:
 @router.get("/salary")
 async def salary_insights(
     role_cluster: str = "",
-    geography: str = "",
+    # Regression finding 197: `geography` was a bare `str = ""` that
+    # silently accepted garbage (`?geography=MARS` → HTTP 200 empty
+    # dicts, indistinguishable from "this slice has no data"). The
+    # backing column only stores the three values below plus NULL/""
+    # for unclassified, so Literal-validate at the route boundary.
+    # `""` stays as the "no filter" sentinel to preserve existing
+    # caller behaviour.
+    geography: Literal["", "global_remote", "usa_only", "uae_only"] = "",
     include_other: bool = False,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -329,6 +337,19 @@ async def salary_insights(
     apply) — pass `include_other=true` to get the old full-DB view, e.g.
     for admin diagnostics.
     """
+    # F197: same cluster-validation path as `/skill-gaps` (F175) —
+    # reject unknown cluster names instead of silently returning
+    # empty rollups. Can't Literal-type this one because clusters
+    # are admin-configurable via `/role-clusters` and grow over time,
+    # so we have to hit the config table.
+    if role_cluster:
+        valid = await _valid_cluster_names(db)
+        if role_cluster not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role_cluster. Must be one of: {', '.join(sorted(valid)) or '(none configured)'}",
+            )
+
     query = select(Job.salary_range, Job.role_cluster, Job.geography_bucket, Job.title, Company.name).join(
         Company, Job.company_id == Company.id
     ).where(Job.salary_range != "", Job.salary_range.isnot(None))
@@ -670,7 +691,17 @@ async def networking_suggestions(
         # Specific job: find contacts at that company
         job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
         if not job:
-            return {"suggestions": [], "error": "Job not found"}
+            # Regression finding 196: was `return {"suggestions": [],
+            # "error": "Job not found"}` with HTTP 200. Clients that
+            # only check the HTTP code (most fetch-based React code
+            # does) treated that as success and rendered "0
+            # suggestions" silently. Raise a proper 404 so the caller
+            # gets the same signal as every other `/{id}` lookup in
+            # the app (applications `/applications/by-job/{id}` →
+            # 404, jobs `/{id}` → 404, etc.). Detail key matches the
+            # `{detail: string}` envelope the frontend already
+            # surfaces in error toasts.
+            raise HTTPException(status_code=404, detail="Job not found")
 
         contacts = (await db.execute(
             select(CompanyContact, Company.name)
