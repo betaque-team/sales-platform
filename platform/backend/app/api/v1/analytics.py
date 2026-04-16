@@ -59,19 +59,52 @@ async def overview(
     # got silently dropped can detect it via the round-tripped value vs
     # their intended request. Same F179 bounds as `/analytics/trends`.
     days: int = Query(30, ge=1, le=365),
+    # Regression finding 221: `role_cluster` is the other common filter
+    # axis for a landing-card analytics view ("Infra-only numbers" /
+    # "Security-only numbers") but overview used to ignore it outright.
+    # Runtime-validated against the live cluster catalog because clusters
+    # are admin-configurable (same treatment as `/jobs` F218). `relevant`
+    # is allow-listed as the UI pseudo-value meaning "all clusters marked
+    # is_relevant=True" (matches F106). Unknown values 400 with the
+    # allowed list in the detail.
+    role_cluster: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
+    # F221: validate role_cluster BEFORE running any queries so we
+    # don't pointlessly query the DB to tell the caller their param
+    # was garbage. Same shape as the helper in jobs.py/export.py.
+    cluster_filter: list[str] | None = None
+    if role_cluster:
+        catalog = set(
+            (await db.execute(select(RoleClusterConfig.name))).scalars().all()
+        ) | {"relevant"}
+        if role_cluster not in catalog:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid role_cluster. Must be one of: "
+                + ", ".join(sorted(catalog)),
+            )
+        if role_cluster == "relevant":
+            cluster_filter = await _get_relevant_clusters(db)
+        else:
+            cluster_filter = [role_cluster]
+
     # Job counts by status, windowed to jobs first_seen_at >= cutoff.
-    status_counts: dict[str, int] = {}
-    result = await db.execute(
-        select(Job.status, func.count(Job.id))
-        .where(Job.first_seen_at >= cutoff)
-        .group_by(Job.status)
+    # F221: apply the cluster filter too when set — without it, "Infra
+    # only" would have shown the lifetime all-cluster totals.
+    status_q = select(Job.status, func.count(Job.id)).where(
+        Job.first_seen_at >= cutoff
     )
-    for row in result:
+    if cluster_filter is not None:
+        status_q = status_q.where(Job.role_cluster.in_(cluster_filter))
+    status_q = status_q.group_by(Job.status)
+
+    status_counts: dict[str, int] = {}
+    for row in await db.execute(status_q):
         status_counts[row[0]] = row[1]
 
     total_jobs = sum(status_counts.values())
@@ -82,6 +115,10 @@ async def overview(
     # jobs.company_id) which undercounts by excluding companies that
     # don't currently have a job row. Kept as lifetime totals regardless
     # of `days` per the F214 rationale above.
+    #
+    # F221: same rationale for role_cluster — "companies tracked in
+    # total" isn't cluster-scoped; a company hiring both DevOps and
+    # Security counts once either way.
     total_companies = (await db.execute(select(func.count(Company.id)))).scalar() or 0
     pipeline_count = (await db.execute(select(func.count(PotentialClient.id)))).scalar() or 0
 
@@ -90,12 +127,14 @@ async def overview(
     reviewed_count = accepted_count + rejected_count
     acceptance_rate = (accepted_count / reviewed_count) if reviewed_count > 0 else 0
 
-    avg_relevance = (await db.execute(
-        select(func.avg(Job.relevance_score)).where(
-            Job.relevance_score > 0,
-            Job.first_seen_at >= cutoff,
-        )
-    )).scalar() or 0
+    # F221: avg_relevance is a flow metric so it honors BOTH filters.
+    avg_q = select(func.avg(Job.relevance_score)).where(
+        Job.relevance_score > 0,
+        Job.first_seen_at >= cutoff,
+    )
+    if cluster_filter is not None:
+        avg_q = avg_q.where(Job.role_cluster.in_(cluster_filter))
+    avg_relevance = (await db.execute(avg_q)).scalar() or 0
 
     return {
         # F214: echo the window so a caller can detect silent-drop by
@@ -104,6 +143,10 @@ async def overview(
         # include the param" case where they relied on a default they
         # assumed was different.
         "days": days,
+        # F221: echo the filter too — `null` vs. a specific cluster
+        # lets the caller confirm their request was received the way
+        # they intended.
+        "role_cluster": role_cluster,
         "total_jobs": total_jobs,
         "by_status": status_counts,
         "total_companies": total_companies,
