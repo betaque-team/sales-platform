@@ -13,6 +13,7 @@ from app.models.pipeline import PotentialClient
 from app.models.pipeline_stage import PipelineStage
 from app.models.company import Company
 from app.models.job import Job
+from app.models.resume import Resume
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.pipeline import (
@@ -375,11 +376,19 @@ async def update_client(
         client.stage = body.stage
     if body.priority is not None:
         client.priority = body.priority
+    # Regression finding 111: validate FK references before commit so a
+    # non-existent UUID returns 404 instead of a raw 500 IntegrityError.
     if body.assigned_to is not None:
+        if (await db.get(User, body.assigned_to)) is None:
+            raise HTTPException(status_code=404, detail="assigned_to user not found")
         client.assigned_to = body.assigned_to
     if body.resume_id is not None:
+        if (await db.get(Resume, body.resume_id)) is None:
+            raise HTTPException(status_code=404, detail="resume_id not found")
         client.resume_id = body.resume_id
     if body.applied_by is not None:
+        if (await db.get(User, body.applied_by)) is None:
+            raise HTTPException(status_code=404, detail="applied_by user not found")
         client.applied_by = body.applied_by
     if body.notes is not None:
         client.notes = body.notes

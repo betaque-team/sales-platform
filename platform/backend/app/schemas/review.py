@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import UUID
@@ -5,7 +6,10 @@ from uuid import UUID
 
 class ReviewCreate(BaseModel):
     job_id: UUID
-    decision: str  # accepted | rejected | skipped
+    # Regression finding 110: constrain to the three values the frontend
+    # actually sends. The endpoint normalizes accept→accepted etc., so
+    # accept any garbage string allowed arbitrary data into Review.decision.
+    decision: Literal["accept", "reject", "skip"]
     comment: str = ""
     tags: list[str] = []
 
