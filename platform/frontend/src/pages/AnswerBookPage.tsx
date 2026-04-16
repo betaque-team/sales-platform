@@ -187,10 +187,17 @@ export function AnswerBookPage() {
       {/* Add entry form */}
       {showAdd && (
         <div className="rounded-lg border border-primary-200 bg-primary-50 p-4 space-y-3">
+          {/* Regression finding 81: bare <label> elements weren't associated with
+              their controls, so screen readers announced the inputs without
+              context. Pair each label with htmlFor + id on the corresponding
+              input/select/textarea. */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+              <label htmlFor="answer-new-category" className="block text-xs font-medium text-gray-600 mb-1">
+                Category
+              </label>
               <select
+                id="answer-new-category"
                 value={newCat}
                 onChange={(e) => setNewCat(e.target.value as AnswerCategory)}
                 className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm"
@@ -206,8 +213,11 @@ export function AnswerBookPage() {
             </div>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Question</label>
+            <label htmlFor="answer-new-question" className="block text-xs font-medium text-gray-600 mb-1">
+              Question
+            </label>
             <input
+              id="answer-new-question"
               value={newQ}
               onChange={(e) => setNewQ(e.target.value)}
               placeholder="e.g., What is your email address?"
@@ -215,8 +225,11 @@ export function AnswerBookPage() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Answer</label>
+            <label htmlFor="answer-new-answer" className="block text-xs font-medium text-gray-600 mb-1">
+              Answer
+            </label>
             <textarea
+              id="answer-new-answer"
               value={newA}
               onChange={(e) => setNewA(e.target.value)}
               rows={2}
@@ -284,12 +297,16 @@ export function AnswerBookPage() {
                         <button
                           onClick={() => updateMutation.mutate({ id: entry.id, answer: editAnswer })}
                           className="rounded p-1.5 text-green-600 hover:bg-green-50"
+                          aria-label="Save answer"
+                          title="Save"
                         >
                           <Save className="h-4 w-4" />
                         </button>
                         <button
                           onClick={() => setEditingId(null)}
                           className="rounded p-1.5 text-gray-400 hover:bg-gray-100"
+                          aria-label="Cancel edit"
+                          title="Cancel"
                         >
                           <X className="h-4 w-4" />
                         </button>
@@ -304,6 +321,8 @@ export function AnswerBookPage() {
                     <button
                       onClick={() => { setEditingId(entry.id); setEditAnswer(entry.answer); }}
                       className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                      aria-label="Edit answer"
+                      title="Edit answer"
                     >
                       <Edit3 className="h-4 w-4" />
                     </button>

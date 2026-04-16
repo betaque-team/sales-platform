@@ -1,7 +1,7 @@
 """Admin user management API endpoints."""
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models.user import User
 from app.api.deps import require_role
 from app.schemas.user import UserOut, UserUpdate
+from app.utils.audit import log_action
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -54,6 +55,7 @@ async def list_users(
 async def update_user(
     user_id: UUID,
     body: UserUpdate,
+    request: Request,
     admin: User = Depends(require_role("super_admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -91,6 +93,14 @@ async def update_user(
     await db.commit()
     await db.refresh(target)
 
+    await log_action(
+        db, admin,
+        action="user.update",
+        resource="user",
+        request=request,
+        metadata={"target_user_id": str(user_id), "fields": list(body.model_dump(exclude_unset=True).keys())},
+    )
+
     return {
         "id": str(target.id),
         "email": target.email,
@@ -103,6 +113,7 @@ async def update_user(
 @router.delete("/{user_id}")
 async def deactivate_user(
     user_id: UUID,
+    request: Request,
     admin: User = Depends(require_role("super_admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -126,12 +137,22 @@ async def deactivate_user(
 
     target.is_active = False
     await db.commit()
+
+    await log_action(
+        db, admin,
+        action="user.deactivate",
+        resource="user",
+        request=request,
+        metadata={"target_user_id": str(user_id), "email": target.email},
+    )
+
     return {"ok": True, "message": f"User {target.email} deactivated (data preserved)"}
 
 
 @router.post("/{user_id}/reset-password")
 async def admin_reset_password(
     user_id: UUID,
+    request: Request,
     admin: User = Depends(require_role("super_admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -149,6 +170,14 @@ async def admin_reset_password(
     target.password_reset_token = None
     target.password_reset_expires = None
     await db.commit()
+
+    await log_action(
+        db, admin,
+        action="user.password_reset",
+        resource="user",
+        request=request,
+        metadata={"target_user_id": str(user_id), "email": target.email},
+    )
 
     return {
         "ok": True,

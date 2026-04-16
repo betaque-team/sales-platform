@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -62,19 +62,68 @@ export function ReviewQueuePage() {
     },
   });
 
-  const handleReview = (decision: "accept" | "reject" | "skip") => {
-    if (!currentJob) return;
-    // Regression finding 73: only send rejection tags when the decision
-    // is "reject". Previously the payload shipped selectedTags regardless
-    // of decision, and the backend persisted them blindly — "accepted"
-    // jobs ended up with rejection-reason tags attached.
-    const tags = decision === "reject" ? selectedTags : [];
-    reviewMutation.mutate({
-      jobId: currentJob.id,
-      payload: { decision, comment, tags },
-      decision,
-    });
-  };
+  const currentJob = queue[currentIndex] ?? queue[0];
+
+  const handleReview = useCallback(
+    (decision: "accept" | "reject" | "skip") => {
+      if (!currentJob) return;
+      // Regression finding 73: only send rejection tags when the decision
+      // is "reject". Previously the payload shipped selectedTags regardless
+      // of decision, and the backend persisted them blindly — "accepted"
+      // jobs ended up with rejection-reason tags attached.
+      const tags = decision === "reject" ? selectedTags : [];
+      reviewMutation.mutate({
+        jobId: currentJob.id,
+        payload: { decision, comment, tags },
+        decision,
+      });
+    },
+    [currentJob, selectedTags, comment, reviewMutation],
+  );
+
+  // Regression finding 51: keyboard shortcuts for the review-queue-of-one
+  // workflow. Guarded when focus is inside an input/textarea so typing a
+  // comment doesn't accidentally fire an action.
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      switch (e.key.toLowerCase()) {
+        case "a":
+          handleReview("accept");
+          break;
+        case "r":
+          handleReview("reject");
+          break;
+        case "s":
+          handleReview("skip");
+          break;
+        case "j":
+        case "arrowright":
+          if (currentIndex < queue.length - 1) {
+            setCurrentIndex(currentIndex + 1);
+            setComment("");
+            setSelectedTags([]);
+          }
+          break;
+        case "k":
+        case "arrowleft":
+          if (currentIndex > 0) {
+            setCurrentIndex(currentIndex - 1);
+            setComment("");
+            setSelectedTags([]);
+          }
+          break;
+      }
+    },
+    [currentIndex, queue.length, handleReview],
+  );
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
 
   if (isLoading) {
     return (
@@ -104,7 +153,6 @@ export function ReviewQueuePage() {
     );
   }
 
-  const currentJob = queue[currentIndex] ?? queue[0];
   const progress = queue.length > 0 ? ((currentIndex + 1) / queue.length) * 100 : 0;
 
   return (
@@ -114,6 +162,9 @@ export function ReviewQueuePage() {
           <h1 className="text-2xl font-bold text-gray-900">Review Queue</h1>
           <p className="mt-1 text-sm text-gray-500">
             {queue.length} jobs awaiting review
+            <span className="ml-2 text-xs text-gray-400">
+              Keys: A accept · R reject · S skip · J/K navigate
+            </span>
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-500">
@@ -201,14 +252,24 @@ export function ReviewQueuePage() {
 
           <div className="border-t border-gray-200 pt-4">
             <div className="mb-3">
-              <label className="label mb-1.5">Rejection Tags (optional)</label>
-              <div className="flex flex-wrap gap-1.5">
+              {/* Regression finding 74: rejection tag pills are radio-like toggles.
+                  Wrap in role="group" and expose aria-pressed so assistive tech
+                  can announce which reasons are currently selected. */}
+              <label id="rejection-tags-label" className="label mb-1.5">
+                Rejection Tags (optional)
+              </label>
+              <div
+                role="group"
+                aria-labelledby="rejection-tags-label"
+                className="flex flex-wrap gap-1.5"
+              >
                 {REJECTION_TAGS.map((tag) => {
                   const active = selectedTags.includes(tag.value);
                   return (
                     <button
                       key={tag.value}
                       type="button"
+                      aria-pressed={active}
                       onClick={() =>
                         setSelectedTags((prev) =>
                           active ? prev.filter((t) => t !== tag.value) : [...prev, tag.value]
@@ -227,8 +288,11 @@ export function ReviewQueuePage() {
               </div>
             </div>
 
-            <label className="label">Comment (optional)</label>
+            <label htmlFor="review-comment" className="label">
+              Comment (optional)
+            </label>
             <textarea
+              id="review-comment"
               className="input min-h-[60px] resize-y mb-4"
               placeholder="Add a note about this job..."
               value={comment}

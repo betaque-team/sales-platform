@@ -2,7 +2,7 @@
 
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.schemas.pipeline import (
     PIPELINE_MAX_PRIORITY,
     PIPELINE_MAX_NOTES_LENGTH,
 )
+from app.utils.audit import log_action
 
 # Default stages seeded on first access
 DEFAULT_STAGES = [
@@ -116,6 +117,7 @@ async def list_stages(
 @router.post("/stages", status_code=201)
 async def create_stage(
     body: StageCreate,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -139,6 +141,12 @@ async def create_stage(
     db.add(stage)
     await db.commit()
     await db.refresh(stage)
+
+    await log_action(
+        db, user, action="pipeline.stage_create", resource="pipeline_stage",
+        request=request, metadata={"stage_id": str(stage.id), "key": body.key},
+    )
+
     return {"ok": True, "id": str(stage.id)}
 
 
@@ -299,6 +307,7 @@ async def get_pipeline(
 @router.post("", status_code=201)
 async def create_pipeline_entry(
     body: PipelineCreateRequest,
+    request: Request,
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -333,6 +342,14 @@ async def create_pipeline_entry(
     except Exception:
         pass
 
+    await log_action(
+        db, user,
+        action="pipeline.create",
+        resource="pipeline",
+        request=request,
+        metadata={"client_id": str(client.id), "company_id": body.company_id, "stage": body.stage},
+    )
+
     return {"ok": True, "id": str(client.id), "company_name": company.name}
 
 
@@ -353,6 +370,7 @@ async def get_client(client_id: UUID, user: User = Depends(get_current_user), db
 @router.patch("/{client_id}", response_model=PipelineItemOut)
 async def update_client(
     client_id: UUID, body: PipelineUpdate,
+    request: Request,
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -395,6 +413,15 @@ async def update_client(
 
     await db.commit()
     await db.refresh(client)
+
+    await log_action(
+        db, user,
+        action="pipeline.update",
+        resource="pipeline",
+        request=request,
+        metadata={"client_id": str(client_id), "fields": list(body.model_dump(exclude_unset=True).keys())},
+    )
+
     item = PipelineItemOut.model_validate(client)
     item.company_name = client.company.name if client.company else None
     item.company_website = client.company.website if client.company else None
