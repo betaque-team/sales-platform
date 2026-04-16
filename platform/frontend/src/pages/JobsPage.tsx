@@ -434,6 +434,10 @@ export function JobsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-10">
+                    {/* F71: header checkbox was DOM-unlabeled — screen
+                        readers announced it as "checkbox, not checked"
+                        with zero context. Row checkboxes below get
+                        per-row labels so AT can navigate the table. */}
                     <input
                       type="checkbox"
                       checked={
@@ -441,6 +445,7 @@ export function JobsPage() {
                         data.items.every((j) => selectedIds.has(j.id))
                       }
                       onChange={toggleSelectAll}
+                      aria-label="Select all visible jobs"
                       className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                     />
                   </TableHead>
@@ -479,11 +484,20 @@ export function JobsPage() {
                     onClick={() => navigate(`/jobs/${job.id}`)}
                   >
                     <TableCell onClick={(e) => e.stopPropagation()}>
+                      {/* F71: per-row `aria-label` gives AT users the
+                          job context when the Tab lands on a checkbox,
+                          so bulk-select isn't a game of blind guesses.
+                          `id="job-select-<id>"` + `name="job_ids"` lets
+                          native form-enumerating AT treat them as a
+                          set (optional; mostly belt-and-suspenders). */}
                       <input
+                        id={`job-select-${job.id}`}
+                        name="job_ids"
                         type="checkbox"
                         checked={selectedIds.has(job.id)}
                         onChange={() => toggleSelect(job.id)}
                         onClick={(e) => e.stopPropagation()}
+                        aria-label={`Select ${job.title}${job.company_name ? ` at ${job.company_name}` : ""}`}
                         className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                       />
                     </TableCell>
