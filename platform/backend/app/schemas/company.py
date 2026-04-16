@@ -1,8 +1,90 @@
 """Pydantic schemas for Company and ATS Board endpoints."""
 
-from pydantic import BaseModel, computed_field
+import json
+from typing import Annotated, Any
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, computed_field, field_validator
 from datetime import datetime
 from uuid import UUID
+
+
+# Regression finding 131: admin PATCH on /companies/{id} used to let
+# any admin persist a 1 MB description, 10k tags, or a 500-level nested
+# metadata_json dict (which 500'd instead of 422'd). The `companies`
+# table is on the critical read path (`/companies` list pulls
+# `description` on every page render), so a single bloated row degrades
+# every search. Caps mirror the model columns where possible and
+# business-reasonable limits where the DB column is `Text` / `JSON`
+# (unbounded). Same failure-mode class as F128 (rules), F129
+# (applications), F130 (reviews) — standardise the fix shape across
+# all admin writer endpoints.
+_DESCRIPTION_MAX_LEN = 5000  # typical marketing-copy length; 1MB probe was pure DoS
+_TAGS_MAX_COUNT = 50
+_TAG_MAX_LEN = 40
+_METADATA_JSON_MAX_BYTES = 10_000  # serialized JSON size ceiling
+_METADATA_JSON_MAX_DEPTH = 10      # reject deeply-nested recursion bombs
+
+
+# Per-tag StringConstraints — `\w` + hyphen pattern matches the
+# existing tag vocabulary in the wild; strip whitespace so a sloppy
+# copy-paste doesn't become a distinct "  tag  " row.
+_CompanyTag = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=_TAG_MAX_LEN,
+        strip_whitespace=True,
+        pattern=r"^[\w\-]+$",
+    ),
+]
+
+
+def _metadata_depth(obj: Any, current: int = 0) -> int:
+    """Max nesting depth of a JSON-serializable value.
+
+    Used to reject recursion bombs before they reach psycopg2's JSON
+    parser, which bails at ~500 levels with a 500 instead of a clean
+    422. Walks dict values and list items; scalar leaves contribute
+    `current`.
+    """
+    if isinstance(obj, dict):
+        if not obj:
+            return current
+        return max(_metadata_depth(v, current + 1) for v in obj.values())
+    if isinstance(obj, list):
+        if not obj:
+            return current
+        return max(_metadata_depth(v, current + 1) for v in obj)
+    return current
+
+
+def _validate_metadata_json(v: dict | None) -> dict | None:
+    """Shared validator for CompanyCreate + CompanyUpdate `metadata_json`.
+
+    Rejects (a) serialized bodies larger than _METADATA_JSON_MAX_BYTES,
+    (b) nesting deeper than _METADATA_JSON_MAX_DEPTH. Runs on the
+    already-parsed Python dict — cheaper than parsing the raw body
+    twice, and Pydantic has already enforced the type as `dict`.
+    """
+    if v is None:
+        return v
+    # Serialize once to measure size (len(str(dict)) is wrong — it
+    # reports the Python repr, not JSON; counts differ meaningfully
+    # for nested/unicode inputs).
+    try:
+        serialized = json.dumps(v)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"metadata_json must be JSON-serializable: {err}")
+    if len(serialized) > _METADATA_JSON_MAX_BYTES:
+        raise ValueError(
+            f"metadata_json too large ({len(serialized)} bytes > "
+            f"{_METADATA_JSON_MAX_BYTES} limit)"
+        )
+    if _metadata_depth(v) > _METADATA_JSON_MAX_DEPTH:
+        raise ValueError(
+            f"metadata_json nested too deeply (max depth "
+            f"{_METADATA_JSON_MAX_DEPTH})"
+        )
+    return v
 
 # ATS board URL patterns
 ATS_URL_PATTERNS = {
@@ -98,30 +180,52 @@ class CompanyDetailOut(CompanyOut):
 
 
 class CompanyCreate(BaseModel):
-    name: str
-    slug: str
-    website: str = ""
-    logo_url: str = ""
-    industry: str = ""
-    employee_count: str = ""
-    funding_stage: str = ""
-    headquarters: str = ""
-    description: str = ""
+    # F131: caps matched to model column sizes (see models/company.py).
+    # `extra="forbid"` rejects stale-schema fields loudly — same
+    # rationale as F130's review schema. All optional-default fields
+    # keep their existing empty-string/empty-list defaults.
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=300)
+    slug: str = Field(..., min_length=1, max_length=300)
+    website: str = Field(default="", max_length=500)
+    logo_url: str = Field(default="", max_length=500)
+    industry: str = Field(default="", max_length=200)
+    employee_count: str = Field(default="", max_length=50)
+    funding_stage: str = Field(default="", max_length=100)
+    headquarters: str = Field(default="", max_length=300)
+    description: str = Field(default="", max_length=_DESCRIPTION_MAX_LEN)
     is_target: bool = False
-    tags: list[str] = []
-    metadata_json: dict = {}
+    tags: list[_CompanyTag] = Field(default_factory=list, max_length=_TAGS_MAX_COUNT)
+    metadata_json: dict = Field(default_factory=dict)
+
+    @field_validator("metadata_json")
+    @classmethod
+    def _check_metadata(cls, v):
+        return _validate_metadata_json(v)
 
 
 class CompanyUpdate(BaseModel):
-    name: str | None = None
-    slug: str | None = None
-    website: str | None = None
-    logo_url: str | None = None
-    industry: str | None = None
-    employee_count: str | None = None
-    funding_stage: str | None = None
-    headquarters: str | None = None
-    description: str | None = None
+    # F131: every field stays optional (PATCH semantics), but any
+    # value provided now passes the same caps as CompanyCreate.
+    # `extra="forbid"` catches typoed field names client-side instead
+    # of silently ignoring them.
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    slug: str | None = Field(default=None, min_length=1, max_length=300)
+    website: str | None = Field(default=None, max_length=500)
+    logo_url: str | None = Field(default=None, max_length=500)
+    industry: str | None = Field(default=None, max_length=200)
+    employee_count: str | None = Field(default=None, max_length=50)
+    funding_stage: str | None = Field(default=None, max_length=100)
+    headquarters: str | None = Field(default=None, max_length=300)
+    description: str | None = Field(default=None, max_length=_DESCRIPTION_MAX_LEN)
     is_target: bool | None = None
-    tags: list[str] | None = None
+    tags: list[_CompanyTag] | None = Field(default=None, max_length=_TAGS_MAX_COUNT)
     metadata_json: dict | None = None
+
+    @field_validator("metadata_json")
+    @classmethod
+    def _check_metadata(cls, v):
+        return _validate_metadata_json(v)
