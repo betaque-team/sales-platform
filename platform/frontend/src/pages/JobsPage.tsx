@@ -160,7 +160,12 @@ export function JobsPage() {
     }
   };
 
+  // Regression finding 71: gate bulk actions behind window.confirm() so a
+  // misclick doesn't silently change the status of dozens of jobs.
   const handleBulkAction = (action: "accept" | "reject" | "reset") => {
+    const count = selectedIds.size;
+    const verb = action === "accept" ? "Accept" : action === "reject" ? "Reject" : "Reset";
+    if (!window.confirm(`${verb} ${count} selected job${count !== 1 ? "s" : ""}? This cannot be undone.`)) return;
     bulkMutation.mutate({
       job_ids: Array.from(selectedIds),
       action,

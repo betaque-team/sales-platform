@@ -242,6 +242,7 @@ export interface PipelineStageConfig {
 
 export interface PipelineItem {
   id: string;
+  company_id: string | null;
   company_name: string;
   company_website: string;
   stage: PipelineStage;

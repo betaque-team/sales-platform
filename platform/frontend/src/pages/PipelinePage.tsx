@@ -12,6 +12,7 @@ import {
   Check,
   X,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import {
@@ -78,9 +79,21 @@ function PipelineCard({
             <Building2 className="h-4 w-4 text-gray-500" />
           </div>
           <div>
-            <p className="text-sm font-semibold text-gray-900 leading-tight">
-              {item.company_name}
-            </p>
+            {/* Regression finding 56: company name is now a Link so cards
+                are right-clickable / middle-clickable to the company page. */}
+            {item.company_id ? (
+              <Link
+                to={`/companies/${item.company_id}`}
+                className="text-sm font-semibold text-gray-900 leading-tight hover:text-primary-600 transition-colors"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {item.company_name}
+              </Link>
+            ) : (
+              <p className="text-sm font-semibold text-gray-900 leading-tight">
+                {item.company_name}
+              </p>
+            )}
             {item.total_open_roles > 0 && (
               <p className="text-xs text-gray-500 mt-0.5">
                 {formatCount(item.total_open_roles)} open role{item.total_open_roles !== 1 ? "s" : ""}

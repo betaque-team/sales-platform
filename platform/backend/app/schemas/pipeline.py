@@ -13,6 +13,7 @@ PIPELINE_MAX_NOTES_LENGTH = 4000
 
 class PipelineItemOut(BaseModel):
     id: UUID
+    company_id: UUID | None = None
     company_name: str | None = None
     company_website: str | None = None
     stage: str

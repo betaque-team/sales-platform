@@ -13,9 +13,22 @@ from app.models.job import Job
 from app.models.company import Company
 from app.models.company_contact import CompanyContact
 from app.models.pipeline import PotentialClient
+from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.utils.audit import log_action
+
+
+async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
+    """Get role cluster names marked as relevant (mirrors jobs.py helper)."""
+    result = await db.execute(
+        select(RoleClusterConfig.name).where(
+            RoleClusterConfig.is_relevant == True,
+            RoleClusterConfig.is_active == True,
+        )
+    )
+    clusters = result.scalars().all()
+    return list(clusters) if clusters else ["infra", "security"]
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -94,7 +107,15 @@ async def export_jobs(
     if geography_bucket:
         query = query.where(Job.geography_bucket == geography_bucket)
     if role_cluster:
-        query = query.where(Job.role_cluster == role_cluster)
+        # Regression finding 106: `role_cluster=relevant` is a UI pseudo-value
+        # meaning "all clusters marked relevant" (e.g. infra + security), not a
+        # literal DB string.  Previously this fell through to an equality check
+        # against the literal "relevant" which matched zero rows → empty CSV.
+        if role_cluster == "relevant":
+            relevant_clusters = await _get_relevant_clusters(db)
+            query = query.where(Job.role_cluster.in_(relevant_clusters))
+        else:
+            query = query.where(Job.role_cluster == role_cluster)
 
     query = query.order_by(Job.first_seen_at.desc())
 

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getApplications, getApplicationStats, updateApplication, deleteApplication } from "@/lib/api";
-import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight } from "lucide-react";
+import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut } from "lucide-react";
 
 const STATUS_TABS: { label: string; value: string }[] = [
   { label: "All", value: "" },
@@ -68,11 +68,17 @@ export function ApplicationsPage() {
     },
   });
 
+  // Regression finding 55: stat cards now cover all 8 application statuses
+  // instead of only Total/Applied/Interview/Offer.
   const statCards = [
     { label: "Total", value: stats?.total ?? 0, icon: Briefcase, color: "text-gray-700 bg-gray-100" },
+    { label: "Prepared", value: stats?.prepared ?? 0, icon: FileCheck, color: "text-gray-600 bg-gray-100" },
+    { label: "Submitted", value: stats?.submitted ?? 0, icon: Mail, color: "text-blue-700 bg-blue-100" },
     { label: "Applied", value: stats?.applied ?? 0, icon: Send, color: "text-indigo-700 bg-indigo-100" },
     { label: "Interview", value: stats?.interview ?? 0, icon: Clock, color: "text-yellow-700 bg-yellow-100" },
     { label: "Offer", value: stats?.offer ?? 0, icon: Trophy, color: "text-green-700 bg-green-100" },
+    { label: "Rejected", value: stats?.rejected ?? 0, icon: XCircle, color: "text-red-700 bg-red-100" },
+    { label: "Withdrawn", value: stats?.withdrawn ?? 0, icon: LogOut, color: "text-gray-500 bg-gray-100" },
   ];
 
   return (
@@ -83,16 +89,16 @@ export function ApplicationsPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-4 gap-3 lg:grid-cols-8">
         {statCards.map((s) => (
-          <div key={s.label} className="rounded-lg border border-gray-200 bg-white p-4">
-            <div className="flex items-center gap-3">
-              <div className={`rounded-lg p-2 ${s.color}`}>
-                <s.icon className="h-5 w-5" />
+          <div key={s.label} className="rounded-lg border border-gray-200 bg-white p-3">
+            <div className="flex items-center gap-2">
+              <div className={`rounded-lg p-1.5 ${s.color}`}>
+                <s.icon className="h-4 w-4" />
               </div>
               <div>
-                <p className="text-2xl font-bold text-gray-900">{s.value}</p>
-                <p className="text-sm text-gray-500">{s.label}</p>
+                <p className="text-lg font-bold text-gray-900">{s.value}</p>
+                <p className="text-xs text-gray-500">{s.label}</p>
               </div>
             </div>
           </div>

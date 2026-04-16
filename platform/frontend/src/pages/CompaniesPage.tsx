@@ -167,6 +167,9 @@ export function CompaniesPage() {
               }`}
             >
               <option value="name">Sort: Name</option>
+              <option value="job_count">Sort: Most Jobs</option>
+              <option value="relevant_job_count">Sort: Most Relevant</option>
+              <option value="accepted_count">Sort: Most Accepted</option>
               <option value="funded_at">Sort: Recently Funded</option>
               <option value="total_funding">Sort: Total Funding</option>
             </select>

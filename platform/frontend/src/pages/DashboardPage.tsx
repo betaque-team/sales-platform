@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   Briefcase,
   Building2,
@@ -164,9 +164,12 @@ export function DashboardPage() {
     );
   }
 
-  const JobRow = ({ job, onClick, showAtsScore }: { job: any; onClick: () => void; showAtsScore?: boolean }) => (
-    <button
-      onClick={onClick}
+  {/* Regression finding 35: job rows were <button onClick={navigate(…)}>
+      which blocks right-click → "Open in new tab" and doesn't show the
+      target URL in the browser status bar.  <Link> renders a real <a>. */}
+  const JobRow = ({ job, showAtsScore }: { job: any; showAtsScore?: boolean }) => (
+    <Link
+      to={`/jobs/${job.id}`}
       className="flex w-full items-center justify-between px-5 py-3 hover:bg-gray-50 transition-colors text-left"
     >
       <div className="min-w-0 flex-1">
@@ -191,7 +194,7 @@ export function DashboardPage() {
         <ScoreBar score={job.relevance_score} />
         <StatusBadge status={job.status} />
       </div>
-    </button>
+    </Link>
   );
 
   return (
@@ -246,7 +249,7 @@ export function DashboardPage() {
           {infraJobs && infraJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
               {infraJobs.items.map((job) => (
-                <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={hasActiveResume} />
+                <JobRow key={job.id} job={job} showAtsScore={hasActiveResume} />
               ))}
             </div>
           ) : (
@@ -276,7 +279,7 @@ export function DashboardPage() {
           {securityJobs && securityJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
               {securityJobs.items.map((job) => (
-                <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={hasActiveResume} />
+                <JobRow key={job.id} job={job} showAtsScore={hasActiveResume} />
               ))}
             </div>
           ) : (
@@ -306,7 +309,7 @@ export function DashboardPage() {
           {qaJobs && qaJobs.items.length > 0 ? (
             <div className="divide-y divide-gray-50">
               {qaJobs.items.map((job) => (
-                <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={hasActiveResume} />
+                <JobRow key={job.id} job={job} showAtsScore={hasActiveResume} />
               ))}
             </div>
           ) : (
@@ -337,7 +340,7 @@ export function DashboardPage() {
         {globalRemoteJobs && globalRemoteJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">
             {globalRemoteJobs.items.map((job) => (
-              <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={hasActiveResume} />
+              <JobRow key={job.id} job={job} showAtsScore={hasActiveResume} />
             ))}
           </div>
         ) : (
@@ -468,7 +471,7 @@ export function DashboardPage() {
         {relevantJobs && relevantJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">
             {relevantJobs.items.map((job) => (
-              <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={hasActiveResume} />
+              <JobRow key={job.id} job={job} showAtsScore={hasActiveResume} />
             ))}
           </div>
         ) : (
@@ -674,7 +677,7 @@ export function DashboardPage() {
         {recentJobs && recentJobs.items.length > 0 ? (
           <div className="divide-y divide-gray-50">
             {recentJobs.items.map((job) => (
-              <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} showAtsScore={false} />
+              <JobRow key={job.id} job={job} showAtsScore={false} />
             ))}
           </div>
         ) : (

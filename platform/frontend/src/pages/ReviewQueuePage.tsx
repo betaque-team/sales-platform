@@ -64,9 +64,14 @@ export function ReviewQueuePage() {
 
   const handleReview = (decision: "accept" | "reject" | "skip") => {
     if (!currentJob) return;
+    // Regression finding 73: only send rejection tags when the decision
+    // is "reject". Previously the payload shipped selectedTags regardless
+    // of decision, and the backend persisted them blindly — "accepted"
+    // jobs ended up with rejection-reason tags attached.
+    const tags = decision === "reject" ? selectedTags : [];
     reviewMutation.mutate({
       jobId: currentJob.id,
-      payload: { decision, comment, tags: selectedTags },
+      payload: { decision, comment, tags },
       decision,
     });
   };
@@ -232,19 +237,32 @@ export function ReviewQueuePage() {
 
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
+                {/* Regression finding 72: selectedTags and comment were
+                    persisting across prev/next navigation, so rejection
+                    tags selected for job #N got silently attached to the
+                    submit for job #N+1. Clear both on every index change.
+                    Also added aria-labels (finding 74). */}
                 <button
-                  onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
+                  onClick={() => {
+                    setCurrentIndex(Math.max(0, currentIndex - 1));
+                    setComment("");
+                    setSelectedTags([]);
+                  }}
                   disabled={currentIndex === 0}
                   className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                  aria-label="Previous job"
                 >
                   <ChevronLeft className="h-5 w-5" />
                 </button>
                 <button
-                  onClick={() =>
-                    setCurrentIndex(Math.min(queue.length - 1, currentIndex + 1))
-                  }
+                  onClick={() => {
+                    setCurrentIndex(Math.min(queue.length - 1, currentIndex + 1));
+                    setComment("");
+                    setSelectedTags([]);
+                  }}
                   disabled={currentIndex >= queue.length - 1}
                   className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                  aria-label="Next job"
                 >
                   <ChevronRight className="h-5 w-5" />
                 </button>
