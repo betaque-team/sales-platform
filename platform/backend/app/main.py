@@ -35,11 +35,28 @@ app = FastAPI(
 # but we do set headers that are safe for JSON APIs. HSTS is only meaningful
 # under HTTPS; a reverse proxy would normally add it, but including it here
 # defends against misconfigured termination.
+#
+# Regression finding 219: X-Frame-Options, X-Content-Type-Options, and
+# Referrer-Policy are ALSO emitted by the outer infra nginx at the http
+# block (`infra/nginx/nginx.conf:40-43`). nginx's `add_header` does NOT
+# replace headers present in the upstream response — it APPENDS — so
+# every API response was shipping two copies, one of them conflicting
+# (FastAPI "X-Frame-Options: DENY" vs nginx "X-Frame-Options: SAMEORIGIN").
+# Per RFC 7034 + MDN, browsers differ on multi-valued XFO: Chrome picks
+# the strictest, Firefox ignores both, Safari undocumented — so the same
+# app served different clickjacking protections to different users.
+#
+# Canonical choice per the finding: the infra nginx layer owns XFO /
+# XCTO / Referrer-Policy because those headers survive even if the
+# backend container crashes or is replaced with a static error page.
+# We KEEP HSTS, Permissions-Policy, COOP, CORP, CSP in FastAPI because
+# nginx does not set those; they would disappear on header-dedupe
+# without this middleware. In the same round, nginx.conf's XFO value
+# changes SAMEORIGIN → DENY to align with the CSP `frame-ancestors
+# 'none'` intent ("nobody can frame us"), removing the stale
+# same-origin-framing policy ambiguity.
 _SECURITY_HEADERS = {
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
     "Permissions-Policy": (
         "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
         "magnetometer=(), microphone=(), payment=(), usb=()"
