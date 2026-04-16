@@ -283,7 +283,15 @@ async def get_pipeline(
         d = item.model_dump(mode="json")
         cid = str(c.company_id) if c.company_id else ""
         d["total_open_roles"] = open_roles_map.get(cid, 0)
-        d["accepted_jobs_count"] = accepted_map.get(cid, d.get("accepted_jobs_count", 0))
+        # Regression finding 192: `accepted_jobs_count` now ALWAYS
+        # reflects the live count of `Job WHERE status='accepted'` for
+        # this company, never the stored `PotentialClient.accepted_jobs_count`
+        # column (which was monotonically incremented on every accept
+        # review event and never decremented on reject/flip, so it drifted
+        # from reality). Dropping the `.get("accepted_jobs_count", 0)`
+        # fallback means a company with zero accepted jobs shows 0 here
+        # consistently — matching what the detail endpoint now returns.
+        d["accepted_jobs_count"] = accepted_map.get(cid, 0)
         d["hiring_velocity"] = velocity_map.get(cid, "low")
         d["last_job_at"] = last_job_map.get(cid, None)
         if d["last_job_at"]:
@@ -369,6 +377,29 @@ async def get_client(client_id: UUID, user: User = Depends(get_current_user), db
     item = PipelineItemOut.model_validate(client)
     item.company_name = client.company.name if client.company else None
     item.company_website = client.company.website if client.company else None
+
+    # Regression finding 192: the stored `accepted_jobs_count` column
+    # is an increment-only counter — `reviews.py` bumped it by 1 on
+    # every `accept` event but never decremented it on `reject`, so a
+    # job that flipped accept→reject→accept was counted twice. The
+    # listing endpoint (get_pipeline above) has always overridden with
+    # a live COUNT(*) of `Job WHERE status='accepted'` for the
+    # company; detail was returning the raw (drifted) column. On a
+    # live Supabase row with 4 review flip-flops on the same job,
+    # listing returned 1 and detail returned 2 — the kanban and the
+    # detail panel disagreed. We now do the same live count here so
+    # the two endpoints agree.
+    if client.company_id:
+        live_accepted = (await db.execute(
+            select(func.count(Job.id)).where(
+                Job.company_id == client.company_id,
+                Job.status == "accepted",
+            )
+        )).scalar() or 0
+        item.accepted_jobs_count = int(live_accepted)
+    else:
+        item.accepted_jobs_count = 0
+
     return item
 
 

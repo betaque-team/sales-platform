@@ -2,9 +2,11 @@
 
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -32,6 +34,29 @@ VALID_TRANSITIONS = {
     "rejected": [],
     "withdrawn": [],
 }
+
+# Regression finding 194: PATCH /applications/{id} was declared with
+# `body: dict`, so any stray key (typo like `stauts`, camelCase
+# `preparedAnswers`, or a hand-crafted `{"__evil__": "<script>..."}`)
+# was silently ignored with a 200 response. Users thought they had
+# advanced the application's stage when nothing changed. We now parse
+# against a strict schema: `status` is a Literal over the documented
+# states, and `extra="forbid"` causes Pydantic v2 to 422 on any
+# unknown field. The VALID_TRANSITIONS state-machine check still runs
+# against the parsed `status` value since it depends on the row's
+# current state (not expressible in a static schema).
+ApplicationStatus = Literal[
+    "prepared", "submitted", "applied", "interview",
+    "offer", "rejected", "withdrawn",
+]
+
+
+class ApplicationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ApplicationStatus | None = None
+    notes: str | None = Field(default=None, max_length=10000)
+    prepared_answers: list[dict] | None = None
 
 
 @router.get("/readiness/{job_id}")
@@ -605,7 +630,7 @@ async def get_application(
 @router.patch("/{app_id}")
 async def update_application(
     app_id: UUID,
-    body: dict,
+    body: ApplicationUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -616,8 +641,14 @@ async def update_application(
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    if "status" in body:
-        new_status = body["status"]
+    # F194: `model_dump(exclude_unset=True)` gives us exactly the fields
+    # the client sent, so the partial-update semantics of the old
+    # `"status" in body` checks are preserved — setting a field to
+    # null on purpose is distinguishable from omitting it.
+    patch = body.model_dump(exclude_unset=True)
+
+    if "status" in patch:
+        new_status = patch["status"]
         allowed = VALID_TRANSITIONS.get(app.status, [])
         if new_status not in allowed:
             raise HTTPException(
@@ -630,11 +661,11 @@ async def update_application(
         elif new_status == "submitted" and not app.submitted_at:
             app.submitted_at = datetime.now(timezone.utc)
 
-    if "notes" in body:
-        app.notes = body["notes"]
+    if "notes" in patch:
+        app.notes = patch["notes"]
 
-    if "prepared_answers" in body and app.status == "prepared":
-        app.prepared_answers = body["prepared_answers"]
+    if "prepared_answers" in patch and app.status == "prepared":
+        app.prepared_answers = patch["prepared_answers"]
 
     db.add(app)
     await db.commit()

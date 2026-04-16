@@ -3,7 +3,7 @@
 import time
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -204,7 +204,17 @@ async def list_backups():
 
 @router.get("/scan-errors", dependencies=[Depends(require_role("admin"))])
 async def list_scan_errors(
-    days: int = 7,
+    # Regression finding 193: `days` was a bare `int = 7` with no
+    # bounds, so `?days=1000000` produced a timestamp ~2735 BC that
+    # Postgres' `timestamp with time zone` range rejects, bubbling a
+    # DBAPIError back as an unhelpful 500. `?days=-5` and `?days=0`
+    # also silently passed through and returned an empty list, same
+    # F179 pattern. Bound to [1, 3650] (10 years of history is the
+    # absolute ceiling for scan-error retention we care about — the
+    # real rollup window is ~7 days) so FastAPI 422s both overflows
+    # and non-positive inputs at parse time with a structured error
+    # message.
+    days: int = Query(7, ge=1, le=3650),
     db: AsyncSession = Depends(get_db),
 ):
     """Regression finding 104: surface per-error detail from ScanLog.
