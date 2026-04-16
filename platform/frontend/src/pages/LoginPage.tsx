@@ -20,6 +20,25 @@ export function LoginPage() {
     }
   }, [searchParams]);
 
+  // Regression finding 207: when the api.ts global interceptor
+  // redirects an expired-session user here, it preserves the page they
+  // were on in `?next=`. Honor it after successful sign-in so the user
+  // lands back where they were (e.g., the job detail they were opening
+  // when their cookie expired) instead of always bouncing to "/".
+  //
+  // Security: only accept a path-relative next (starts with "/" but
+  // NOT "//"). This blocks `?next=//evil.com` (protocol-relative) and
+  // `?next=https://evil.com` (absolute) which would otherwise let an
+  // attacker craft a phishing link that lands authenticated users on
+  // their domain. Fragment / query are fine and preserved via the
+  // pathname+search round-trip in api.ts.
+  const safeNext = (() => {
+    const raw = searchParams.get("next");
+    if (!raw) return "/";
+    if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
+    return raw;
+  })();
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -27,7 +46,7 @@ export function LoginPage() {
     try {
       await login(email, password);
       await refetch();
-      navigate("/");
+      navigate(safeNext);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {

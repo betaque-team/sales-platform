@@ -33,6 +33,7 @@ import { Badge } from "@/components/Badge";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
 import {
+  ApiError,
   getJob,
   getJobDescription,
   getJobReviews,
@@ -67,10 +68,28 @@ export function JobDetailPage() {
   const [syncChecked, setSyncChecked] = useState<Record<number, boolean>>({});
   const [editMode, setEditMode] = useState(false);
 
-  const { data: job, isLoading: jobLoading } = useQuery({
+  // Regression finding 207: the previous version destructured only
+  // `data` and `isLoading`, which meant every non-2xx (401 expired
+  // cookie, 500 backend fault, CORS, network) fell through the
+  // `if (!job)` branch below and rendered "Job not found" — giving
+  // users the false impression the record was deleted. Now we
+  // surface `isError` + `error` and render error-class-specific UX.
+  // 401 is also handled globally by the api.ts interceptor (full
+  // redirect to /login preserving next=<path>) so this branch only
+  // needs to cover 404 / 5xx / network.
+  const { data: job, isLoading: jobLoading, isError: jobIsError, error: jobError } = useQuery({
     queryKey: ["job", id],
     queryFn: () => getJob(id!),
     enabled: !!id,
+    // Don't retry auth failures or missing records — retrying a 401
+    // would just burn ticks until the global interceptor fires, and
+    // retrying a 404 never helps.
+    retry: (failureCount, err) => {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
+        return false;
+      }
+      return failureCount < 2;
+    },
   });
 
   const { data: description, isLoading: descLoading } = useQuery({
@@ -250,10 +269,78 @@ export function JobDetailPage() {
     );
   }
 
-  if (!job) {
+  // F207: Split the failure state so users can tell the difference
+  // between "this job was deleted" and "something went wrong talking to
+  // the backend." 401 is handled by the api.ts global interceptor
+  // (redirect to /login), but we still guard the branch in case the
+  // interceptor didn't fire (e.g., mocked in tests, or the redirect was
+  // blocked by a higher-level navigation guard).
+  if (jobIsError) {
+    const status = jobError instanceof ApiError ? jobError.status : 0;
+    const message = (jobError as Error)?.message || "";
+
+    if (status === 404) {
+      return (
+        <div className="py-20 text-center">
+          <p className="text-gray-700 text-lg font-medium">Job not found</p>
+          <p className="mt-1 text-sm text-gray-500">
+            This listing may have been removed by the source or deleted by an admin.
+          </p>
+          <Button variant="secondary" className="mt-4" onClick={() => navigate("/jobs")}>
+            Back to Jobs
+          </Button>
+        </div>
+      );
+    }
+
+    if (status === 401 || status === 403) {
+      // Usually pre-empted by the global redirect in api.ts. Fallback UI
+      // in case we got here anyway.
+      return (
+        <div className="py-20 text-center">
+          <p className="text-gray-700 text-lg font-medium">Your session has expired</p>
+          <p className="mt-1 text-sm text-gray-500">Please sign in again to continue.</p>
+          <Button variant="primary" className="mt-4" onClick={() => {
+            const next = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.assign(`/login?next=${next}`);
+          }}>
+            Sign in
+          </Button>
+        </div>
+      );
+    }
+
+    // Generic failure (5xx, network, CORS, timeout). Give the user a
+    // retry path instead of making them guess whether the job exists.
     return (
       <div className="py-20 text-center">
-        <p className="text-gray-500">Job not found</p>
+        <p className="text-gray-700 text-lg font-medium">Couldn't load this job</p>
+        <p className="mt-1 text-sm text-gray-500">
+          {status >= 500
+            ? "The server ran into a problem. Please try again in a moment."
+            : message || "Check your connection and try again."}
+        </p>
+        <div className="mt-4 flex justify-center gap-3">
+          <Button variant="primary" onClick={() => queryClient.invalidateQueries({ queryKey: ["job", id] })}>
+            Retry
+          </Button>
+          <Button variant="secondary" onClick={() => navigate("/jobs")}>
+            Back to Jobs
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!job) {
+    // Defensive: isLoading=false, isError=false, data=undefined is
+    // theoretically possible if the query was disabled. With
+    // `enabled: !!id` above, this branch means the URL was hit without
+    // an id — send them back to the list rather than rendering "not
+    // found" (which implies the id resolved to nothing).
+    return (
+      <div className="py-20 text-center">
+        <p className="text-gray-500">No job selected</p>
         <Button variant="secondary" className="mt-4" onClick={() => navigate("/jobs")}>
           Back to Jobs
         </Button>

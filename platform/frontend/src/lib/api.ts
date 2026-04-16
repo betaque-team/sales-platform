@@ -52,7 +52,11 @@ import type {
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
-class ApiError extends Error {
+// Regression finding 207: exported so consuming pages (JobDetailPage,
+// CompanyDetailPage, ResumeScorePage, etc.) can narrow on `.status`
+// and render error-class-specific UX instead of collapsing every
+// failure into a generic "not found" state.
+export class ApiError extends Error {
   constructor(
     public status: number,
     message: string
@@ -61,6 +65,14 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+// F207: de-dup concurrent 401 handling. Several TanStack Query hooks on
+// the same page can fire in parallel and all resolve to 401 at roughly
+// the same tick — without this guard, each one would call
+// `window.location.assign(...)` and the last write wins, but we'd also
+// spam the console with redirect warnings. The first 401 wins; everyone
+// else gets their throw and then the page unloads.
+let _redirectingToLogin = false;
 
 async function request<T>(
   endpoint: string,
@@ -80,10 +92,40 @@ async function request<T>(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(
+    const err = new ApiError(
       response.status,
       body.detail || body.message || `Request failed with status ${response.status}`
     );
+
+    // F207: mid-session 401 means the JWT cookie expired (24h TTL) or
+    // was invalidated server-side. Without a global redirect, every
+    // detail page collapses the 401 into TanStack Query's generic
+    // error, which downstream components misread as "record not
+    // found" (the classic symptom: "jobs are not opening — shows Job
+    // not found even for a valid id"). Hard-navigate to /login so
+    // AuthProvider re-initializes cleanly.
+    //
+    // Guardrails:
+    //   - skip on /login itself (the login page's own pre-auth
+    //     /auth/me probe returns 401 for unauthenticated visitors —
+    //     redirecting from there would loop);
+    //   - skip when `window` is undefined (SSR / test contexts);
+    //   - skip concurrent 401s (see `_redirectingToLogin`).
+    if (
+      response.status === 401 &&
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/login") &&
+      !_redirectingToLogin
+    ) {
+      _redirectingToLogin = true;
+      const next = encodeURIComponent(
+        window.location.pathname + window.location.search
+      );
+      // assign (not replace) so Back still works after sign-in.
+      window.location.assign(`/login?next=${next}`);
+    }
+
+    throw err;
   }
 
   if (response.status === 204) {
