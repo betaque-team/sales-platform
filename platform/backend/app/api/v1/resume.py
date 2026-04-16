@@ -810,12 +810,23 @@ async def customize_resume_for_job(
             detail="AI resume customization is only available for relevant jobs (infra, security, etc.)"
         )
 
-    # Get existing score if available
+    # Get existing score if available.
+    # F225-followup: resume_scores has no UNIQUE (resume_id, job_id) and
+    # we routinely end up with multiple rows for the same pair (concurrent
+    # score_resume_task + rescore_all_active_resumes + manual rescore
+    # paths interleave). The old `scalar_one_or_none()` would raise
+    # `MultipleResultsFound` and surface as a 500 to the user — exactly
+    # the failure mode that was breaking GET /jobs/{id} on the Bitwarden
+    # Senior Security Engineer row. Pick the most recent row until the
+    # underlying dedupe + UNIQUE-constraint migration lands.
     existing_score = (await db.execute(
-        select(ResumeScore).where(
+        select(ResumeScore)
+        .where(
             ResumeScore.resume_id == resume.id,
             ResumeScore.job_id == job.id,
         )
+        .order_by(ResumeScore.scored_at.desc())
+        .limit(1)
     )).scalar_one_or_none()
 
     matched_keywords = existing_score.matched_keywords if existing_score else []
