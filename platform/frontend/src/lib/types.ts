@@ -66,6 +66,11 @@ export interface Job {
   geography_bucket: "global_remote" | "usa_only" | "uae_only";
   tags: string[];
   resume_score?: number | null;
+  // Team-wide best resume fit — set by /jobs/review-queue (see the
+  // handler comment in backend/app/api/v1/jobs.py for the ordering
+  // tier it drives). `null` means no resume has scored this job yet.
+  max_resume_score?: number | null;
+  first_seen_at?: string;
   resume_fit?: {
     overall_score: number;
     keyword_score: number;
@@ -317,6 +322,19 @@ export interface PaginatedResponse<T> {
   total_pages: number;
 }
 
+// Review queue: prioritized list + per-date-bucket counts so the page
+// can render "N today · N yesterday · N older" chips above the card.
+// The three counts reconcile exactly with `total` because the stats
+// query uses the same WHERE chain as the items query.
+export interface ReviewQueueResponse extends PaginatedResponse<Job> {
+  stats: {
+    today: number;
+    yesterday: number;
+    older: number;
+    total: number;
+  };
+}
+
 // Multi-column sort: each entry is a (column key, direction) pair, in
 // priority order. Position 0 is the primary sort, position 1 the
 // secondary tiebreaker, etc. Serialised on the wire as
@@ -564,6 +582,14 @@ export interface ActiveResume {
     average_score: number;
     best_score: number;
     above_70: number;
+    // F96: ISO timestamp of the most recent ResumeScore row. `null`
+    // means no scores yet (fresh upload, scoring task queued or
+    // pending). The frontend can render "Scoring…" when null and
+    // "Scored N days ago / Rescore now" when the age crosses a
+    // staleness threshold (e.g. >7 days) — before this was a
+    // response field, the UI had no way to distinguish a healthy
+    // rescore cycle from a silent failure.
+    last_scored_at?: string | null;
   };
 }
 

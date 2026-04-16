@@ -235,12 +235,21 @@ async def get_active_resume(
     if not resume:
         return {"active_resume": None}
 
-    # Score summary for this resume
+    # Score summary for this resume — F96 extended query with MAX(scored_at)
+    # so the frontend can render a "scored N days ago / rescore now"
+    # affordance without a second round-trip. Before this, the Resume
+    # Score page had no way to tell the user their scores were stale
+    # (11 days of stale scores in prod prior to the nightly schedule
+    # fix). The nightly `rescore_all_active_resumes` keeps scored_at
+    # current on active users but freshness visibility is still useful
+    # for the "first scan is pending" window after a new upload and
+    # for any user whose rescore task failed silently.
     score_stats = (await db.execute(
         select(
             func.count(ResumeScore.id),
             func.avg(ResumeScore.overall_score),
             func.max(ResumeScore.overall_score),
+            func.max(ResumeScore.scored_at),
         ).where(ResumeScore.resume_id == resume.id)
     )).one()
 
@@ -263,6 +272,15 @@ async def get_active_resume(
                 "average_score": round(float(score_stats[1]), 1) if score_stats[1] else 0.0,
                 "best_score": round(float(score_stats[2]), 1) if score_stats[2] else 0.0,
                 "above_70": above_70,
+                # F96: ISO timestamp of the most recent ResumeScore row
+                # for this resume, or None if no scores have been
+                # written yet (fresh upload pending the scoring task).
+                # The frontend renders this as "Scored 2h ago" / "Scored
+                # 11 days ago — rescore now" / "Scoring…" depending on
+                # age.
+                "last_scored_at": (
+                    score_stats[3].isoformat() if score_stats[3] else None
+                ),
             },
         }
     }
