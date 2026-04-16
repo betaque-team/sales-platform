@@ -240,6 +240,10 @@ export async function getCompanies(
     recently_funded?: boolean;
     funding_stage?: string;
     sort_by?: string;
+    // F100: backend now Literal-validates `sort_dir` alongside `sort_by`.
+    // Callers that don't pass it get the backend default of "desc" —
+    // same behavior as every other sort-capable endpoint in the app.
+    sort_dir?: "asc" | "desc";
     per_page?: number;
   } = {}
 ): Promise<PaginatedResponse<Company>> {
@@ -252,6 +256,7 @@ export async function getCompanies(
     recently_funded: params.recently_funded !== undefined ? String(params.recently_funded) : undefined,
     funding_stage: params.funding_stage,
     sort_by: params.sort_by,
+    sort_dir: params.sort_dir,
     per_page: params.per_page,
   });
   return request<PaginatedResponse<Company>>(`/companies${query}`);

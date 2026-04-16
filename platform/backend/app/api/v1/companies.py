@@ -1,5 +1,6 @@
 """Company management API endpoints."""
 
+from typing import Literal
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -121,6 +122,29 @@ async def company_scores(
     return {"items": items}
 
 
+# Regression finding 100: `sort_by` was typed `str` and checked with an
+# if/elif chain — unknown values silently fell through to `Company.name
+# ASC`. `sort_dir` didn't exist at all, so even the keys that DID sort
+# ignored a requested direction. Literal-typed at the parameter level so
+# FastAPI 422s typos at parse time with the allowed list in the detail;
+# aggregate branches (`job_count`, `accepted_count`, …) now also accept
+# ascending direction (e.g. "companies with FEWEST jobs that are still
+# actively hiring" is a legitimate ops query that used to be impossible).
+# `contact_count` isn't in the allowlist yet because it's the one
+# aggregate we compute in Python post-query — adding it as a subquery is
+# a nice-to-have but outside the scope of this fix (the UI doesn't ask
+# for it today).
+CompanySortBy = Literal[
+    "name",
+    "funded_at",
+    "total_funding",
+    "relevant_job_count",
+    "job_count",
+    "accepted_count",
+]
+CompanySortDir = Literal["asc", "desc"]
+
+
 @router.get("")
 async def list_companies(
     search: str | None = None,
@@ -129,7 +153,8 @@ async def list_companies(
     actively_hiring: bool | None = None,
     funding_stage: str | None = None,
     recently_funded: bool | None = None,
-    sort_by: str = "name",
+    sort_by: CompanySortBy = "name",
+    sort_dir: CompanySortDir = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
@@ -240,18 +265,34 @@ async def list_companies(
     count_base = apply_filters(select(Company.id))
     total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar() or 0
 
-    if sort_by == "funded_at":
-        query = query.order_by(Company.funded_at.desc().nulls_last(), Company.name.asc())
-    elif sort_by == "total_funding":
-        query = query.order_by(Company.total_funding_usd.desc().nulls_last(), Company.name.asc())
-    elif sort_by == "relevant_job_count":
-        query = query.order_by(relevant_count_col.desc(), Company.name.asc())
-    elif sort_by == "job_count":
-        query = query.order_by(job_count_col.desc(), Company.name.asc())
-    elif sort_by == "accepted_count":
-        query = query.order_by(accepted_count_col.desc(), Company.name.asc())
+    # F100: sort_dir is now a first-class param, so `Sort: Most Jobs`
+    # + "ascending" is expressible. For the two nullable columns
+    # (`funded_at`, `total_funding`) we still push NULLs to the end on
+    # both directions — otherwise `sort_by=funded_at&sort_dir=asc` buries
+    # every unfunded company at the top, which is the opposite of useful
+    # for "surface companies that got funded most recently (starting
+    # from the oldest)". Secondary sort on `Company.name.asc()` is
+    # preserved for stable pagination when many rows share the primary
+    # sort key (e.g. 200 companies with job_count=0 tie in one bucket).
+    if sort_by == "name":
+        query = query.order_by(
+            Company.name.desc() if sort_dir == "desc" else Company.name.asc()
+        )
     else:
-        query = query.order_by(Company.name.asc())
+        sort_col_map = {
+            "funded_at": Company.funded_at,
+            "total_funding": Company.total_funding_usd,
+            "relevant_job_count": relevant_count_col,
+            "job_count": job_count_col,
+            "accepted_count": accepted_count_col,
+        }
+        col = sort_col_map[sort_by]
+        nullable = sort_by in ("funded_at", "total_funding")
+        if sort_dir == "desc":
+            primary = col.desc().nulls_last() if nullable else col.desc()
+        else:
+            primary = col.asc().nulls_last() if nullable else col.asc()
+        query = query.order_by(primary, Company.name.asc())
     query = query.offset((page - 1) * per_page).limit(per_page)
 
     result = await db.execute(query)
