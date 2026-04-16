@@ -306,8 +306,10 @@ function ClusterCard({
             </div>
           )}
 
+          {/* Regression finding 46: edit form gets placeholders and
+              Esc key handler to dismiss without saving. */}
           {isEditing && (
-            <div className="mt-3 space-y-3">
+            <div className="mt-3 space-y-3" onKeyDown={(e) => { if (e.key === "Escape") onEdit(); }}>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
                 <input
@@ -315,6 +317,8 @@ function ClusterCard({
                   value={editForm.display_name}
                   onChange={(e) => setEditForm({ ...editForm, display_name: e.target.value })}
                   className="input w-full text-sm"
+                  placeholder="e.g. Data Engineering / Analytics"
+                  autoFocus
                 />
               </div>
               <div>
@@ -324,6 +328,7 @@ function ClusterCard({
                   onChange={(e) => setEditForm({ ...editForm, keywords: e.target.value })}
                   className="input w-full text-sm"
                   rows={2}
+                  placeholder="devops, cloud, kubernetes, terraform, sre"
                 />
               </div>
               <div>
@@ -333,6 +338,7 @@ function ClusterCard({
                   onChange={(e) => setEditForm({ ...editForm, approved_roles: e.target.value })}
                   className="input w-full text-sm"
                   rows={2}
+                  placeholder="DevOps Engineer, Cloud Architect, SRE"
                 />
               </div>
               <div className="flex gap-2">
@@ -351,11 +357,14 @@ function ClusterCard({
           )}
         </div>
 
+        {/* Regression finding 45: aria-label includes cluster name for
+            screen readers that announce icon-only buttons. */}
         <div className="flex items-center gap-1 ml-4">
           <button
             onClick={onToggleRelevant}
             className={`rounded p-1.5 ${cluster.is_relevant ? "text-primary-600 hover:bg-primary-50" : "text-gray-400 hover:bg-gray-100"}`}
             title={cluster.is_relevant ? "Remove from relevant" : "Add to relevant"}
+            aria-label={`${cluster.is_relevant ? "Remove" : "Mark"} ${cluster.display_name} as relevant`}
           >
             <Star className="h-4 w-4" fill={cluster.is_relevant ? "currentColor" : "none"} />
           </button>
@@ -363,6 +372,7 @@ function ClusterCard({
             onClick={onToggleActive}
             className="rounded p-1.5 text-gray-400 hover:bg-gray-100"
             title={cluster.is_active ? "Deactivate" : "Activate"}
+            aria-label={`${cluster.is_active ? "Deactivate" : "Activate"} ${cluster.display_name}`}
           >
             {cluster.is_active ? <ToggleRight className="h-4 w-4 text-green-500" /> : <ToggleLeft className="h-4 w-4" />}
           </button>
@@ -370,15 +380,16 @@ function ClusterCard({
             onClick={onEdit}
             className="rounded p-1.5 text-gray-400 hover:bg-gray-100"
             title="Edit"
+            aria-label={`Edit ${cluster.display_name}`}
           >
             <Edit3 className="h-4 w-4" />
           </button>
           {confirmDelete ? (
             <div className="flex items-center gap-1">
-              <button onClick={onDelete} className="rounded p-1.5 text-red-600 hover:bg-red-50" title="Confirm">
+              <button onClick={onDelete} className="rounded p-1.5 text-red-600 hover:bg-red-50" title="Confirm delete" aria-label={`Confirm delete ${cluster.display_name}`}>
                 <Check className="h-4 w-4" />
               </button>
-              <button onClick={onCancelDelete} className="rounded p-1.5 text-gray-400 hover:bg-gray-100" title="Cancel">
+              <button onClick={onCancelDelete} className="rounded p-1.5 text-gray-400 hover:bg-gray-100" title="Cancel" aria-label="Cancel delete">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -387,6 +398,7 @@ function ClusterCard({
               onClick={onDelete}
               className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
               title="Delete"
+              aria-label={`Delete ${cluster.display_name}`}
             >
               <Trash2 className="h-4 w-4" />
             </button>

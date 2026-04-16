@@ -313,13 +313,15 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
     <form onSubmit={handleSubmit} className="space-y-6">
       {!category ? (
         <div>
-          <h3 className="text-sm font-medium text-gray-700 mb-3">What type of feedback?</h3>
-          <div className="grid grid-cols-2 gap-3">
+          <h3 id="feedback-category-label" className="text-sm font-medium text-gray-700 mb-3">What type of feedback?</h3>
+          <div className="grid grid-cols-2 gap-3" role="radiogroup" aria-labelledby="feedback-category-label">
             {(Object.entries(CATEGORY_CONFIG) as [FeedbackCategory, typeof CATEGORY_CONFIG.bug][]).map(
               ([key, cfg]) => (
                 <button
                   key={key}
                   type="button"
+                  role="radio"
+                  aria-checked={false}
                   onClick={() => setCategory(key)}
                   className="flex flex-col items-start rounded-lg border-2 border-gray-200 p-4 text-left transition hover:border-primary-500 hover:bg-primary-50"
                 >
@@ -344,10 +346,11 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="feedback-title" className="block text-sm font-medium text-gray-700 mb-1">
               Title <span className="text-red-500">*</span>
             </label>
             <input
+              id="feedback-title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -366,13 +369,15 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
-            <div className="flex gap-2">
+            <label id="feedback-priority-label" className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+            <div className="flex gap-2" role="radiogroup" aria-labelledby="feedback-priority-label">
               {(Object.entries(PRIORITY_CONFIG) as [FeedbackPriority, typeof PRIORITY_CONFIG.low][]).map(
                 ([key, cfg]) => (
                   <button
                     key={key}
                     type="button"
+                    role="radio"
+                    aria-checked={priority === key}
                     onClick={() => setPriority(key)}
                     className={`rounded-full px-3 py-1 text-xs font-medium transition ${
                       priority === key ? cfg.color + " ring-2 ring-offset-1 ring-gray-400" : "bg-gray-50 text-gray-500 hover:bg-gray-100"
@@ -386,10 +391,11 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="feedback-description" className="block text-sm font-medium text-gray-700 mb-1">
               Description <span className="text-red-500">*</span>
             </label>
             <textarea
+              id="feedback-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={4}
