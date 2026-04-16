@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getApplications, getApplicationStats, updateApplication, deleteApplication } from "@/lib/api";
 import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut } from "lucide-react";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 
 const STATUS_TABS: { label: string; value: string }[] = [
   { label: "All", value: "" },
@@ -42,15 +43,18 @@ export function ApplicationsPage() {
   const [page, setPage] = useState(1);
   const queryClient = useQueryClient();
 
-  const { data: stats } = useQuery({
+  // F222: destructure full query objects for banner-backed error surfacing.
+  const statsQ = useQuery({
     queryKey: ["application-stats"],
     queryFn: getApplicationStats,
   });
+  const stats = statsQ.data;
 
-  const { data, isLoading } = useQuery({
+  const applicationsQ = useQuery({
     queryKey: ["applications", statusFilter, search, page],
     queryFn: () => getApplications({ status: statusFilter || undefined, search: search || undefined, page, page_size: 25 }),
   });
+  const { data, isLoading } = applicationsQ;
 
   const updateMutation = useMutation({
     mutationFn: ({ id, ...data }: { id: string; status?: string; notes?: string }) => updateApplication(id, data),
@@ -87,6 +91,9 @@ export function ApplicationsPage() {
         <h1 className="text-2xl font-bold text-gray-900">Applications</h1>
         <p className="text-sm text-gray-500 mt-1">Track your job applications</p>
       </div>
+
+      {/* F222: surfaces stats/list failures. */}
+      <BackendErrorBanner queries={[statsQ, applicationsQ]} />
 
       {/* Stats */}
       <div className="grid grid-cols-4 gap-3 lg:grid-cols-8">

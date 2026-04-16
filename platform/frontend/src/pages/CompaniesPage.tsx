@@ -9,6 +9,7 @@ import {
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import { getCompanies, addToPipeline, exportContactsUrl } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 
@@ -42,7 +43,9 @@ export function CompaniesPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const { data, isLoading } = useQuery({
+  // F222: destructure full query so /companies failures surface instead
+  // of rendering a blank table with no explanation.
+  const companiesQ = useQuery({
     queryKey: ["companies", search, page, filterTarget, filterHasContacts, filterActivelyHiring, filterRecentlyFunded, filterFundingStage, sortBy],
     queryFn: () => getCompanies({
       search: search || undefined,
@@ -55,6 +58,7 @@ export function CompaniesPage() {
       sort_by: sortBy !== "name" ? sortBy : undefined,
     }),
   });
+  const { data, isLoading } = companiesQ;
 
   const pipelineMutation = useMutation({
     mutationFn: (companyId: string) => addToPipeline(companyId),
@@ -95,6 +99,9 @@ export function CompaniesPage() {
           Export Contacts
         </a>
       </div>
+
+      {/* F222: surfaces /companies failures. */}
+      <BackendErrorBanner queries={[companiesQ]} />
 
       <Card padding="sm">
         <div className="flex flex-col gap-3">

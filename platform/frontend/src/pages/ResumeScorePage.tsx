@@ -23,6 +23,7 @@ import { Button } from "@/components/Button";
 import { Badge } from "@/components/Badge";
 import { ScoreBar } from "@/components/ScoreBar";
 import { Pagination } from "@/components/Pagination";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import {
   uploadResume,
   getResumes,
@@ -248,15 +249,17 @@ export function ResumeScorePage() {
     return () => stopPolling();
   }, [scoringTaskId, selectedResumeId, queryClient, stopPolling]);
 
-  const { data: resumesData } = useQuery({
+  // F222: destructure full query so /resumes failures surface via banner.
+  const resumesQ = useQuery({
     queryKey: ["resumes"],
     queryFn: getResumes,
   });
+  const resumesData = resumesQ.data;
 
   const range = SCORE_RANGES[scoreRange];
   const sort = SORT_OPTIONS[sortIdx];
 
-  const { data: scoresData, isLoading: scoresLoading } = useQuery({
+  const scoresQ = useQuery({
     queryKey: ["resume-scores", selectedResumeId, page, search, roleCluster, scoreRange, sortIdx],
     queryFn: () =>
       getResumeScores(selectedResumeId!, {
@@ -271,6 +274,7 @@ export function ResumeScorePage() {
       }),
     enabled: !!selectedResumeId && !scoringTaskId,
   });
+  const { data: scoresData, isLoading: scoresLoading } = scoresQ;
 
   const uploadMutation = useMutation({
     mutationFn: (file: File) => uploadResume(file),
@@ -362,6 +366,9 @@ export function ResumeScorePage() {
           Upload your resume and score it against relevant job openings
         </p>
       </div>
+
+      {/* F222: surfaces /resumes + /resume-scores failures. */}
+      <BackendErrorBanner queries={[resumesQ, scoresQ]} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Left: Upload + Resume list */}

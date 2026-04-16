@@ -22,6 +22,7 @@ import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { VmHealthPanel } from "@/components/VmHealthPanel";
+import { QueryBoundary } from "@/components/QueryBoundary";
 import {
   getSystemHealth,
   getVmHealth,
@@ -115,11 +116,19 @@ function BreakdownTable({
 const SCAN_PLATFORMS = ["greenhouse", "lever", "ashby", "workable", "bamboohr", "himalayas", "wellfound", "jobvite", "smartrecruiters", "recruitee", "weworkremotely", "remoteok", "remotive"];
 
 export function MonitoringPage() {
-  const { data, isLoading, refetch, dataUpdatedAt } = useQuery({
+  // F222: MonitoringPage is the ADMIN HEALTH page. If the backend itself
+  // is unhealthy the previous "if (!data) return Failed to load monitoring
+  // data" branch gave zero signal about WHY (auth, 500, network) and had
+  // no retry. `<QueryBoundary>` at render time replaces it with an alert
+  // card that shows the actual error + a Try-again button. The VM panel
+  // stays on `retry: false` so it can gracefully degrade to "unavailable"
+  // without blocking the whole page.
+  const systemHealthQ = useQuery({
     queryKey: ["monitoring"],
     queryFn: getSystemHealth,
     refetchInterval: 30000,
   });
+  const { data, refetch, dataUpdatedAt } = systemHealthQ;
 
   // VM host-metrics (live, polls every 30s). If the backend can't read the
   // host snapshot (dev/CI), the panel renders a graceful "unavailable" card.
@@ -183,20 +192,25 @@ export function MonitoringPage() {
     setTimeout(poll, 2000);
   };
 
-  if (isLoading) {
+  // F222: single boundary covers loading AND error. Admin-access-required
+  // 403 flows through here as a clear error message instead of a silent
+  // blank. The old `if (!data)` catchall assumed the ONLY reason `data`
+  // could be undefined was auth — in practice a 500 or network timeout
+  // would hit the same branch and give the same misleading message.
+  if (systemHealthQ.isLoading || systemHealthQ.isError) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <div className="spinner h-8 w-8" />
+      <div className="mx-auto max-w-2xl pt-10">
+        <QueryBoundary query={systemHealthQ}>
+          <></>
+        </QueryBoundary>
       </div>
     );
   }
 
   if (!data) {
-    return (
-      <div className="py-20 text-center text-gray-500">
-        Failed to load monitoring data. Admin access required.
-      </div>
-    );
+    // Shouldn't happen now (isLoading/isError covered above) but keep a
+    // harmless fallback so TS narrows correctly below.
+    return null;
   }
 
   const d = data;

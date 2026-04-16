@@ -24,6 +24,7 @@ import {
   BarChart3,
 } from "lucide-react";
 import { Card } from "@/components/Card";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import {
   getAnalyticsOverview,
   getAnalyticsSources,
@@ -91,40 +92,54 @@ function MetricCard({
 export function AnalyticsPage() {
   const [days, setDays] = useState(30);
 
-  const { data: overview, isLoading: overviewLoading } = useQuery({
+  // F222: see DashboardPage for the rationale. 7 previously-silent
+  // queries are now routed through the shared `<BackendErrorBanner>`.
+  const overviewQ = useQuery({
     queryKey: ["analytics", "overview"],
     queryFn: getAnalyticsOverview,
   });
+  const overview = overviewQ.data;
+  const overviewLoading = overviewQ.isLoading;
 
-  const { data: sources } = useQuery({
+  const sourcesQ = useQuery({
     queryKey: ["analytics", "sources"],
     queryFn: getAnalyticsSources,
   });
+  const sources = sourcesQ.data;
 
-  const { data: trends } = useQuery({
+  const trendsQ = useQuery({
     queryKey: ["analytics", "trends", days],
     queryFn: () => getAnalyticsTrends(days),
   });
+  const trends = trendsQ.data;
 
-  const { data: funnel } = useQuery({
+  const funnelQ = useQuery({
     queryKey: ["analytics", "funnel"],
     queryFn: getAnalyticsFunnel,
   });
+  const funnel = funnelQ.data;
 
-  const { data: appFunnel } = useQuery({
+  const appFunnelQ = useQuery({
     queryKey: ["app-funnel"],
     queryFn: getApplicationFunnel,
   });
+  const appFunnel = appFunnelQ.data;
 
-  const { data: appByPlatform } = useQuery({
+  const appByPlatformQ = useQuery({
     queryKey: ["app-by-platform"],
     queryFn: getApplicationsByPlatform,
   });
+  const appByPlatform = appByPlatformQ.data;
 
-  const { data: reviewInsights } = useQuery({
+  const reviewInsightsQ = useQuery({
     queryKey: ["review-insights"],
     queryFn: getReviewInsights,
   });
+  const reviewInsights = reviewInsightsQ.data;
+
+  const analyticsQueries = [
+    overviewQ, sourcesQ, trendsQ, funnelQ, appFunnelQ, appByPlatformQ, reviewInsightsQ,
+  ];
 
   if (overviewLoading) {
     return (
@@ -159,6 +174,9 @@ export function AnalyticsPage() {
           ))}
         </div>
       </div>
+
+      {/* F222: surfaces any failed query out of the 7 on this page. */}
+      <BackendErrorBanner queries={analyticsQueries} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <MetricCard

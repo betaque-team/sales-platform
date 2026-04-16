@@ -50,6 +50,7 @@ import {
   generateInterviewPrep,
 } from "@/lib/api";
 import { ApplicationQuestionsPreview } from "@/components/ApplicationQuestionsPreview";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import type { ReviewPayload, PreparedAnswer, CoverLetterResult, InterviewPrepResult } from "@/lib/types";
 
 export function JobDetailPage() {
@@ -77,7 +78,7 @@ export function JobDetailPage() {
   // 401 is also handled globally by the api.ts interceptor (full
   // redirect to /login preserving next=<path>) so this branch only
   // needs to cover 404 / 5xx / network.
-  const { data: job, isLoading: jobLoading, isError: jobIsError, error: jobError } = useQuery({
+  const jobQ = useQuery({
     queryKey: ["job", id],
     queryFn: () => getJob(id!),
     enabled: !!id,
@@ -91,44 +92,59 @@ export function JobDetailPage() {
       return failureCount < 2;
     },
   });
+  const { data: job, isLoading: jobLoading, isError: jobIsError, error: jobError } = jobQ;
 
-  const { data: description, isLoading: descLoading } = useQuery({
+  const descriptionQ = useQuery({
     queryKey: ["job", id, "description"],
     queryFn: () => getJobDescription(id!),
     enabled: !!id,
   });
+  const { data: description, isLoading: descLoading } = descriptionQ;
 
-  const { data: reviews } = useQuery({
+  const reviewsQ = useQuery({
     queryKey: ["job", id, "reviews"],
     queryFn: () => getJobReviews(id!),
     enabled: !!id,
   });
+  const reviews = reviewsQ.data;
 
-  const { data: scoreBreakdown } = useQuery({
+  const scoreBreakdownQ = useQuery({
     queryKey: ["job", id, "score-breakdown"],
     queryFn: () => getJobScoreBreakdown(id!),
     enabled: !!id,
   });
+  const scoreBreakdown = scoreBreakdownQ.data;
 
-  const { data: relevantContacts } = useQuery({
+  const relevantContactsQ = useQuery({
     queryKey: ["job", id, "relevant-contacts"],
     queryFn: () => getRelevantContacts(job!.company_id, id!),
     enabled: !!id && !!job?.company_id,
   });
+  const relevantContacts = relevantContactsQ.data;
 
   // Apply readiness check
-  const { data: readiness } = useQuery({
+  const readinessQ = useQuery({
     queryKey: ["apply-readiness", id],
     queryFn: () => getApplyReadiness(id!),
     enabled: !!id,
   });
+  const readiness = readinessQ.data;
 
   // Auto-load existing application for this job
-  const { data: existingApp } = useQuery({
+  const existingAppQ = useQuery({
     queryKey: ["application-by-job", id],
     queryFn: () => getApplicationByJob(id!),
     enabled: !!id,
   });
+  const existingApp = existingAppQ.data;
+
+  // F222: banner covers the 6 secondary queries. The primary `job` query
+  // already has an explicit 404 → "Job not found" screen below (F207),
+  // so it's deliberately excluded — otherwise a 404 would show BOTH the
+  // dedicated screen and the banner.
+  const jobDetailAuxQueries = [
+    descriptionQ, reviewsQ, scoreBreakdownQ, relevantContactsQ, readinessQ, existingAppQ,
+  ];
 
   // Merge: freshApplyData (just prepared) takes priority over existingApp (from DB)
   const applyData = freshApplyData || existingApp;
@@ -371,6 +387,9 @@ export function JobDetailPage() {
         </div>
         <StatusBadge status={job.status} />
       </div>
+
+      {/* F222: surfaces description/reviews/score/contacts/readiness/existingApp failures. */}
+      <BackendErrorBanner queries={jobDetailAuxQueries} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 space-y-6">

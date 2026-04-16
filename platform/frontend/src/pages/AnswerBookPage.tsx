@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getAnswerBook, createAnswer, updateAnswer, deleteAnswer, importAnswersFromResume, getActiveResume, getAnswerBookCoverage } from "@/lib/api";
 import type { AnswerCategory } from "@/lib/types";
 import { BookOpen, Plus, Trash2, Edit3, Save, X, Download } from "lucide-react";
+import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 
 const CATEGORY_LABELS: Record<string, string> = {
   personal_info: "Personal Info",
@@ -24,20 +25,26 @@ export function AnswerBookPage() {
   const [newCat, setNewCat] = useState<AnswerCategory>("personal_info");
   const queryClient = useQueryClient();
 
-  const { data: activeResume } = useQuery({
+  // F222: destructure the full query objects so we can surface failures
+  // through `<BackendErrorBanner>`. Previously all three queries ignored
+  // `isError`/`error`, so a 500 just rendered an empty table.
+  const activeResumeQ = useQuery({
     queryKey: ["active-resume"],
     queryFn: getActiveResume,
   });
+  const activeResume = activeResumeQ.data;
 
-  const { data, isLoading } = useQuery({
+  const answerBookQ = useQuery({
     queryKey: ["answer-book", activeCategory],
     queryFn: () => getAnswerBook(activeCategory || undefined),
   });
+  const { data, isLoading } = answerBookQ;
 
-  const { data: coverage } = useQuery({
+  const coverageQ = useQuery({
     queryKey: ["answer-book-coverage"],
     queryFn: getAnswerBookCoverage,
   });
+  const coverage = coverageQ.data;
 
   const createMutation = useMutation({
     mutationFn: createAnswer,
@@ -108,6 +115,9 @@ export function AnswerBookPage() {
           </button>
         </div>
       </div>
+
+      {/* F222: surfaces any failed query on this page. */}
+      <BackendErrorBanner queries={[activeResumeQ, answerBookQ, coverageQ]} />
 
       {/* Coverage Panel */}
       {coverage && (

@@ -19,6 +19,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
 import { getReviewQueue, submitReview } from "@/lib/api";
 import type { Job, ReviewPayload } from "@/lib/types";
+import { QueryBoundary } from "@/components/QueryBoundary";
 
 const REJECTION_TAGS = [
   { value: "location_mismatch", label: "Location" },
@@ -35,10 +36,13 @@ export function ReviewQueuePage() {
   const [comment, setComment] = useState("");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
-  const { data: queueData, isLoading } = useQuery({
+  // F222: destructure the full query so a /review/queue 500 surfaces an
+  // error card with Retry instead of an indefinite "Queue is empty" state.
+  const queueQ = useQuery({
     queryKey: ["review", "queue"],
     queryFn: getReviewQueue,
   });
+  const { data: queueData } = queueQ;
   const queue: Job[] = queueData?.items ?? [];
 
   const reviewMutation = useMutation({
@@ -125,10 +129,13 @@ export function ReviewQueuePage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
-  if (isLoading) {
+  // F222: loading AND error both routed through the shared boundary.
+  if (queueQ.isLoading || queueQ.isError) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <div className="spinner h-8 w-8" />
+      <div className="mx-auto max-w-2xl pt-10">
+        <QueryBoundary query={queueQ}>
+          <></>
+        </QueryBoundary>
       </div>
     );
   }
