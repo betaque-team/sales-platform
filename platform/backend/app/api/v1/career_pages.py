@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.scan import CareerPageWatch
 from app.models.user import User
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 
 
 router = APIRouter(prefix="/career-pages", tags=["career-pages"])
@@ -82,10 +82,29 @@ class CareerPageUpdate(BaseModel):
         return _validate_career_page_url(v)
 
 
+# Regression finding 201: career-page mutations drive the discovery
+# scraper — a viewer creating `{"url":"http://attacker.example/",...}`
+# could coerce the scraper into hitting attacker-controlled URLs, and
+# DELETE on a legitimate watch would silently degrade data quality
+# for every downstream consumer. All other ops-owned mutation surfaces
+# (rules, role-clusters, monitoring/backup) are gated with
+# `require_role("admin")`; career-pages was the last one left on
+# plain `get_current_user`. GET stays readable for reviewers/viewers
+# so they can see which companies are being watched.
+_MUTATE_ROLE_GUARD = require_role("admin")
+
+
 @router.get("")
 async def list_career_pages(
     is_active: bool | None = None,
     page: int = Query(1, ge=1),
+    # Regression finding 202: the query param name is kept as
+    # `per_page` so existing API clients don't break, but the
+    # response envelope now returns the canonical `page_size` /
+    # `total_pages` keys used by every other list endpoint (see
+    # discovery.py:49-55 per F108). A shared `<Pagination>`
+    # component was rendering 0/0 on this list because it only
+    # understood the canonical keys.
     per_page: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -108,15 +127,17 @@ async def list_career_pages(
         "items": items,
         "total": total,
         "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
+        # F202: unified keys. Frontends reading `per_page` / `pages`
+        # are on a deprecated path and should migrate.
+        "page_size": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
     }
 
 
 @router.post("", response_model=CareerPageOut, status_code=201)
 async def create_career_page(
     body: CareerPageCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_MUTATE_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     # Check URL uniqueness
@@ -135,7 +156,7 @@ async def create_career_page(
 async def update_career_page(
     page_id: UUID,
     body: CareerPageUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_MUTATE_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(CareerPageWatch).where(CareerPageWatch.id == page_id))
@@ -155,7 +176,7 @@ async def update_career_page(
 @router.delete("/{page_id}", status_code=204)
 async def delete_career_page(
     page_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_MUTATE_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(CareerPageWatch).where(CareerPageWatch.id == page_id))
@@ -170,7 +191,11 @@ async def delete_career_page(
 @router.post("/{page_id}/check")
 async def trigger_check(
     page_id: UUID,
-    user: User = Depends(get_current_user),
+    # F201: triggering an immediate re-check also consumes scrape
+    # quota on an external target — gate on admin same as the CRUD
+    # surface. A non-admin hammering this endpoint in a loop was a
+    # cheap DoS against the scraper.
+    user: User = Depends(_MUTATE_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger an immediate check of this career page.

@@ -1,5 +1,6 @@
 """Job listing API endpoints."""
 
+from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func, or_, literal, case
@@ -34,6 +35,43 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+# Regression finding 198: `sort_by` was typed `str` and resolved via
+# `getattr(Job, sort_by, None)` with a fallback to `first_seen_at`. But
+# `getattr` happily returns relationships (`Job.reviews` → InstrumentedList
+# proxy), JSON columns (`Job.raw_json` → "could not identify an equality
+# operator" on ORDER BY), and private attrs (`_sa_instance_state` →
+# CompileError). All three bubbled back as HTTP 500 "Internal Server
+# Error" with a stack trace the frontend couldn't distinguish from a
+# real crash.
+#
+# Fix: Literal-typed param so FastAPI 422s the bad sort at parse time,
+# and a hand-maintained map to actual columns (no `getattr`) so we
+# never accidentally orderable-ize something that isn't. `company_name`
+# and `resume_score` stay keys because they drive the special JOIN
+# branches below, but they don't appear in the column map — the if-chain
+# consumes them before the map lookup.
+_JOB_SORT_COLUMNS = {
+    "first_seen_at":   Job.first_seen_at,
+    "last_seen_at":    Job.last_seen_at,
+    "relevance_score": Job.relevance_score,
+    "posted_at":       Job.posted_at,
+    "title":           Job.title,
+    "status":          Job.status,
+}
+
+JobSortBy = Literal[
+    "first_seen_at",
+    "last_seen_at",
+    "relevance_score",
+    "posted_at",
+    "title",
+    "company_name",
+    "resume_score",
+    "status",
+]
+JobSortDir = Literal["asc", "desc"]
+
+
 @router.get("")
 async def list_jobs(
     status: str | None = None,
@@ -47,8 +85,10 @@ async def list_jobs(
     is_classified: bool | None = None,
     search: str | None = None,
     q: str | None = None,
-    sort_by: str = "first_seen_at",
-    sort_dir: str = "desc",
+    # F198: Literal-typed → FastAPI 422s unknown sort keys at parse
+    # time instead of 500-ing from the `getattr` path below.
+    sort_by: JobSortBy = "first_seen_at",
+    sort_dir: JobSortDir = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     page_size: int | None = Query(None, ge=1, le=200),
@@ -143,9 +183,13 @@ async def list_jobs(
         query = query.join(Company, Job.company_id == Company.id)
         query = query.order_by(Company.name.desc() if sort_dir == "desc" else Company.name.asc())
     else:
-        sort_col = getattr(Job, sort_by, None)
-        if sort_col is None:
-            sort_col = Job.first_seen_at
+        # F198: hard-mapped lookup. Literal validation above guarantees
+        # `sort_by` is one of the eight allowed keys and two of them
+        # (`company_name`, `resume_score`) are consumed by the branches
+        # above, so this lookup is always safe. Fallback kept as
+        # defense-in-depth in case a future Literal value is added but
+        # the column map isn't updated.
+        sort_col = _JOB_SORT_COLUMNS.get(sort_by, Job.first_seen_at)
         query = query.order_by(sort_col.desc() if sort_dir == "desc" else sort_col.asc())
 
     query = query.offset((page - 1) * per_page).limit(per_page)

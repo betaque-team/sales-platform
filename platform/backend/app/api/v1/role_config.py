@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -135,7 +136,15 @@ async def create_role_cluster(
 
 @router.patch("/{cluster_id}")
 async def update_role_cluster(
-    cluster_id: str,
+    # Regression finding 199: was `cluster_id: str`, which let malformed
+    # paths like `/role-clusters/not-a-uuid` pass the route handler and
+    # reach SQLAlchemy, where `RoleClusterConfig.id == "not-a-uuid"`
+    # raised `DataError: invalid input syntax for type uuid: "not-a-uuid"`
+    # and bubbled as HTTP 500. Typing the param as `UUID` makes FastAPI
+    # 422 the bad input at parse time before any DB work happens — same
+    # treatment every other `/{id}` path in the codebase already uses
+    # (jobs.py:212, career_pages.py:155, pipeline.py, etc.).
+    cluster_id: UUID,
     body: RoleClusterUpdate,
     request: Request,
     user: User = Depends(require_role("admin")),
@@ -168,7 +177,7 @@ async def update_role_cluster(
 
     await log_action(
         db, user, action="role_cluster.update", resource="role_cluster",
-        request=request, metadata={"cluster_id": cluster_id, "fields": list(body.model_dump(exclude_unset=True).keys())},
+        request=request, metadata={"cluster_id": str(cluster_id), "fields": list(body.model_dump(exclude_unset=True).keys())},
     )
 
     return _serialize(cluster)
@@ -176,7 +185,9 @@ async def update_role_cluster(
 
 @router.delete("/{cluster_id}")
 async def delete_role_cluster(
-    cluster_id: str,
+    # F199: same UUID typing as the PATCH handler above — non-UUID path
+    # must 422 at parse time, not 500 from SQLAlchemy DataError.
+    cluster_id: UUID,
     request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
@@ -198,7 +209,7 @@ async def delete_role_cluster(
 
     await log_action(
         db, user, action="role_cluster.delete", resource="role_cluster",
-        request=request, metadata={"cluster_id": cluster_id, "name": cluster_name},
+        request=request, metadata={"cluster_id": str(cluster_id), "name": cluster_name},
     )
 
     return {"ok": True}
