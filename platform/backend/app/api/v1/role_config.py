@@ -5,7 +5,7 @@ import uuid
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,30 @@ def _normalize_cluster_name(raw: str) -> str:
     return candidate
 
 
+# Regression finding 200: GET returns BOTH `keywords` (comma-string) and
+# `keywords_list` (array) for the same record, but POST/PATCH only
+# accepted `keywords` as a string. A client that naturally round-tripped
+# GET payload back as PATCH sent `keywords: ["a","b"]` and got a 422
+# `Input should be a valid string`. Frontend fix ships a list, so widen
+# the input shape: accept either a `list[str]` OR a comma-delimited
+# `str`; normalize to the stored comma-string form via a `mode="before"`
+# validator that runs before pydantic's str-type check (so `max_length`
+# still kicks in on the joined form). `_serialize` keeps emitting both
+# wire shapes so existing read-only callers are unaffected. A follow-up
+# could migrate the column to JSONB, but that's a data-migration task
+# beyond this bug fix.
+def _coerce_keywords_list(v):
+    if v is None:
+        return v
+    if isinstance(v, list):
+        # Join with ", " (matches the canonical form `_serialize` produces
+        # when splitting on comma + strip). Filter out empty/blank entries
+        # so `["a", "", "  "]` → `"a"`.
+        parts = [str(x).strip() for x in v if str(x).strip()]
+        return ", ".join(parts)
+    return v
+
+
 class RoleClusterCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=40)
     display_name: str = Field(..., min_length=1, max_length=120)
@@ -52,6 +76,10 @@ class RoleClusterCreate(BaseModel):
     keywords: str = Field(default="", max_length=4000)
     approved_roles: str = Field(default="", max_length=4000)
     sort_order: int = Field(default=0, ge=0, le=1000)
+
+    _coerce_kw = field_validator("keywords", "approved_roles", mode="before")(
+        _coerce_keywords_list
+    )
 
 
 class RoleClusterUpdate(BaseModel):
@@ -61,6 +89,10 @@ class RoleClusterUpdate(BaseModel):
     keywords: str | None = Field(default=None, max_length=4000)
     approved_roles: str | None = Field(default=None, max_length=4000)
     sort_order: int | None = Field(default=None, ge=0, le=1000)
+
+    _coerce_kw = field_validator("keywords", "approved_roles", mode="before")(
+        _coerce_keywords_list
+    )
 
 
 def _serialize(rc: RoleClusterConfig) -> dict:

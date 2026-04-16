@@ -1,5 +1,6 @@
 """Review workflow API endpoints."""
 
+from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func
@@ -118,7 +119,18 @@ async def submit_review(
 @router.get("")
 async def list_reviews(
     job_id: UUID | None = None,
-    decision: str | None = None,
+    # Regression finding 195: `decision: str | None` silently accepted
+    # typos (`decision=bogus` → empty list, indistinguishable from "no
+    # matching rows"). Same F128 pattern chased through 8+ endpoints in
+    # earlier rounds (F162/F179/F187/F191). The DB column only ever
+    # stores the three values below (see `reviews.py:37` decision_map
+    # and `Review.decision` enum), so Literal-validate at the route
+    # boundary and let FastAPI 422 the unknown variants. Note: the
+    # stored form is `accepted`/`rejected`/`skipped` (past tense) — not
+    # the `accept`/`reject`/`skip` wire form the POST endpoint accepts
+    # via `decision_map`. We validate on the stored form here because
+    # that's what callers are filtering against.
+    decision: Literal["accepted", "rejected", "skipped"] | None = None,
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
