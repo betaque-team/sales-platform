@@ -43,19 +43,45 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
 
 
 @router.get("/overview")
-async def overview(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    # Job counts by status
-    status_counts = {}
+async def overview(
+    # Regression finding 214: `/analytics/overview` previously declared zero
+    # query params, so `?days=7`, `?days=abc`, `?junk=value` all returned
+    # byte-identical lifetime totals. The Dashboard "Last 7/30/90 days"
+    # switcher (when one ships) would have rendered time-windowed copy on
+    # top of all-time numbers, silently misleading users. Fix: honour
+    # `days` for the FLOW metrics (status counts, accepted/rejected flow,
+    # avg relevance on jobs seen in-window) while leaving CARDINALITY
+    # metrics un-windowed (`total_companies`, `pipeline_count` — those
+    # count "how many distinct things exist" and don't meaningfully get
+    # smaller for a narrower window; re-windowing them would under-count
+    # every company that happens not to have posted a job in the window).
+    # The response now echoes `days` so a caller that sent `?days=-1` and
+    # got silently dropped can detect it via the round-tripped value vs
+    # their intended request. Same F179 bounds as `/analytics/trends`.
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Job counts by status, windowed to jobs first_seen_at >= cutoff.
+    status_counts: dict[str, int] = {}
     result = await db.execute(
-        select(Job.status, func.count(Job.id)).group_by(Job.status)
+        select(Job.status, func.count(Job.id))
+        .where(Job.first_seen_at >= cutoff)
+        .group_by(Job.status)
     )
     for row in result:
         status_counts[row[0]] = row[1]
 
     total_jobs = sum(status_counts.values())
-    # Count companies from the Company table (consistent with Companies page and
-    # Monitoring); previously this used COUNT(DISTINCT jobs.company_id) which
-    # undercounts by excluding companies that don't currently have a job row.
+
+    # F214: cardinality metrics stay un-windowed. `total_companies` is
+    # sourced from the Company table (consistent with the Companies page
+    # and Monitoring) — previously this used COUNT(DISTINCT
+    # jobs.company_id) which undercounts by excluding companies that
+    # don't currently have a job row. Kept as lifetime totals regardless
+    # of `days` per the F214 rationale above.
     total_companies = (await db.execute(select(func.count(Company.id)))).scalar() or 0
     pipeline_count = (await db.execute(select(func.count(PotentialClient.id)))).scalar() or 0
 
@@ -65,10 +91,19 @@ async def overview(user: User = Depends(get_current_user), db: AsyncSession = De
     acceptance_rate = (accepted_count / reviewed_count) if reviewed_count > 0 else 0
 
     avg_relevance = (await db.execute(
-        select(func.avg(Job.relevance_score)).where(Job.relevance_score > 0)
+        select(func.avg(Job.relevance_score)).where(
+            Job.relevance_score > 0,
+            Job.first_seen_at >= cutoff,
+        )
     )).scalar() or 0
 
     return {
+        # F214: echo the window so a caller can detect silent-drop by
+        # comparing to what they sent. FastAPI's 422 already covers typos
+        # (`?days=abc`, `?days=-1`); this covers the "caller forgot to
+        # include the param" case where they relied on a default they
+        # assumed was different.
+        "days": days,
         "total_jobs": total_jobs,
         "by_status": status_counts,
         "total_companies": total_companies,
