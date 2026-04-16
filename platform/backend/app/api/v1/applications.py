@@ -108,14 +108,21 @@ async def get_apply_readiness(
     )
     ab_count = (await db.execute(ab_count_q)).scalar() or 0
 
-    # Resume score
+    # Resume score.
+    # resume_scores has no UNIQUE (resume_id, job_id); duplicate rows
+    # happen in production (concurrent scoring tasks) and would make
+    # `scalar_one_or_none()` raise `MultipleResultsFound` → 500. Pick
+    # the most recent row until the dedupe + UNIQUE migration lands.
     score_info = None
     if resume_ready:
         score = (await db.execute(
-            select(ResumeScore.overall_score).where(
+            select(ResumeScore.overall_score)
+            .where(
                 ResumeScore.resume_id == user.active_resume_id,
                 ResumeScore.job_id == job.id,
             )
+            .order_by(ResumeScore.scored_at.desc())
+            .limit(1)
         )).scalar_one_or_none()
         if score is not None:
             score_info = {"score": round(score, 1)}
@@ -236,12 +243,18 @@ async def prepare_application(
     from app.workers.tasks._answer_prep import match_questions_to_answers
     prepared_answers = match_questions_to_answers(ats_questions, list(merged.values()))
 
-    # Get resume score for this job
+    # Get resume score for this job.
+    # See the matching comment above: pick the most recently computed
+    # score to avoid MultipleResultsFound when the table has duplicate
+    # rows for the (resume_id, job_id) pair.
     score = (await db.execute(
-        select(ResumeScore.overall_score).where(
+        select(ResumeScore.overall_score)
+        .where(
             ResumeScore.resume_id == resume.id,
             ResumeScore.job_id == job.id,
         )
+        .order_by(ResumeScore.scored_at.desc())
+        .limit(1)
     )).scalar_one_or_none()
 
     # Create application record

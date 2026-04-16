@@ -318,11 +318,30 @@ async def get_job(job_id: UUID, user: User = Depends(get_current_user), db: Asyn
 
     # Enrich with resume score if active resume exists
     if user.active_resume_id:
+        # The resume_scores table has no uniqueness constraint on
+        # (resume_id, job_id), and in production we routinely end up
+        # with 2+ rows for the same pair because the scoring task can
+        # be scheduled multiple times (rescore_all_active_resumes +
+        # per-upload score + manual rescore). `scalar_one_or_none()`
+        # raises `MultipleResultsFound` on those rows, which bubbles
+        # out of the handler as a 500 — that's the Senior Security
+        # Engineer @ Bitwarden "Couldn't load this job" bug users
+        # hit in prod this afternoon. Short-term fix: select the most
+        # recently computed row and move on. The cleanup is a
+        # follow-up: dedupe the rows + add a `UNIQUE (resume_id,
+        # job_id)` constraint so the score-write path uses an
+        # ON CONFLICT DO UPDATE. `/jobs` (list) never surfaced this
+        # because it maps duplicates via dict last-write-wins — only
+        # the single-job handler's `scalar_one_or_none` contract was
+        # strict enough to raise.
         score_result = await db.execute(
-            select(ResumeScore).where(
+            select(ResumeScore)
+            .where(
                 ResumeScore.resume_id == user.active_resume_id,
                 ResumeScore.job_id == job.id,
             )
+            .order_by(ResumeScore.scored_at.desc())
+            .limit(1)
         )
         rs = score_result.scalar_one_or_none()
         if rs:
