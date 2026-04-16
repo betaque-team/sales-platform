@@ -72,9 +72,7 @@ async def submit_review(
             select(PotentialClient).where(PotentialClient.company_id == job.company_id)
         )
         client = result.scalar_one_or_none()
-        if client:
-            client.accepted_jobs_count += 1
-        else:
+        if not client:
             # Auto-create pipeline entry
             result = await db.execute(select(Company).where(Company.id == job.company_id))
             company = result.scalar_one_or_none()
@@ -83,9 +81,18 @@ async def submit_review(
                 client = PotentialClient(
                     company_id=job.company_id,
                     stage="new_lead",
-                    accepted_jobs_count=1,
                 )
                 db.add(client)
+        # Regression finding 192: deliberately NO `accepted_jobs_count += 1`
+        # here. The column was incremented on every accept event but
+        # never decremented on reject/flip, so it drifted from reality
+        # (a single job flipped accept→reject→accept contributed +2).
+        # `/pipeline` listing and detail now compute the count live via
+        # `SELECT COUNT(*) FROM jobs WHERE status='accepted' AND company_id=?`
+        # so the stored column is no longer read for display. Left as a
+        # legacy column (drop requires a migration + downstream export
+        # sweep) but stopped writing to it so future data doesn't drift
+        # further.
 
     await db.commit()
     await db.refresh(review)
