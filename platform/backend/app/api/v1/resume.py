@@ -2,9 +2,10 @@
 
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -463,14 +464,45 @@ async def get_score_task_status(
 @router.get("/{resume_id}/scores")
 async def get_resume_scores(
     resume_id: UUID,
-    page: int = 1,
-    page_size: int = 25,
+    # Regression finding 224: previously `page: int = 1, page_size: int = 25`
+    # had NO `Query(..., ge=, le=)` bounds, so:
+    #   - `?page_size=10000` materialized ~5,000 score rows × 2 keys
+    #     (`items` + the F205 `scores` alias) = ~9-18 MB JSON in memory
+    #     before emitting — a trivial memory-DoS lever on any authenticated
+    #     JWT with at least one resume.
+    #   - `?page=0` computed `offset = (0-1)*25 = -25` → PG 500 on
+    #     negative OFFSET.
+    #   - `?page=-1` / `?page_size=-1` hit the same negative-offset path
+    #     and the PG `LIMIT -1` rejection — both surface as 500 Internal
+    #     Server Error instead of a structured 422.
+    #   - `sort_by`/`sort_dir` were raw `str` so `?sort_by=junk` silently
+    #     fell through to the default ("overall_score") with no 422
+    #     telling the caller the param was ignored. `sort_dir=foo`
+    #     defaulted to `desc` the same way.
+    # Fix mirrors F179 (/analytics/trends), F217 (/platforms/scan-logs),
+    # F223 (/platforms/boards): strict `Query(..., ge=1, le=N)` bounds
+    # on the pagination pair, `Literal` on the enum-like sort params so
+    # typos return 422, and score bounds 0..100 matching the data domain
+    # (overall_score is always 0..100 per `_ats_scoring.py`). `role_cluster`
+    # stays free-form `str` because it's matched against the dynamic
+    # `RoleClusterConfig` catalog that admins mutate — a Literal would
+    # drift; if that becomes a problem, swap to DB-validation like the
+    # /export/jobs?role_cluster pattern.
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
     role_cluster: str | None = None,
-    min_score: float | None = None,
-    max_score: float | None = None,
+    min_score: float | None = Query(None, ge=0, le=100),
+    max_score: float | None = Query(None, ge=0, le=100),
     search: str | None = None,
-    sort_by: str = "overall_score",
-    sort_dir: str = "desc",
+    sort_by: Literal[
+        "overall_score",
+        "keyword_score",
+        "role_match_score",
+        "format_score",
+        "job_title",
+        "company_name",
+    ] = "overall_score",
+    sort_dir: Literal["asc", "desc"] = "desc",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
