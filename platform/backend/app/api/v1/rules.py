@@ -58,12 +58,13 @@ async def list_rules(
     rules = result.scalars().all()
     items = [RoleRuleOut.model_validate(r) for r in rules]
 
+    # Regression finding 108: unified pagination keys
     return {
         "items": items,
         "total": total,
         "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
+        "page_size": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
     }
 
 
