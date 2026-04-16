@@ -75,6 +75,14 @@ _JOB_SORT_COLUMNS = {
     "posted_at":       Job.posted_at,
     "title":           Job.title,
     "status":          Job.status,
+    # `platform` was advertised in the JobsPage sort dropdown but never
+    # made it into the column map — picking "Platform A-Z" 422'd via
+    # the F198 Literal guard (latent bug since F198 shipped). Adding
+    # the column here + the matching Literal entry below + the
+    # `_ALLOWED_SORT_KEYS` member makes the dropdown option work and
+    # also unlocks `platform` as a multi-sort tiebreaker (e.g. group
+    # infra jobs by platform with relevance as secondary).
+    "platform":        Job.platform,
 }
 
 JobSortBy = Literal[
@@ -86,8 +94,76 @@ JobSortBy = Literal[
     "company_name",
     "resume_score",
     "status",
+    "platform",
 ]
 JobSortDir = Literal["asc", "desc"]
+
+# Single source of truth for allowed sort keys — used by the multi-sort
+# parser below. `JobSortBy` Literal stays for API-surface documentation
+# and for the legacy single-sort path; the parser validates against this
+# set directly because a runtime `sort_by` like
+# `relevance_score:desc,first_seen_at:desc` is a single `str` arg and
+# the per-segment keys aren't individually Literal-typeable at the
+# signature.
+_ALLOWED_SORT_KEYS = frozenset({
+    "first_seen_at", "last_seen_at", "relevance_score",
+    "posted_at", "title", "company_name", "resume_score", "status",
+    "platform",
+})
+
+
+def _parse_sort_spec(sort_by: str, fallback_dir: str) -> list[tuple[str, str]]:
+    """Parse a sort spec into a list of ``(key, dir)`` tuples.
+
+    Accepts two forms:
+
+    - **Legacy single-sort** — `sort_by="relevance_score"` (+ the separate
+      `sort_dir` query param). Returns ``[(key, fallback_dir)]``.
+    - **Multi-sort** — `sort_by="relevance_score:desc,first_seen_at:desc"`.
+      The per-segment direction overrides `fallback_dir`. Segments
+      without a `:` inherit `fallback_dir`.
+
+    Raises ``HTTPException(422)`` on any unknown key or direction so
+    callers get the same parse-time rejection as the Literal-typed
+    single-sort path (F198). Deduplicates keys in-place — the first
+    occurrence wins — so a shift-click chain that accidentally repeats
+    a key still produces valid SQL.
+    """
+    segments = [s.strip() for s in sort_by.split(",") if s.strip()]
+    if not segments:
+        return [("first_seen_at", fallback_dir)]
+    parsed: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for seg in segments:
+        if ":" in seg:
+            key, _, direction = seg.partition(":")
+            key = key.strip()
+            direction = direction.strip().lower() or fallback_dir
+        else:
+            key = seg
+            direction = fallback_dir
+        if key not in _ALLOWED_SORT_KEYS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Invalid sort_by key '{key}'. Must be one of: "
+                    + ", ".join(sorted(_ALLOWED_SORT_KEYS))
+                ),
+            )
+        if direction not in ("asc", "desc"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid sort direction '{direction}' for '{key}'. Must be 'asc' or 'desc'.",
+            )
+        if key in seen:
+            # User shift-clicked the same column twice — keep the first
+            # (earlier in the chain = higher priority). Silently drop
+            # the dupe instead of 422ing, since it's a UI artifact not
+            # a wire-protocol violation.
+            continue
+        seen.add(key)
+        parsed.append((key, direction))
+    return parsed
 
 
 @router.get("")
@@ -121,7 +197,17 @@ async def list_jobs(
     q: str | None = None,
     # F198: Literal-typed → FastAPI 422s unknown sort keys at parse
     # time instead of 500-ing from the `getattr` path below.
-    sort_by: JobSortBy = "first_seen_at",
+    #
+    # Multi-sort extension (Apr 2026): when `sort_by` contains a `,` or
+    # `:` it is parsed as a comma-separated list of `key:dir` pairs,
+    # e.g. `relevance_score:desc,first_seen_at:desc`. The per-segment
+    # direction overrides `sort_dir`. Each key is validated against
+    # `_ALLOWED_SORT_KEYS` at request time (FastAPI's Literal can't
+    # validate the inside of a comma-separated string, so we parse
+    # ourselves and 422 with a key list on miss). The legacy single
+    # `sort_by=relevance_score` + `sort_dir=desc` form remains the
+    # default and works unchanged for callers that pre-date multi-sort.
+    sort_by: str = "first_seen_at",
     sort_dir: JobSortDir = "desc",
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
@@ -220,27 +306,57 @@ async def list_jobs(
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
-    # If sorting by resume_score, use a LEFT JOIN with ResumeScore
-    if sort_by == "resume_score" and user.active_resume_id:
-        query = query.outerjoin(
-            ResumeScore,
-            (ResumeScore.job_id == Job.id) & (ResumeScore.resume_id == user.active_resume_id),
-        )
-        score_col = func.coalesce(ResumeScore.overall_score, 0)
-        query = query.order_by(score_col.desc() if sort_dir == "desc" else score_col.asc())
-    elif sort_by == "company_name":
-        # Sort by the related company name — need explicit join
-        query = query.join(Company, Job.company_id == Company.id)
-        query = query.order_by(Company.name.desc() if sort_dir == "desc" else Company.name.asc())
-    else:
-        # F198: hard-mapped lookup. Literal validation above guarantees
-        # `sort_by` is one of the eight allowed keys and two of them
-        # (`company_name`, `resume_score`) are consumed by the branches
-        # above, so this lookup is always safe. Fallback kept as
-        # defense-in-depth in case a future Literal value is added but
-        # the column map isn't updated.
-        sort_col = _JOB_SORT_COLUMNS.get(sort_by, Job.first_seen_at)
-        query = query.order_by(sort_col.desc() if sort_dir == "desc" else sort_col.asc())
+    # Parse multi-sort spec (single-sort is just a 1-element chain).
+    # `_parse_sort_spec` validates each key + direction and 422s on miss.
+    sort_chain = _parse_sort_spec(sort_by, sort_dir)
+
+    # Resolve each (key, dir) into an SQLAlchemy ORDER BY expression,
+    # joining once per dependent table. The original logic only had to
+    # consider one `sort_by` value at a time; with multi-sort we may
+    # need joins for both `resume_score` and `company_name` in the
+    # same query, so we track which joins are already attached and
+    # apply each at most once.
+    joined_company = False
+    joined_resume_scores = False
+    order_clauses = []
+    for key, direction in sort_chain:
+        if key == "resume_score" and user.active_resume_id:
+            if not joined_resume_scores:
+                query = query.outerjoin(
+                    ResumeScore,
+                    (ResumeScore.job_id == Job.id)
+                    & (ResumeScore.resume_id == user.active_resume_id),
+                )
+                joined_resume_scores = True
+            score_col = func.coalesce(ResumeScore.overall_score, 0)
+            order_clauses.append(score_col.desc() if direction == "desc" else score_col.asc())
+        elif key == "resume_score":
+            # No active resume — silently drop this sort key rather than
+            # 422-ing, so a user removing their active resume doesn't
+            # break their saved sort chain. Skipping degrades gracefully
+            # to whatever other sort keys they had.
+            continue
+        elif key == "company_name":
+            if not joined_company:
+                query = query.join(Company, Job.company_id == Company.id)
+                joined_company = True
+            order_clauses.append(Company.name.desc() if direction == "desc" else Company.name.asc())
+        else:
+            # F198: hard-mapped lookup. Validation above guarantees the
+            # key is in `_ALLOWED_SORT_KEYS`; the .get() fallback is
+            # defense-in-depth for the case where a future allowed key
+            # is added but the column map isn't updated.
+            sort_col = _JOB_SORT_COLUMNS.get(key, Job.first_seen_at)
+            order_clauses.append(sort_col.desc() if direction == "desc" else sort_col.asc())
+
+    if not order_clauses:
+        # Pathological case: chain was `resume_score` only and user has
+        # no active resume → fell through with nothing. Fall back to
+        # the documented default so the result set isn't database-
+        # implementation-defined order.
+        order_clauses = [Job.first_seen_at.desc()]
+
+    query = query.order_by(*order_clauses)
 
     query = query.offset((page - 1) * per_page).limit(per_page)
 

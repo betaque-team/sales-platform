@@ -23,8 +23,156 @@ import type {
   JobStatus,
   BulkActionStatus,
   BulkFilterCriteria,
+  SortKey,
 } from "@/lib/types";
 import { formatCount } from "@/lib/format";
+
+// localStorage key for filter stickiness. Versioned so a future shape
+// change (e.g. adding a new filter axis) can be migrated by bumping
+// the version instead of silently feeding stale state into a refactored
+// reducer. Mirrors a feature request from user feedback `e93fabd0`
+// "Problem of Filter Stickness — when applying filters, if I want to
+// switch to another company, I have to apply them again."
+const FILTERS_STORAGE_KEY = "jobspage_filters_v1";
+
+// Default direction per column when first added to the sort chain.
+// Numeric / temporal columns get `desc` (highest/newest first), text
+// columns get `asc` (A → Z). Toggling a column already in the chain
+// flips its direction; this map only seeds the initial direction.
+const DEFAULT_SORT_DIR: Record<string, "asc" | "desc"> = {
+  relevance_score: "desc",
+  resume_score: "desc",
+  first_seen_at: "desc",
+  last_seen_at: "desc",
+  posted_at: "desc",
+  title: "asc",
+  company_name: "asc",
+  platform: "asc",
+  status: "asc",
+};
+
+function defaultDirFor(column: string): "asc" | "desc" {
+  return DEFAULT_SORT_DIR[column] ?? "desc";
+}
+
+// Wire format ↔ array conversion. The wire form is a comma-separated
+// list of `key:dir` pairs (e.g. `relevance_score:desc,first_seen_at:desc`)
+// that the backend `_parse_sort_spec` accepts and that round-trips
+// through URL params and localStorage.
+function parseSorts(raw: string | null | undefined): SortKey[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((seg) => {
+      const [k, d] = seg.includes(":") ? seg.split(":", 2) : [seg, defaultDirFor(seg)];
+      const dir = (d === "asc" || d === "desc" ? d : defaultDirFor(k)) as "asc" | "desc";
+      return { key: k, dir };
+    });
+}
+
+function serializeSorts(sorts: SortKey[] | undefined): string {
+  if (!sorts || sorts.length === 0) return "";
+  return sorts.map((s) => `${s.key}:${s.dir}`).join(",");
+}
+
+// Build the initial filters from URL params (highest priority — explicit
+// user intent), falling back to localStorage (last session's filters,
+// the stickiness ask), then to defaults. URL params win because
+// shareable links and Sidebar deep-links should override stickiness;
+// stickiness is a "no-explicit-state" convenience.
+function buildInitialFilters(searchParams: URLSearchParams): JobFilters {
+  const parseIsClassified = (raw: string | null): boolean | undefined => {
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return undefined;
+  };
+
+  // Detect whether the URL carries any filter axis. We check the keys
+  // we know about (not just length > 0) so that incidental params
+  // like `page` don't count as "user came in with a filter set."
+  const urlHasFilters =
+    searchParams.has("search") ||
+    searchParams.has("status") ||
+    searchParams.has("platform") ||
+    searchParams.has("geography") ||
+    searchParams.has("role_cluster") ||
+    searchParams.has("is_classified") ||
+    searchParams.has("sort_by") ||
+    searchParams.has("sorts") ||
+    searchParams.has("sort_dir");
+
+  if (urlHasFilters) {
+    // Multi-sort URL key takes precedence; fall back to legacy
+    // sort_by + sort_dir for shareable links generated before
+    // multi-sort shipped.
+    const sortsParam = searchParams.get("sorts");
+    const legacySortBy = searchParams.get("sort_by");
+    const legacySortDir = searchParams.get("sort_dir");
+    let sorts: SortKey[] = [];
+    if (sortsParam) {
+      sorts = parseSorts(sortsParam);
+    } else if (legacySortBy) {
+      const dir = (legacySortDir === "asc" ? "asc" : "desc") as "asc" | "desc";
+      sorts = [{ key: legacySortBy, dir }];
+    } else {
+      sorts = [{ key: "relevance_score", dir: "desc" }];
+    }
+    return {
+      search: searchParams.get("search") || "",
+      status: (searchParams.get("status") || "") as JobFilters["status"],
+      platform: searchParams.get("platform") || "",
+      geography: searchParams.get("geography") || "",
+      role_cluster: searchParams.get("role_cluster") || "",
+      is_classified: parseIsClassified(searchParams.get("is_classified")),
+      sorts,
+      page: Number(searchParams.get("page")) || 1,
+      page_size: 25,
+    };
+  }
+
+  // No URL filters → try localStorage. We deliberately don't restore
+  // `page` from localStorage — restoring filters AND landing on page
+  // 7 would surprise a user who came back the next day expecting to
+  // see the top of the list. Page is always 1 on fresh visits.
+  try {
+    const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+    if (raw) {
+      const stored = JSON.parse(raw) as Partial<JobFilters>;
+      const sorts = stored.sorts && Array.isArray(stored.sorts) && stored.sorts.length > 0
+        ? stored.sorts
+        : [{ key: "relevance_score", dir: "desc" as const }];
+      return {
+        search: stored.search || "",
+        status: (stored.status || "") as JobFilters["status"],
+        platform: stored.platform || "",
+        geography: stored.geography || "",
+        role_cluster: stored.role_cluster || "",
+        is_classified: stored.is_classified,
+        sorts,
+        page: 1,
+        page_size: 25,
+      };
+    }
+  } catch {
+    // Corrupt localStorage entry — fall through to defaults. Don't
+    // bubble the parse error; this is a soft-restore that should
+    // never block the page from rendering.
+  }
+
+  return {
+    search: "",
+    status: "",
+    platform: "",
+    geography: "",
+    role_cluster: "",
+    is_classified: undefined,
+    sorts: [{ key: "relevance_score", dir: "desc" }],
+    page: 1,
+    page_size: 25,
+  };
+}
 
 // F69: user-facing verb → backend status mapping. The buttons stay
 // labelled Accept/Reject/Reset (what the user intends) but the wire
@@ -98,48 +246,40 @@ export function JobsPage() {
   // Regression finding 34: ref guards against infinite URL ↔ state loops
   const syncingFromUrl = useRef(false);
 
-  // F87: `is_classified` serialises to/from the URL as "true"/"false"/(absent)
-  // alongside `role_cluster`. Parse once here and again inside the URL→state
-  // sync below so direct links (/jobs?is_classified=false) stay sticky.
-  const parseIsClassified = (raw: string | null): boolean | undefined => {
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    return undefined;
-  };
-
-  const [filters, setFilters] = useState<JobFilters>(() => ({
-    search: searchParams.get("search") || "",
-    status: (searchParams.get("status") || "") as JobFilters["status"],
-    platform: searchParams.get("platform") || "",
-    geography: searchParams.get("geography") || "",
-    role_cluster: searchParams.get("role_cluster") || "",
-    is_classified: parseIsClassified(searchParams.get("is_classified")),
-    sort_by: searchParams.get("sort_by") || "relevance_score",
-    sort_dir: searchParams.get("sort_dir") || "desc",
-    page: Number(searchParams.get("page")) || 1,
-    page_size: 25,
-  }));
+  const [filters, setFilters] = useState<JobFilters>(() =>
+    buildInitialFilters(searchParams)
+  );
 
   // URL → state: re-sync filters when URL params change externally
-  // (e.g. Sidebar navigation between "All Jobs" and "Relevant Jobs")
+  // (e.g. Sidebar navigation between "All Jobs" and "Relevant Jobs",
+  // or a deep-link with explicit filters). When the URL has no filter
+  // params we leave the current in-memory state alone instead of
+  // resetting to defaults — that's how filter stickiness survives a
+  // round-trip through a sidebar link that strips the query string.
   useEffect(() => {
+    const urlHasFilters =
+      searchParams.has("search") ||
+      searchParams.has("status") ||
+      searchParams.has("platform") ||
+      searchParams.has("geography") ||
+      searchParams.has("role_cluster") ||
+      searchParams.has("is_classified") ||
+      searchParams.has("sort_by") ||
+      searchParams.has("sorts") ||
+      searchParams.has("sort_dir") ||
+      searchParams.has("page");
+    if (!urlHasFilters) return;
     syncingFromUrl.current = true;
-    setFilters({
-      search: searchParams.get("search") || "",
-      status: (searchParams.get("status") || "") as JobFilters["status"],
-      platform: searchParams.get("platform") || "",
-      geography: searchParams.get("geography") || "",
-      role_cluster: searchParams.get("role_cluster") || "",
-      is_classified: parseIsClassified(searchParams.get("is_classified")),
-      sort_by: searchParams.get("sort_by") || "relevance_score",
-      sort_dir: searchParams.get("sort_dir") || "desc",
-      page: Number(searchParams.get("page")) || 1,
-      page_size: 25,
-    });
+    setFilters(buildInitialFilters(searchParams));
   }, [searchParams]);
 
-  // State → URL: write filter changes back to the URL so it's shareable.
-  // Skip when the change originated from the URL→state sync above.
+  // State → URL: write filter changes back to the URL so the result
+  // is shareable. Multi-sort serialises into a single `sorts` param
+  // (the legacy `sort_by` + `sort_dir` keys are no longer emitted —
+  // shareable links now use the unified format that the
+  // `buildInitialFilters` parser also accepts via the `sorts` key).
+  // Skip the write when the change originated from the URL→state
+  // sync above to avoid a sync loop.
   useEffect(() => {
     if (syncingFromUrl.current) {
       syncingFromUrl.current = false;
@@ -153,15 +293,46 @@ export function JobsPage() {
     if (filters.role_cluster) params.set("role_cluster", filters.role_cluster);
     // F87: only serialise `is_classified` when the user has explicitly
     // narrowed to it — `undefined` = "both", which is the default and
-    // doesn't need to show up in the URL. `true`/`false` round-trip
-    // via the `parseIsClassified` helper above.
+    // doesn't need to show up in the URL.
     if (filters.is_classified === true) params.set("is_classified", "true");
     else if (filters.is_classified === false) params.set("is_classified", "false");
-    if (filters.sort_by && filters.sort_by !== "relevance_score") params.set("sort_by", filters.sort_by);
-    if (filters.sort_dir && filters.sort_dir !== "desc") params.set("sort_dir", filters.sort_dir);
+    // Multi-sort: emit only when the chain is non-default (anything
+    // other than "relevance_score:desc" alone). Single-sort callers
+    // and shareable links generated before multi-sort shipped still
+    // work via the legacy `sort_by`/`sort_dir` parser branch in
+    // `buildInitialFilters`.
+    const sortsStr = serializeSorts(filters.sorts);
+    if (sortsStr && sortsStr !== "relevance_score:desc") {
+      params.set("sorts", sortsStr);
+    }
     if ((filters.page ?? 1) > 1) params.set("page", String(filters.page));
     setSearchParams(params, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
+  // Filter stickiness — write to localStorage on every state change so
+  // the next visit (incl. after navigating to /companies and back via
+  // Sidebar) restores the user's filter set. Page is intentionally
+  // omitted here; landing back on page 7 a day later would surprise
+  // the user. See user feedback `e93fabd0` "Problem of Filter
+  // Stickness" for the originating ask.
+  useEffect(() => {
+    try {
+      const toPersist = {
+        search: filters.search,
+        status: filters.status,
+        platform: filters.platform,
+        geography: filters.geography,
+        role_cluster: filters.role_cluster,
+        is_classified: filters.is_classified,
+        sorts: filters.sorts,
+      };
+      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(toPersist));
+    } catch {
+      // localStorage can throw in private browsing / quota-full.
+      // Stickiness is a UX nicety — a failure here shouldn't break
+      // the page render.
+    }
   }, [filters]);
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -195,7 +366,12 @@ export function JobsPage() {
     setBulkErrorMsg(null);
   }, [
     filters.search, filters.status, filters.platform, filters.geography,
-    filters.role_cluster, filters.is_classified, filters.sort_by, filters.sort_dir,
+    filters.role_cluster, filters.is_classified,
+    // Multi-sort: serialise the chain so a chain change (column add /
+    // remove / reorder / direction toggle) trips the same reset path
+    // that the legacy single-sort change did. `useEffect` deps need a
+    // primitive, hence the join.
+    serializeSorts(filters.sorts),
   ]);
 
   // F222: destructure full queries so failures surface via the banner.
@@ -390,26 +566,89 @@ export function JobsPage() {
     });
   };
 
-  const handleColumnSort = (column: string) => {
+  // Column-header click handlers. Two modes — plain click resets the
+  // chain to a single column (the common case); shift/ctrl/cmd+click
+  // adds a column to the chain or toggles its direction in-place
+  // (multi-column sort, e.g. "primary by relevance, tiebreaker by
+  // first_seen"). Cmd-click on an already-in-chain column REMOVES
+  // it from the chain — gives the user an undo without forcing them
+  // back through the dropdown.
+  const handleColumnSort = (column: string, e: React.MouseEvent) => {
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    const removeRequested = (e.metaKey || e.ctrlKey) && !e.shiftKey;
     setFilters((prev) => {
-      if (prev.sort_by === column) {
-        // Toggle direction
-        return { ...prev, sort_dir: prev.sort_dir === "desc" ? "asc" : "desc", page: 1 };
+      const chain = prev.sorts ?? [];
+      const idx = chain.findIndex((s) => s.key === column);
+
+      // Cmd/Ctrl-click on an already-sorted column → remove it from
+      // the chain (unless it's the last remaining sort, in which case
+      // we keep it but flip direction — the table always needs at
+      // least one ORDER BY to be deterministic).
+      if (removeRequested && idx >= 0 && chain.length > 1) {
+        const next = chain.filter((_, i) => i !== idx);
+        return { ...prev, sorts: next, page: 1 };
       }
-      // New column: default to desc for scores/dates, asc for text
-      const defaultDir = ["title", "company_name", "platform"].includes(column) ? "asc" : "desc";
-      return { ...prev, sort_by: column, sort_dir: defaultDir, page: 1 };
+
+      // Shift-click: append to chain, or toggle if already present.
+      if (additive) {
+        if (idx >= 0) {
+          const next = [...chain];
+          next[idx] = { ...next[idx], dir: next[idx].dir === "desc" ? "asc" : "desc" };
+          return { ...prev, sorts: next, page: 1 };
+        }
+        return {
+          ...prev,
+          sorts: [...chain, { key: column, dir: defaultDirFor(column) }],
+          page: 1,
+        };
+      }
+
+      // Plain click: replace the chain with a single column. If the
+      // user clicks the SAME column that's currently the sole primary
+      // sort, toggle direction (matches the pre-multi-sort behavior).
+      if (chain.length === 1 && chain[0].key === column) {
+        return {
+          ...prev,
+          sorts: [{ key: column, dir: chain[0].dir === "desc" ? "asc" : "desc" }],
+          page: 1,
+        };
+      }
+      return { ...prev, sorts: [{ key: column, dir: defaultDirFor(column) }], page: 1 };
     });
   };
 
+  // Header sort indicator — combines the direction arrow with a small
+  // priority badge when the column is part of a multi-key chain
+  // (badge shows `1`/`2`/`3` so the user can see WHICH column is the
+  // primary vs tiebreaker). Single-sort users see only the arrow,
+  // identical to the pre-multi-sort UI.
   const SortIcon = ({ column }: { column: string }) => {
-    if (filters.sort_by !== column) {
+    const chain = filters.sorts ?? [];
+    const idx = chain.findIndex((s) => s.key === column);
+    if (idx < 0) {
       return <ArrowUpDown className="ml-1 inline h-3 w-3 text-gray-300" />;
     }
-    return filters.sort_dir === "asc"
+    const arrow = chain[idx].dir === "asc"
       ? <ArrowUp className="ml-1 inline h-3 w-3 text-primary-600" />
       : <ArrowDown className="ml-1 inline h-3 w-3 text-primary-600" />;
+    if (chain.length === 1) return arrow;
+    return (
+      <>
+        {arrow}
+        <span
+          className="ml-0.5 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-primary-100 px-1 text-[10px] font-bold text-primary-700"
+          title={`Sort priority ${idx + 1} of ${chain.length} — Shift-click to add columns, Cmd/Ctrl-click to remove`}
+        >
+          {idx + 1}
+        </span>
+      </>
+    );
   };
+
+  // Convenience read accessors — the dropdown still drives single-sort
+  // by writing a 1-element chain, so we read back the same way.
+  const primarySort = (filters.sorts && filters.sorts[0]) ?? { key: "relevance_score", dir: "desc" as const };
+  const isMultiSort = (filters.sorts?.length ?? 0) > 1;
 
   return (
     <div className="space-y-6">
@@ -521,15 +760,27 @@ export function JobsPage() {
             ))}
             <option value={UNCLASSIFIED_SENTINEL}>Unclassified</option>
           </select>
+          {/* Single-sort dropdown — selecting an option REPLACES the
+              entire chain with a 1-element sort, matching the pre-
+              multi-sort UX for users who don't shift-click columns.
+              The dropdown shows "(+ N more)" when a multi-column
+              chain is active so the user understands why the table
+              order doesn't match the dropdown's primary key alone. */}
           <select
             className="select w-auto"
-            value={`${filters.sort_by}:${filters.sort_dir}`}
+            value={`${primarySort.key}:${primarySort.dir}`}
             onChange={(e) => {
-              const [sort_by, sort_dir] = e.target.value.split(":");
-              setFilters((prev) => ({ ...prev, sort_by, sort_dir, page: 1 }));
+              const [key, dir] = e.target.value.split(":");
+              setFilters((prev) => ({
+                ...prev,
+                sorts: [{ key, dir: (dir === "asc" ? "asc" : "desc") as "asc" | "desc" }],
+                page: 1,
+              }));
             }}
           >
-            <option value="relevance_score:desc">Relevance (High to Low)</option>
+            <option value="relevance_score:desc">
+              Relevance (High to Low){isMultiSort ? ` (+${(filters.sorts?.length ?? 1) - 1} more)` : ""}
+            </option>
             <option value="relevance_score:asc">Relevance (Low to High)</option>
             {hasActiveResume && <option value="resume_score:desc">Resume Match (High to Low)</option>}
             {hasActiveResume && <option value="resume_score:asc">Resume Match (Low to High)</option>}
@@ -542,14 +793,16 @@ export function JobsPage() {
             <option value="platform:asc">Platform A-Z</option>
             <option value="status:asc">Status A-Z</option>
           </select>
-          {(filters.search || filters.status || filters.platform || filters.geography || filters.role_cluster || filters.is_classified !== undefined) && (
+          {(filters.search || filters.status || filters.platform || filters.geography || filters.role_cluster || filters.is_classified !== undefined || isMultiSort) && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() =>
+              onClick={() => {
                 // F87: also reset `is_classified` so Clear truly clears
                 // every filter axis (the Unclassified view used to
                 // survive a Clear and silently narrow the result set).
+                // Multi-sort: collapse the chain back to the default
+                // single primary so a "Clear" feels like a true reset.
                 setFilters({
                   search: "",
                   status: "",
@@ -557,12 +810,18 @@ export function JobsPage() {
                   geography: "",
                   role_cluster: "",
                   is_classified: undefined,
-                  sort_by: "relevance_score",
-                  sort_dir: "desc",
+                  sorts: [{ key: "relevance_score", dir: "desc" }],
                   page: 1,
                   page_size: 25,
-                })
-              }
+                });
+                // Also drop the persisted snapshot so a Clear today
+                // doesn't get silently overwritten on the next reload.
+                try {
+                  window.localStorage.removeItem(FILTERS_STORAGE_KEY);
+                } catch {
+                  // Same swallow as the persistence write.
+                }
+              }}
             >
               <X className="h-4 w-4" />
               Clear
@@ -691,28 +950,67 @@ export function JobsPage() {
                       className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                     />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("title")}>
+                  {/* Sortable column headers — plain click replaces
+                      the sort, Shift-click adds a tiebreaker, and
+                      Cmd/Ctrl-click removes a column from the chain.
+                      The `title` tooltip teaches the multi-sort
+                      affordance without cluttering the header row. */}
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("title", e)}
+                    title="Click to sort. Shift-click to add as a tiebreaker, Cmd/Ctrl-click to remove from sort chain."
+                  >
                     Title <SortIcon column="title" />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("company_name")}>
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("company_name", e)}
+                    title="Click to sort. Shift-click to add as a tiebreaker."
+                  >
                     Company <SortIcon column="company_name" />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("platform")}>
+                  {/* `platform` is in the backend sort whitelist (see
+                      `_ALLOWED_SORT_KEYS`) but the previous header was
+                      not click-sortable — only the dropdown could pick
+                      it. Bringing it under the same shift-click chain
+                      so users can group infra jobs by platform with
+                      relevance as the secondary sort. */}
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("platform", e)}
+                    title="Click to sort. Shift-click to add as a tiebreaker."
+                  >
                     Platform <SortIcon column="platform" />
                   </TableHead>
                   <TableHead>Remote Scope</TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("status")}>
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("status", e)}
+                    title="Click to sort. Shift-click to add as a tiebreaker."
+                  >
                     Status <SortIcon column="status" />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("relevance_score")}>
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("relevance_score", e)}
+                    title="Click to sort. Shift-click to add as a tiebreaker."
+                  >
                     Relevance <SortIcon column="relevance_score" />
                   </TableHead>
                   {hasActiveResume && (
-                    <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("resume_score")}>
+                    <TableHead
+                      className="cursor-pointer select-none"
+                      onClick={(e) => handleColumnSort("resume_score", e)}
+                      title="Click to sort. Shift-click to add as a tiebreaker."
+                    >
                       ATS Match <SortIcon column="resume_score" />
                     </TableHead>
                   )}
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleColumnSort("first_seen_at")} title="First discovered date">
+                  <TableHead
+                    className="cursor-pointer select-none"
+                    onClick={(e) => handleColumnSort("first_seen_at", e)}
+                    title="First discovered date — click to sort, shift-click to add as a tiebreaker."
+                  >
                     Discovered <SortIcon column="first_seen_at" />
                   </TableHead>
                   {hasActiveResume && <TableHead className="w-16">Apply</TableHead>}

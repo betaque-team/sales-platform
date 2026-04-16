@@ -155,6 +155,19 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 export async function getJobs(
   filters: JobFilters = {}
 ): Promise<PaginatedResponse<Job>> {
+  // Multi-sort wire serialisation. When `sorts` is non-empty we emit
+  // `sort_by=key:dir,key:dir,...` and omit `sort_dir` (the per-segment
+  // direction inside `sort_by` is authoritative). When `sorts` is
+  // empty/missing, fall back to the legacy `sort_by` + `sort_dir`
+  // pair so non-JobsPage callers and any pre-multi-sort code paths
+  // continue to work unchanged. Backend parser at
+  // `backend/app/api/v1/jobs.py:_parse_sort_spec` accepts both forms.
+  let sortByParam: string | undefined = filters.sort_by;
+  let sortDirParam: string | undefined = filters.sort_dir;
+  if (filters.sorts && filters.sorts.length > 0) {
+    sortByParam = filters.sorts.map((s) => `${s.key}:${s.dir}`).join(",");
+    sortDirParam = undefined;
+  }
   const query = buildQuery({
     search: filters.search,
     status: filters.status,
@@ -167,8 +180,8 @@ export async function getJobs(
     // URL. Backend accepts true/false and filters role_cluster IS
     // NULL / != '' accordingly.
     is_classified: filters.is_classified,
-    sort_by: filters.sort_by,
-    sort_dir: filters.sort_dir,
+    sort_by: sortByParam,
+    sort_dir: sortDirParam,
     page: filters.page,
     page_size: filters.page_size,
   });

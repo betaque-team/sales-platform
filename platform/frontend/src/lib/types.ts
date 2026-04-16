@@ -317,6 +317,17 @@ export interface PaginatedResponse<T> {
   total_pages: number;
 }
 
+// Multi-column sort: each entry is a (column key, direction) pair, in
+// priority order. Position 0 is the primary sort, position 1 the
+// secondary tiebreaker, etc. Serialised on the wire as
+// `sort_by=relevance_score:desc,first_seen_at:desc` (comma-separated
+// `key:dir` pairs); the backend parser at `jobs.py:_parse_sort_spec`
+// validates each segment.
+export interface SortKey {
+  key: string;
+  dir: "asc" | "desc";
+}
+
 export interface JobFilters {
   search?: string;
   status?: JobStatus | "";
@@ -330,6 +341,14 @@ export interface JobFilters {
   // dropdown's synthetic "Unclassified" option and by the Monitoring
   // dashboard's unclassified count tile (which links here).
   is_classified?: boolean;
+  // Authoritative sort state — when present, takes precedence over
+  // the legacy `sort_by` / `sort_dir` pair. The API layer in
+  // `lib/api.ts` serialises `sorts` into the wire-format `sort_by`
+  // string (`key:dir,key:dir,...`) and drops `sort_dir`.
+  sorts?: SortKey[];
+  // Legacy single-sort fields. Kept so non-JobsPage callers (and any
+  // pre-multi-sort code paths) continue to work unchanged. When
+  // `sorts` is also set, `sorts` wins.
   sort_by?: string;
   sort_dir?: string;
   page?: number;
