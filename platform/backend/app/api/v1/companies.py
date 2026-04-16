@@ -197,9 +197,38 @@ async def list_companies(
     # both the SELECT and the ORDER BY reference the same expression.
     relevant_count_col = func.coalesce(relevant_count_subq.c.cnt, 0).label("relevant_job_count")
 
+    # Regression finding 100: `sort_by=job_count` and `sort_by=accepted_count`
+    # were silently falling through to `Company.name ASC` because the handler
+    # only recognized funded_at / total_funding / relevant_job_count. Build a
+    # subquery for total-job-count and accepted-job-count so the DB can sort
+    # before pagination — post-query Python-side counts only apply to the
+    # current page, which would give wrong ordering.
+    job_count_subq = (
+        select(
+            Job.company_id.label("company_id"),
+            func.count(Job.id).label("cnt"),
+        )
+        .group_by(Job.company_id)
+        .subquery()
+    )
+    job_count_col = func.coalesce(job_count_subq.c.cnt, 0).label("job_count")
+
+    accepted_count_subq = (
+        select(
+            Job.company_id.label("company_id"),
+            func.count(Job.id).label("cnt"),
+        )
+        .where(Job.status == "accepted")
+        .group_by(Job.company_id)
+        .subquery()
+    )
+    accepted_count_col = func.coalesce(accepted_count_subq.c.cnt, 0).label("accepted_count")
+
     query = apply_filters(
-        select(Company, relevant_count_col)
+        select(Company, relevant_count_col, job_count_col, accepted_count_col)
         .outerjoin(relevant_count_subq, Company.id == relevant_count_subq.c.company_id)
+        .outerjoin(job_count_subq, Company.id == job_count_subq.c.company_id)
+        .outerjoin(accepted_count_subq, Company.id == accepted_count_subq.c.company_id)
         .options(joinedload(Company.ats_boards))
     )
     count_base = apply_filters(select(Company.id))
@@ -210,42 +239,31 @@ async def list_companies(
     elif sort_by == "total_funding":
         query = query.order_by(Company.total_funding_usd.desc().nulls_last(), Company.name.asc())
     elif sort_by == "relevant_job_count":
-        # Tiebreak by name ASC so the order is stable across requests —
-        # otherwise two companies with the same count would swap order
-        # on each page load (Postgres doesn't promise stable sort).
         query = query.order_by(relevant_count_col.desc(), Company.name.asc())
+    elif sort_by == "job_count":
+        query = query.order_by(job_count_col.desc(), Company.name.asc())
+    elif sort_by == "accepted_count":
+        query = query.order_by(accepted_count_col.desc(), Company.name.asc())
     else:
         query = query.order_by(Company.name.asc())
     query = query.offset((page - 1) * per_page).limit(per_page)
 
     result = await db.execute(query)
-    # Rows come back as `(Company, int)` tuples because of the labeled
-    # subquery column in the SELECT. `unique()` dedupes the eagerly-loaded
-    # `ats_boards` fanout the same way the old single-entity path did.
+    # Rows come back as `(Company, relevant_count, job_count, accepted_count)`
+    # tuples because of the labeled subquery columns in the SELECT.
+    # `unique()` dedupes the eagerly-loaded `ats_boards` fanout.
     rows = result.unique().all()
     companies = [r[0] for r in rows]
     relevant_counts: dict = {r[0].id: int(r[1] or 0) for r in rows}
+    db_job_counts: dict = {r[0].id: int(r[2] or 0) for r in rows}
+    db_accepted_counts: dict = {r[0].id: int(r[3] or 0) for r in rows}
 
-    # Get job counts and contact counts per company
+    # Contact counts still need a separate query (not in the main SELECT).
+    # job_count and accepted_count are now available from the main query's
+    # subquery columns — no second round-trip needed for those.
     company_ids = [c.id for c in companies]
-    job_counts = {}
-    accepted_counts = {}
     contact_counts = {}
     if company_ids:
-        counts_q = (
-            select(
-                Job.company_id,
-                func.count(Job.id).label("total"),
-                func.sum(case((Job.status == "accepted", 1), else_=0)).label("accepted"),
-            )
-            .where(Job.company_id.in_(company_ids))
-            .group_by(Job.company_id)
-        )
-        counts_result = await db.execute(counts_q)
-        for row in counts_result:
-            job_counts[row.company_id] = row.total
-            accepted_counts[row.company_id] = int(row.accepted or 0)
-
         contact_q = (
             select(CompanyContact.company_id, func.count(CompanyContact.id).label("cnt"))
             .where(CompanyContact.company_id.in_(company_ids))
@@ -257,9 +275,9 @@ async def list_companies(
     items = []
     for c in companies:
         item = CompanyOut.model_validate(c)
-        item.job_count = job_counts.get(c.id, 0)
+        item.job_count = db_job_counts.get(c.id, 0)
         item.relevant_job_count = relevant_counts.get(c.id, 0)
-        item.accepted_count = accepted_counts.get(c.id, 0)
+        item.accepted_count = db_accepted_counts.get(c.id, 0)
         item.contact_count = contact_counts.get(c.id, 0)
         items.append(item)
 
