@@ -16,7 +16,7 @@ from app.models.job import Job, JobDescription
 from app.models.user import User
 from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user
-from app.schemas.resume import CustomizeRequest
+from app.schemas.resume import CustomizeRequest, ResumeLabelUpdate
 from app.workers.tasks._resume_parser import extract_text
 from app.workers.tasks._ats_scoring import compute_ats_score
 from app.utils.sql import escape_like
@@ -49,10 +49,24 @@ ALLOWED_TYPES = {
 MIN_WORD_COUNT = 50
 
 
+# F132: `POST /resume/upload` receives `label` as a query param (matches
+# the current frontend in `lib/api.ts::uploadResume` which builds
+# `?label=<encoded>`). Pre-fix the param was typed `label: str = ""`
+# with no cap, so any value >100 chars crashed with a 500 at the DB
+# insert (`Resume.label` is `String(100)`). Cap here so FastAPI 422s
+# the 500-char label at parse time. Kept as `Query(...)` rather than
+# promoting to `Form(...)` — the frontend doesn't send multipart for
+# this field, and flipping would be a breaking change the UI would
+# have to match in the same release. If multipart-form label support
+# becomes a requirement, add a second `Form(...)` param and fall back
+# through both; don't migrate the existing query-param in place.
+_LABEL_MAX_LEN = 100
+
+
 @router.post("/upload")
 async def upload_resume(
     file: UploadFile = File(...),
-    label: str = "",
+    label: str = Query(default="", max_length=_LABEL_MAX_LEN),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -257,11 +271,19 @@ async def get_active_resume(
 @router.patch("/{resume_id}/label")
 async def update_resume_label(
     resume_id: UUID,
-    body: dict,
+    body: ResumeLabelUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a resume's display label."""
+    """Update a resume's display label.
+
+    F132: request body is now Pydantic-validated — non-string `label`
+    values, nulls, empty strings, whitespace-only strings, and
+    >100-char strings all 422 at parse time with a clear message
+    instead of leaking a 500 stack trace. The old manual
+    `body.get("label", "").strip()` dance + `label[:100]` truncation
+    is gone; the schema enforces everything.
+    """
     result = await db.execute(
         select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id)
     )
@@ -269,11 +291,8 @@ async def update_resume_label(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
 
-    label = body.get("label", "").strip()
-    if not label:
-        raise HTTPException(status_code=400, detail="Label cannot be empty")
-
-    resume.label = label[:100]
+    # `body.label` is already stripped + length-checked by the schema.
+    resume.label = body.label
     db.add(resume)
     await db.commit()
 

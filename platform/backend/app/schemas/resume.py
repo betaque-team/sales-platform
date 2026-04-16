@@ -21,7 +21,7 @@ comparison, and never log a 500 stack trace.
 
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # Target-score bounds mirror the original manual guard in
@@ -49,3 +49,42 @@ class CustomizeRequest(BaseModel):
         le=_TARGET_SCORE_MAX,
         description="Target ATS score (60-95) the AI customization should aim for.",
     )
+
+
+# Regression finding 132: `PATCH /resume/{resume_id}/label` used `body:
+# dict`, so a caller POSTing `{"label": 12345}` or `{"label": ["a"]}`
+# crashed the handler with `'int'/'list' object has no attribute
+# 'strip'` → leaked 500 stack trace. Same failure class as F79/F80/F90
+# — `body: dict` can't enforce type coercion. Pydantic model below
+# catches every non-string payload (including `null`, numbers, arrays,
+# nested dicts) at parse time with a clean 422, strips whitespace via
+# `@field_validator` (pydantic-v2 doesn't expose `strip_whitespace` as a
+# Field arg the way v1 did), and caps at 100 chars to match the
+# `Resume.label` DB column's `String(100)` constraint — so a 500-char
+# label from a rogue client also 422s instead of crashing the DB insert
+# with an integrity error.
+class ResumeLabelUpdate(BaseModel):
+    """Body of PATCH /api/v1/resume/{resume_id}/label."""
+
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Display label for the resume (1-100 chars, stripped).",
+    )
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def _strip_and_guard(cls, v):
+        # Run BEFORE min_length/max_length so whitespace-only inputs
+        # collapse to empty string and fail the `min_length=1` check
+        # with a readable "String should have at least 1 character"
+        # 422, instead of going through the DB and getting the
+        # original finding's `400 "Label cannot be empty"` message at
+        # best or a 500 at worst. Also lets us reject non-string types
+        # loudly (int/list/dict/null) with a clear message.
+        if v is None:
+            raise ValueError("label must not be null")
+        if not isinstance(v, str):
+            raise ValueError("label must be a string")
+        return v.strip()
