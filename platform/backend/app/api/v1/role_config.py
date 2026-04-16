@@ -3,7 +3,7 @@
 import re
 import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ from app.database import get_db
 from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
+from app.utils.audit import log_action
 
 router = APIRouter(prefix="/role-clusters", tags=["role-clusters"])
 
@@ -97,6 +98,7 @@ async def list_role_clusters(
 @router.post("")
 async def create_role_cluster(
     body: RoleClusterCreate,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -122,6 +124,12 @@ async def create_role_cluster(
     db.add(cluster)
     await db.commit()
     await db.refresh(cluster)
+
+    await log_action(
+        db, user, action="role_cluster.create", resource="role_cluster",
+        request=request, metadata={"cluster_id": str(cluster.id), "name": name},
+    )
+
     return _serialize(cluster)
 
 
@@ -129,6 +137,7 @@ async def create_role_cluster(
 async def update_role_cluster(
     cluster_id: str,
     body: RoleClusterUpdate,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -156,12 +165,19 @@ async def update_role_cluster(
     cluster.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(cluster)
+
+    await log_action(
+        db, user, action="role_cluster.update", resource="role_cluster",
+        request=request, metadata={"cluster_id": cluster_id, "fields": list(body.model_dump(exclude_unset=True).keys())},
+    )
+
     return _serialize(cluster)
 
 
 @router.delete("/{cluster_id}")
 async def delete_role_cluster(
     cluster_id: str,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -176,6 +192,13 @@ async def delete_role_cluster(
     if cluster.name in ("infra", "security"):
         raise HTTPException(status_code=400, detail="Cannot delete built-in role clusters")
 
+    cluster_name = cluster.name
     await db.delete(cluster)
     await db.commit()
+
+    await log_action(
+        db, user, action="role_cluster.delete", resource="role_cluster",
+        request=request, metadata={"cluster_id": cluster_id, "name": cluster_name},
+    )
+
     return {"ok": True}

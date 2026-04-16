@@ -1,7 +1,7 @@
 """Job listing API endpoints."""
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func, or_, literal, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -14,6 +14,7 @@ from app.models.resume import ResumeScore
 from app.models.role_config import RoleClusterConfig
 from app.api.deps import get_current_user, require_role
 from app.schemas.job import JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest
+from app.utils.audit import log_action
 from app.utils.sanitize import sanitize_html
 from app.utils.sql import escape_like
 
@@ -353,6 +354,7 @@ async def get_job_reviews(job_id: UUID, user: User = Depends(get_current_user), 
 @router.patch("/{job_id}")
 async def update_job_status(
     job_id: UUID, body: JobStatusUpdate,
+    request: Request,
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -360,14 +362,25 @@ async def update_job_status(
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    old_status = job.status
     job.status = body.status
     await db.commit()
+
+    await log_action(
+        db, user,
+        action="job.status_change",
+        resource="job",
+        request=request,
+        metadata={"job_id": str(job_id), "old_status": old_status, "new_status": body.status},
+    )
+
     return {"ok": True}
 
 
 @router.post("/bulk-action")
 async def bulk_action(
     body: BulkActionRequest,
+    request: Request,
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -376,4 +389,13 @@ async def bulk_action(
     for j in jobs:
         j.status = body.action
     await db.commit()
+
+    await log_action(
+        db, user,
+        action=f"bulk.{body.action}",
+        resource="jobs",
+        request=request,
+        metadata={"job_ids": [str(j) for j in body.job_ids], "count": len(jobs)},
+    )
+
     return {"updated": len(jobs)}

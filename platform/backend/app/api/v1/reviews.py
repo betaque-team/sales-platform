@@ -1,7 +1,7 @@
 """Review workflow API endpoints."""
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -14,6 +14,7 @@ from app.models.pipeline import PotentialClient
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.review import ReviewCreate, ReviewOut
+from app.utils.audit import log_action
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -21,6 +22,7 @@ router = APIRouter(prefix="/reviews", tags=["reviews"])
 @router.post("", response_model=ReviewOut)
 async def submit_review(
     body: ReviewCreate,
+    request: Request,
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -87,6 +89,15 @@ async def submit_review(
 
     await db.commit()
     await db.refresh(review)
+
+    # Regression finding 113: audit trail for review actions
+    await log_action(
+        db, user,
+        action=f"review.{normalized}",
+        resource="review",
+        request=request,
+        metadata={"job_id": str(body.job_id), "review_id": str(review.id)},
+    )
 
     # Dispatch feedback processing
     from app.workers.tasks.feedback_task import process_review_feedback_task

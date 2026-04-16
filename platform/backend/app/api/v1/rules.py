@@ -1,7 +1,7 @@
 """Role rule management API endpoints."""
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.rule import RoleRuleOut, RoleRuleCreate, RoleRuleUpdate
+from app.utils.audit import log_action
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 
@@ -71,6 +72,7 @@ async def list_rules(
 @router.post("", response_model=RoleRuleOut, status_code=201)
 async def create_rule(
     body: RoleRuleCreate,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -85,6 +87,12 @@ async def create_rule(
     db.add(rule)
     await db.commit()
     await db.refresh(rule)
+
+    await log_action(
+        db, user, action="rule.create", resource="role_rule",
+        request=request, metadata={"rule_id": str(rule.id), "cluster": body.cluster},
+    )
+
     return RoleRuleOut.model_validate(rule)
 
 
@@ -92,6 +100,7 @@ async def create_rule(
 async def update_rule(
     rule_id: UUID,
     body: RoleRuleUpdate,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -115,12 +124,19 @@ async def update_rule(
 
     await db.commit()
     await db.refresh(rule)
+
+    await log_action(
+        db, user, action="rule.update", resource="role_rule",
+        request=request, metadata={"rule_id": str(rule_id), "fields": list(update_data.keys())},
+    )
+
     return RoleRuleOut.model_validate(rule)
 
 
 @router.delete("/{rule_id}", status_code=204)
 async def delete_rule(
     rule_id: UUID,
+    request: Request,
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -131,3 +147,8 @@ async def delete_rule(
 
     await db.delete(rule)
     await db.commit()
+
+    await log_action(
+        db, user, action="rule.delete", resource="role_rule",
+        request=request, metadata={"rule_id": str(rule_id)},
+    )
