@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import {
   Shield,
@@ -202,7 +203,7 @@ export function DocsPage() {
         <div className="space-y-5">
           <StepCard number={1} title="Upload Your Resume">
             <p>
-              Go to <strong>Resume Score</strong> in the sidebar. Upload a PDF or DOCX and give it a label
+              Go to <Link to="/resume-score" className="font-semibold text-primary-600 hover:text-primary-700 underline">Resume Score</Link> in the sidebar. Upload a PDF or DOCX and give it a label
               (e.g. "Cloud Engineer" or "Security Specialist"). This is required before you can apply to jobs or run ATS scoring.
             </p>
             <Tip>You can upload multiple resumes for different role types. Set one as <strong>Active</strong> -- this is the one used for applications and scoring.</Tip>
@@ -210,7 +211,7 @@ export function DocsPage() {
 
           <StepCard number={2} title="Build Your Answer Book">
             <p>
-              Open <strong>Answer Book</strong>. Click <strong>"Import from Resume"</strong> to auto-extract answers from your active resume.
+              Open <Link to="/answer-book" className="font-semibold text-primary-600 hover:text-primary-700 underline">Answer Book</Link>. Click <strong>"Import from Resume"</strong> to auto-extract answers from your active resume.
               Then manually fill in anything the import missed: work authorization, salary expectations, availability, etc.
             </p>
             <p>
@@ -221,7 +222,7 @@ export function DocsPage() {
 
           <StepCard number={3} title="Add Platform Credentials">
             <p>
-              Go to <strong>Credentials</strong>. Add your login details for job platforms you actively apply on
+              Go to <Link to="/credentials" className="font-semibold text-primary-600 hover:text-primary-700 underline">Credentials</Link>. Add your login details for job platforms you actively apply on
               (Greenhouse, Lever, Workable, etc.). Credentials are encrypted and only visible to you.
             </p>
             <Warning>Never share your credentials with teammates. Each person maintains their own set.</Warning>
@@ -229,7 +230,7 @@ export function DocsPage() {
 
           <StepCard number={4} title="Score Your Resume">
             <p>
-              Back in <strong>Resume Score</strong>, click <strong>"Score Against All Jobs"</strong>.
+              Back in <Link to="/resume-score" className="font-semibold text-primary-600 hover:text-primary-700 underline">Resume Score</Link>, click <strong>"Score Against All Jobs"</strong>.
               The system scores your resume against every relevant job in the database. This takes a few minutes. When done,
               you'll see which jobs you match best and where your resume has gaps.
             </p>
@@ -237,7 +238,7 @@ export function DocsPage() {
 
           <StepCard number={5} title="Browse and Accept Jobs">
             <p>
-              Go to <strong>Relevant Jobs</strong> or the <strong>Review Queue</strong> and start accepting jobs
+              Go to <Link to="/jobs?role_cluster=relevant" className="font-semibold text-primary-600 hover:text-primary-700 underline">Relevant Jobs</Link> or the <Link to="/review" className="font-semibold text-primary-600 hover:text-primary-700 underline">Review Queue</Link> and start accepting jobs
               that match your target companies and role types. Accepted jobs feed into the pipeline.
             </p>
           </StepCard>
@@ -841,7 +842,7 @@ export function DocsPage() {
             <div>
               <h3 className="text-sm font-semibold text-gray-900 mb-1">Role Cluster Configuration</h3>
               <p className="text-sm text-gray-600">
-                Edit role clusters in <strong>Role Clusters</strong> (Admin sidebar). Changes affect which jobs show as "relevant"
+                Edit role clusters in <Link to="/role-clusters" className="font-semibold text-primary-600 hover:text-primary-700 underline">Role Clusters</Link> (Admin sidebar). Changes affect which jobs show as "relevant"
                 and how scoring works. After changing clusters, jobs will be re-scored on the next scan.
                 Each cluster has: keywords (for matching job titles) and approved roles (exact title matches).
               </p>
