@@ -772,6 +772,18 @@ export interface TimingIntelligence {
     best_day: string;
     peak_posting_hours: string;
     ideal_apply_window: string;
+    // F65: backend-computed metadata accompanying `ideal_apply_window`.
+    // `_data_driven=true` means the text was derived from real accepted-
+    // review timings and the UI can show it without a disclaimer;
+    // `=false` means it's the generic heuristic fallback because sample
+    // size was too small. `_sample_size` drives the "low-confidence"
+    // badge when < 30 accepted reviews backed the number; the two
+    // *_hours fields are surfaced as a subtitle so viewers can see the
+    // actual median/p75 that produced the range.
+    ideal_apply_window_data_driven?: boolean;
+    ideal_apply_window_sample_size?: number;
+    ideal_apply_window_median_hours?: number | null;
+    ideal_apply_window_p75_hours?: number | null;
     fastest_platforms: string[];
   };
 }
