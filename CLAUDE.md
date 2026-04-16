@@ -141,8 +141,14 @@ AI customization (Claude API) rewrites resume for target score. Restricted to re
 
 ### Auth & Roles
 - JWT in httpOnly cookie
-- Three roles: `admin`, `reviewer`, `viewer`
-- `require_role("admin")` dependency for admin-only endpoints
+- Four roles (hierarchy in `app/api/deps.py` `ROLE_HIERARCHY`): `super_admin` > `admin` > `reviewer` > `viewer`
+  - `super_admin`: full platform control — user management (`/users` CRUD, password resets, role assignment), everything `admin` can do
+  - `admin`: monitoring, role clusters, feedback management, scan controls, view all resumes, sales performance
+  - `reviewer`: job review queue, manage own pipeline
+  - `viewer`: read-only
+  - The seeded `admin@jobplatform.io` account has role `admin`, NOT `super_admin`. User-management endpoints require `super_admin` specifically and will 403 for `admin`. `GET /api/v1/users/roles` is the authoritative source for the current role catalog.
+- `require_role("admin")` dependency for admin-only endpoints; hierarchy means higher roles pass lower-role guards automatically
+- 403 responses use the generic message `"Insufficient privileges for this action"` — do NOT name the required role in the detail string (F185: leaking the role gives attackers a precise privilege-escalation target)
 - Password: SHA-256 + salt, with change/reset flows
 
 ### Scan Controls (Admin)
