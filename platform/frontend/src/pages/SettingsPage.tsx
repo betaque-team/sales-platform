@@ -23,8 +23,14 @@ export function SettingsPage() {
     setPasswordError("");
     setPasswordSuccess(false);
 
-    if (newPassword.length < 6) {
-      setPasswordError("New password must be at least 6 characters");
+    // Regression finding 43: backend enforces minimum 8 characters
+    // (auth.py /change-password and /reset-password/confirm, aligned
+    // with OWASP + NIST SP 800-63B). Frontend check must match so
+    // the user sees the same validation copy client-side instead of a
+    // confusing 422 round-trip after they've typed something the UI
+    // accepted as "at least 6 characters".
+    if (newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters");
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -183,11 +189,16 @@ export function SettingsPage() {
                   type="password"
                   autoComplete="new-password"
                   required
-                  minLength={6}
+                  /* F43: raised client `minLength` from 6 → 8 to match
+                     the backend enforcement in auth.py (OWASP+NIST
+                     SP 800-63B minimum). The placeholder was also
+                     updated so the UI no longer advertises a shorter
+                     policy than the server accepts. */
+                  minLength={8}
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   className="input w-full"
-                  placeholder="Min 6 characters"
+                  placeholder="Min 8 characters"
                 />
               </div>
               <div>
