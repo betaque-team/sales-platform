@@ -308,8 +308,14 @@ export function AnswerBookPage() {
                       <Edit3 className="h-4 w-4" />
                     </button>
                     <button
-                      onClick={() => deleteMutation.mutate(entry.id)}
+                      onClick={() => {
+                        if (window.confirm(`Delete this ${entry.category} answer? This cannot be undone.`)) {
+                          deleteMutation.mutate(entry.id);
+                        }
+                      }}
                       className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                      aria-label="Delete answer"
+                      title="Delete answer"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
