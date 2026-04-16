@@ -323,6 +323,13 @@ export interface JobFilters {
   platform?: string;
   geography?: string;
   role_cluster?: string;
+  // Regression finding 87: mirrors the backend `is_classified` query
+  // param added alongside the configurable role-cluster catalog.
+  // `true` → only jobs with a non-null/non-empty cluster; `false` →
+  // only the unclassified pool (~90% of the DB). Used by the JobsPage
+  // dropdown's synthetic "Unclassified" option and by the Monitoring
+  // dashboard's unclassified count tile (which links here).
+  is_classified?: boolean;
   sort_by?: string;
   sort_dir?: string;
   page?: number;
