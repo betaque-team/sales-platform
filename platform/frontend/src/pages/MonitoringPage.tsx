@@ -304,7 +304,11 @@ export function MonitoringPage() {
             <Button
               variant="primary"
               size="sm"
-              onClick={() => fullScanMutation.mutate()}
+              onClick={() => {
+                if (window.confirm("Run a full scan across all active boards? This triggers hundreds of outbound ATS API calls and may take several minutes.")) {
+                  fullScanMutation.mutate();
+                }
+              }}
               loading={fullScanMutation.isPending}
               disabled={!!activeScan && activeScan.status !== "SUCCESS" && activeScan.status !== "FAILURE"}
             >
@@ -322,7 +326,11 @@ export function MonitoringPage() {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => discoveryScanMutation.mutate()}
+              onClick={() => {
+                if (window.confirm("Run platform discovery? This probes ATS sitemaps and known slugs — may take several minutes and queue follow-up scans.")) {
+                  discoveryScanMutation.mutate();
+                }
+              }}
               loading={discoveryScanMutation.isPending}
               disabled={!!activeScan && activeScan.status !== "SUCCESS" && activeScan.status !== "FAILURE"}
             >

@@ -18,6 +18,7 @@ import {
 } from "@/components/Table";
 import { getJobs, bulkAction, getActiveResume, prepareApplication } from "@/lib/api";
 import type { JobFilters, JobStatus } from "@/lib/types";
+import { formatCount } from "@/lib/format";
 
 const STATUS_OPTIONS: { value: JobStatus | ""; label: string }[] = [
   { value: "", label: "All Statuses" },
@@ -208,8 +209,8 @@ export function JobsPage() {
           <p className="mt-1 text-sm text-gray-500">
             {filters.role_cluster === "relevant"
               ? "Cloud, DevOps, SRE, Compliance & Security positions"
-              : data ? `${data.total} jobs found` : "Loading jobs..."}
-            {data && filters.role_cluster === "relevant" ? ` · ${data.total} jobs found` : ""}
+              : data ? `${formatCount(data.total)} jobs found` : "Loading jobs..."}
+            {data && filters.role_cluster === "relevant" ? ` · ${formatCount(data.total)} jobs found` : ""}
           </p>
         </div>
       </div>

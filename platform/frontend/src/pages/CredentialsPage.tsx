@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { getCredentials, saveCredential, deleteCredential, getActiveResume } from "@/lib/api";
 import type { PlatformCredential } from "@/lib/types";
 import { KeyRound, Plus, Trash2, Save, X, Check, AlertTriangle, Eye, EyeOff } from "lucide-react";
@@ -96,9 +97,18 @@ export function CredentialsPage() {
         </div>
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-6 text-center">
           <AlertTriangle className="h-8 w-8 text-amber-500 mx-auto mb-3" />
+          {/* Regression finding 40: the old copy told users to "Use the
+              resume switcher in the header" — an element that doesn't exist.
+              The actual resume management lives on /resume-score. Point
+              users there with a real navigation link instead of a dead-end
+              reference to a non-existent UI element. */}
           <p className="text-sm font-medium text-amber-800">No active resume selected</p>
           <p className="text-xs text-amber-600 mt-1">
-            Use the resume switcher in the header to select a persona before managing credentials.
+            Go to{" "}
+            <Link to="/resume-score" className="font-medium text-amber-800 underline hover:text-amber-900">
+              Resume Score
+            </Link>
+            {" "}to upload a resume and set it as active, then return here to manage credentials.
           </p>
         </div>
       </div>
