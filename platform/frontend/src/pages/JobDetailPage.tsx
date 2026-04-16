@@ -396,58 +396,14 @@ export function JobDetailPage() {
                     )
                   )}
 
-                  {description.parsed_requirements.length > 0 && (
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2">
-                        Requirements
-                      </h4>
-                      <ul className="space-y-1">
-                        {description.parsed_requirements.map((req, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm text-gray-700"
-                          >
-                            <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-gray-400" />
-                            {req}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {description.parsed_tech_stack.length > 0 && (
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2">
-                        Tech Stack
-                      </h4>
-                      <div className="flex flex-wrap gap-2">
-                        {description.parsed_tech_stack.map((tech, i) => (
-                          <Badge key={i} variant="primary">
-                            {tech}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {description.parsed_nice_to_have.length > 0 && (
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-900 mb-2">
-                        Nice to Have
-                      </h4>
-                      <ul className="space-y-1">
-                        {description.parsed_nice_to_have.map((item, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm text-gray-600"
-                          >
-                            <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-gray-300" />
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                  {/* Regression finding 168: Requirements / Tech Stack /
+                      Nice to Have sections previously rendered behind
+                      `description.parsed_requirements.length > 0` (and
+                      similar) guards — but those fields were always the
+                      empty array because the backend never populated
+                      them. The fields were removed from the API contract;
+                      if bullet-point extraction lands later, restore
+                      these sections alongside the real parser. */}
                 </div>
               ) : (
                 <p className="py-6 text-center text-sm text-gray-500">

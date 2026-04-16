@@ -299,9 +299,6 @@ async def get_job_description(job_id: UUID, user: User = Depends(get_current_use
             id=jd.id,
             job_id=jd.job_id,
             raw_text=sanitize_html(jd.text_content or jd.html_content or ""),
-            parsed_requirements=[],
-            parsed_nice_to_have=[],
-            parsed_tech_stack=[],
         )
 
     # Fallback: extract description from raw_json
@@ -329,7 +326,7 @@ async def get_job_description(job_id: UUID, user: User = Depends(get_current_use
             raw_text = html_mod.unescape(raw_text)
 
     # Sanitize before returning — frontend renders via dangerouslySetInnerHTML.
-    return JobDescriptionOut(raw_text=sanitize_html(raw_text), parsed_requirements=[], parsed_nice_to_have=[], parsed_tech_stack=[])
+    return JobDescriptionOut(raw_text=sanitize_html(raw_text))
 
 
 @router.get("/{job_id}/reviews")

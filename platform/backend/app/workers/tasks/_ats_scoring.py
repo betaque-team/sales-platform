@@ -140,14 +140,35 @@ def _extract_job_keywords(job_title: str, role_cluster: str, matched_role: str, 
     if description_text:
         keywords.update(_extract_keywords_from_text(description_text))
 
-    # From role cluster — add core keywords for that domain
+    # From role cluster — add core keywords for that domain.
+    #
+    # Regression finding 165: the baselines used to seed generic domain
+    # terms that are NOT present in `ALL_TECH_KEYWORDS` — `"cloud"` and
+    # `"infrastructure"` for infra, `"security"` and `"compliance"` for
+    # security. Because `_extract_keywords_from_text()` only scans for
+    # members of `ALL_TECH_KEYWORDS`, those four tokens could never be
+    # matched from a resume, so every infra/security job got 2 unmatchable
+    # "missing" keywords baked in. Net effect: max achievable keyword
+    # score on infra/security was ~78/83 (not 100), and the suggestions
+    # panel endlessly recommended "add 'cloud' to your resume" — which
+    # then still wouldn't match because the extractor doesn't look for
+    # bare `"cloud"`. QA baselines were already phantom-free (all members
+    # of `qa_testing`), so QA consistently out-scored infra/security in
+    # the cross-resume calibration that surfaced the bug.
+    #
+    # Fix: drop the phantoms. The cluster's real top-3 tools still
+    # anchor each baseline, so an empty-description job still has a
+    # non-empty keyword set (i.e. the F94 short-circuit path stays
+    # intact), but the set only contains tokens the extractor can
+    # actually find in resumes. `"ci/cd"` and `"devops"` stay because
+    # both live in the `devops_practices` category — they are real,
+    # matchable keywords.
     if role_cluster == "infra":
-        keywords.update(["devops", "cloud", "infrastructure", "ci/cd"])
+        keywords.update(["devops", "ci/cd"])
         for cat in ["cloud_platforms", "containers_orchestration", "cicd", "infrastructure_as_code"]:
             # Add top 3 from each category as baseline expectations
             keywords.update(TECH_CATEGORIES[cat][:3])
     elif role_cluster == "security":
-        keywords.update(["security", "compliance"])
         for cat in ["security_tools", "compliance_frameworks"]:
             keywords.update(TECH_CATEGORIES[cat][:3])
     elif role_cluster == "qa":

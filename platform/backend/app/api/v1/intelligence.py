@@ -40,12 +40,26 @@ for cat, skills in SKILL_CATEGORIES.items():
 
 
 def _extract_skills_from_text(text_content: str) -> dict[str, int]:
-    """Extract skill mentions from text, return {skill: count}."""
+    """Extract skill mentions from text, return {skill: count}.
+
+    Regression finding 167: the word-boundary threshold was `<= 3`,
+    which diverged from the ATS scoring engine's `<= 4` (see
+    `_ats_scoring._ATS_WORD_BOUNDARY_MAX_LEN`). 4-char skills like
+    `rust`, `nist`, `bash`, `helm`, `java`, `salt`, `flux` were
+    substring-matched here, counting `"trust"`, `"administrator"`,
+    `"bashful"`, `"helmholtz"`, `"javascript"` as occurrences. That
+    produced "73% of jobs demand Rust" style false signals on the
+    skill-gaps dashboard. Aligning the threshold with the ATS side
+    means `intelligence` and `_ats_scoring` disagree only on
+    keyword-set *membership*, not on *how* they match.
+    """
     text_lower = text_content.lower()
     found = {}
     for skill in ALL_SKILLS:
-        # Word boundary match for short skills
-        if len(skill) <= 3:
+        # Word boundary match for short skills (<=4 chars). Matches the
+        # ATS engine so a 4-char token like "rust" can't slip into
+        # substring mode and match "trust".
+        if len(skill) <= 4:
             pattern = r'\b' + re.escape(skill) + r'\b'
             count = len(re.findall(pattern, text_lower))
         else:
