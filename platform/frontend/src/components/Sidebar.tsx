@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { clsx } from "clsx";
 import {
@@ -54,9 +55,16 @@ const superAdminNavigation = [
   { name: "User Management", to: "/users", icon: Users },
 ];
 
-export function Sidebar() {
+export function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () => void }) {
   const { user } = useAuth();
   const location = useLocation();
+
+  // Close mobile drawer on route change
+  const prevPath = location.pathname + location.search;
+  useEffect(() => {
+    if (mobile && onClose) onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prevPath]);
 
   const handleLogout = async () => {
     try {

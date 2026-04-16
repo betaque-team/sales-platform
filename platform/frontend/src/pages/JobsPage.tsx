@@ -181,13 +181,21 @@ export function JobsPage() {
     });
   };
 
+  // Regression finding 68: union/subtract visible page ids instead of
+  // replacing the entire Set, so cross-page curation is preserved.
   const toggleSelectAll = () => {
     if (!data) return;
-    if (selectedIds.size === data.items.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(data.items.map((j) => j.id)));
-    }
+    const pageIds = data.items.map((j) => j.id);
+    const allVisible = pageIds.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allVisible) {
+        pageIds.forEach((id) => next.delete(id));
+      } else {
+        pageIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
   };
 
   // Regression finding 71: gate bulk actions behind window.confirm() so a
@@ -413,7 +421,7 @@ export function JobsPage() {
                       type="checkbox"
                       checked={
                         data.items.length > 0 &&
-                        selectedIds.size === data.items.length
+                        data.items.every((j) => selectedIds.has(j.id))
                       }
                       onChange={toggleSelectAll}
                       className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
