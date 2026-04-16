@@ -416,9 +416,27 @@ export async function triggerPlatformScan(platform: string): Promise<{ task_id: 
   return request<{ task_id: string }>(`/platforms/scan/${platform}`, { method: "POST" });
 }
 
-export async function getScanLogs(platform?: string): Promise<{ items: ScanLogEntry[] }> {
-  const query = platform ? `?platform=${platform}` : "";
-  return request<{ items: ScanLogEntry[] }>(`/platforms/scan-logs${query}`);
+// F217: backend now returns canonical pagination envelope
+// `{items,total,page,page_size,total_pages}` and is admin-gated. The
+// PlatformsPage "Scan Logs" drawer uses only the first ~30 items, so
+// pass page_size=30 to avoid shipping 50 rows it slices down. If a
+// future UI wants to page back, wire `page` through here.
+export async function getScanLogs(
+  platform?: string,
+  opts?: { page?: number; page_size?: number }
+): Promise<{
+  items: ScanLogEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}> {
+  const q = buildQuery({
+    platform,
+    page: opts?.page,
+    page_size: opts?.page_size ?? 30,
+  });
+  return request(`/platforms/scan-logs${q}`);
 }
 
 // Monitoring (admin only)

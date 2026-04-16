@@ -1,7 +1,7 @@
 """Platform monitoring API endpoints."""
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -393,16 +393,40 @@ async def get_scan_status(
 async def get_scan_logs(
     # F191: same validation as /boards — typos no longer return empty.
     platform: PlatformFilter | None = None,
-    limit: int = 50,
-    user: User = Depends(get_current_user),
+    # Regression finding 217: three distinct bugs in the previous version
+    # were fixed together because they compound:
+    #   (a) `limit: int = 50` had no `ge`/`le` bounds, so `?limit=-1` got
+    #       passed to PG which 500'd on `LIMIT -1`;
+    #   (b) `?limit=999999` returned 68.7 MB / 236,906 rows on any
+    #       authenticated JWT — a trivial DoS lever and a data-leak
+    #       (error_message rows sometimes contain source IPs and stack
+    #       fragments from fetcher failures);
+    #   (c) the response envelope was bare `{"items":[...]}` with no
+    #       `total`/`page`/`page_size`/`total_pages`, so the PlatformsPage
+    #       "Recent Scan Logs" panel had no way to page back past 50.
+    # Fix mirrors the F179 /analytics/trends bounding + the F205/F212/F220(A)
+    # canonical pagination envelope. Admin gate matches the CLAUDE.md role
+    # hierarchy (scan logs = "scan controls" = admin-only per the spec);
+    # the frontend "Scan Logs" button is hidden for non-admins in the same
+    # round so a viewer role doesn't see a button that 403s.
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get recent scan logs."""
-    query = select(ScanLog).order_by(ScanLog.started_at.desc()).limit(limit)
+    """Get recent scan logs (admin-only)."""
+    count_q = select(func.count(ScanLog.id))
+    if platform:
+        count_q = count_q.where(ScanLog.platform == platform)
+    total = (await db.execute(count_q)).scalar() or 0
+
+    query = select(ScanLog).order_by(ScanLog.started_at.desc())
     if platform:
         query = query.where(ScanLog.platform == platform)
+    query = query.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     logs = result.scalars().all()
+
     return {
         "items": [
             {
@@ -419,5 +443,9 @@ async def get_scan_logs(
                 "duration_ms": l.duration_ms,
             }
             for l in logs
-        ]
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
     }
