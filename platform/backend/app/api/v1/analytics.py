@@ -1,6 +1,7 @@
 """Analytics and dashboard API."""
 
 from datetime import datetime, timezone, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func, text, case
@@ -698,7 +699,18 @@ async def warm_leads(user: User = Depends(get_current_user), db: AsyncSession = 
 
 
 @router.get("/scoring-signals")
-async def get_scoring_signals(user: User = Depends(require_role("admin")), db: AsyncSession = Depends(get_db)):
+async def get_scoring_signals(
+    # Regression finding 102 (follow-up): `scope` lets admins split the
+    # list into the three meaningful buckets: `user` → rows where
+    # scoring is attributed to a specific reviewer (per-user isolation
+    # from F89); `legacy` → rows written before F89 (user_id IS NULL,
+    # the shared-pool signals that should decay to zero over time);
+    # `all` → both. Default stays `all` so the existing admin dashboard
+    # view keeps working without a frontend change.
+    scope: Literal["user", "legacy", "all"] = "all",
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
     """Get top scoring signals for admin visibility.
 
     Regression finding 102: the response previously omitted ``user_id``,
@@ -706,19 +718,41 @@ async def get_scoring_signals(user: User = Depends(require_role("admin")), db: A
     isolation was working on prod — every row looked identical whether
     it belonged to a specific reviewer or to the legacy shared pool.
     We now return the column verbatim (NULL = legacy shared-pool row,
-    UUID = reviewer-scoped). The frontend can surface it as a small
-    "reviewer" column / badge so ops can see at a glance whether new
-    signals are being written with the expected user attribution.
+    UUID = reviewer-scoped), plus the reviewer's email resolved via a
+    single batched query so the frontend can render a "reviewer"
+    column without N+1 lookups. The ``scope`` query param lets ops
+    filter to either bucket when decay-progress or per-user-audit is
+    the question.
     """
     from app.models.scoring_signal import ScoringSignal
-    result = await db.execute(
-        select(ScoringSignal).order_by(ScoringSignal.weight.desc()).limit(50)
-    )
+
+    query = select(ScoringSignal).order_by(ScoringSignal.weight.desc()).limit(50)
+    if scope == "user":
+        query = query.where(ScoringSignal.user_id.is_not(None))
+    elif scope == "legacy":
+        query = query.where(ScoringSignal.user_id.is_(None))
+    # scope == "all" → no extra filter
+
+    result = await db.execute(query)
     signals = result.scalars().all()
+
+    # F102: resolve user_id → email in ONE query so the caller doesn't
+    # have to N+1-lookup them. `user_email` is None on legacy rows and
+    # on rows whose user_id points to a deactivated/deleted user.
+    user_ids = {s.user_id for s in signals if s.user_id is not None}
+    email_by_id: dict = {}
+    if user_ids:
+        email_rows = await db.execute(
+            select(User.id, User.email).where(User.id.in_(user_ids))
+        )
+        email_by_id = {row.id: row.email for row in email_rows}
+
     return {
+        "scope": scope,
         "signals": [
             {
                 "user_id": str(s.user_id) if s.user_id else None,
+                "user_email": email_by_id.get(s.user_id) if s.user_id else None,
                 "signal_type": s.signal_type,
                 "signal_key": s.signal_key,
                 "weight": round(s.weight, 4),
@@ -726,5 +760,5 @@ async def get_scoring_signals(user: User = Depends(require_role("admin")), db: A
                 "updated_at": s.updated_at.isoformat() if s.updated_at else None,
             }
             for s in signals
-        ]
+        ],
     }
