@@ -1,10 +1,11 @@
 """Cover letter generation API."""
 
+import asyncio
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,13 @@ CoverLetterTone = Literal["professional", "enthusiastic", "technical", "conversa
 
 
 class CoverLetterRequest(BaseModel):
+    # F157: reject unknown fields so a frontend typo (`ton=` instead of
+    # `tone=`) doesn't silently fall back to the "professional" default
+    # and mask the bug. Without `extra="forbid"`, Pydantic v2 defaults
+    # to ignoring unknown keys — the caller thinks they set the field,
+    # we think they didn't, and the generated letter is wrong.
+    model_config = ConfigDict(extra="forbid")
+
     # F181: UUIDs must be typed as `UUID` (not `str`) so non-UUID input
     # 422s at parse time instead of bubbling a SQL cast error as 500.
     job_id: UUID
@@ -71,9 +79,17 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
     if not resume.text_content:
         raise HTTPException(400, "Resume text not extracted yet. Wait for processing to complete.")
 
-    # Generate
+    # F157: `generate_cover_letter` is fully synchronous and issues a
+    # blocking HTTP call to the Anthropic API (multi-second latency).
+    # Calling it directly from an async handler pins the FastAPI event
+    # loop for the duration of that round-trip, so a handful of
+    # concurrent cover-letter requests were enough to stall every
+    # other API endpoint on the same worker. `asyncio.to_thread` runs
+    # the sync code on the default threadpool and leaves the loop
+    # free to serve other requests.
     from app.workers.tasks._cover_letter import generate_cover_letter
-    result = generate_cover_letter(
+    result = await asyncio.to_thread(
+        generate_cover_letter,
         resume_text=resume.text_content,
         job_title=job.title,
         company_name=company_name,

@@ -38,6 +38,17 @@ VALID_ROLES = {"admin", "reviewer", "viewer"}
 
 _BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
 
+# F163: pre-computed bcrypt hash of a random blob used to burn CPU on
+# login attempts against non-existent accounts, so response-time
+# measurements can't be used to enumerate valid emails. The plaintext
+# that produced this hash is not stored anywhere — a successful compare
+# is impossible, which is the point. Cost factor MUST match
+# `_hash_password` (rounds=12) so the timing distribution overlaps.
+_DUMMY_BCRYPT_HASH = bcrypt.hashpw(
+    hashlib.sha256(secrets.token_bytes(32)).digest(),
+    bcrypt.gensalt(rounds=12),
+)
+
 
 def _hash_password(password: str) -> str:
     """Hash a new password with bcrypt (cost=12).
@@ -144,7 +155,20 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     result = await db.execute(select(User).where(User.email == body.email, User.is_active == True))
     user = result.scalar_one_or_none()
 
+    # F163: don't short-circuit on "user not found" — bcrypt.checkpw is
+    # the dominant cost of a login attempt (~200ms at rounds=12), and
+    # branching early turns that cost into an enumeration oracle. Burn
+    # an equivalent bcrypt compare against a dummy hash so the
+    # non-existent and wrong-password paths take the same wall-clock
+    # time.
     if not user or not user.password_hash:
+        try:
+            bcrypt.checkpw(
+                hashlib.sha256(body.password.encode("utf-8")).digest(),
+                _DUMMY_BCRYPT_HASH,
+            )
+        except (ValueError, TypeError):
+            pass
         await login_limiter.record_failure(rl_key)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -257,21 +281,44 @@ async def request_password_reset(
     body: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Request a password reset token. Returns token directly (in production, send via email)."""
+    """Request a password reset. Always returns the same response regardless of email existence.
+
+    Regression finding 163 (RED): the previous implementation branched
+    on `if not user` and returned two *different* JSON shapes — the
+    existing-email branch included the raw reset token AND a different
+    `message` string. That combination was a complete ATO chain:
+
+      1. An unauthenticated attacker could enumerate which emails had
+         accounts (CWE-204) by comparing responses across guesses.
+      2. Once they confirmed an email, the same endpoint handed them
+         the plaintext reset token in the response body with no email
+         verification step — a straight path to owning the account.
+
+    The fix: (a) never echo the token in the API response (it now only
+    reaches the user via out-of-band email delivery — TODO wire up the
+    mail transport in prod), and (b) return a byte-for-byte identical
+    response on both paths so a caller cannot distinguish valid from
+    invalid emails.
+    """
     result = await db.execute(select(User).where(User.email == body.email, User.is_active == True))
     user = result.scalar_one_or_none()
 
-    if not user:
-        # Don't reveal whether the email exists
-        return {"ok": True, "message": "If the email exists, a reset token has been generated"}
+    if user:
+        token = secrets.token_urlsafe(32)
+        user.password_reset_token = _hash_reset_token(token)
+        user.password_reset_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        await db.commit()
+        # F163: token is intentionally NOT in the response body. In
+        # production this is delivered via email — the send hook lives
+        # outside this endpoint so a mail-transport outage doesn't
+        # change the observable timing of the reset request (which
+        # would be a new enumeration oracle).
 
-    token = secrets.token_urlsafe(32)
-    user.password_reset_token = _hash_reset_token(token)
-    user.password_reset_expires = datetime.now(timezone.utc) + timedelta(hours=1)
-    await db.commit()
-
-    # In production, send this via email instead
-    return {"ok": True, "message": "Reset token generated", "token": token}
+    # F163: single response shape regardless of whether the email
+    # exists. Do not add fields, do not vary `message`, do not change
+    # status codes. Everything that could be used to distinguish the
+    # two branches must live behind the email channel.
+    return {"ok": True, "message": "If the email exists, a reset link has been sent"}
 
 
 @router.post("/reset-password/confirm")
