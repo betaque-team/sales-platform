@@ -13,6 +13,7 @@ from app.models.alert import AlertConfig
 from app.models.job import Job
 from app.models.company import Company
 from app.config import get_settings
+from app.utils.ssrf import url_is_safe_for_egress
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,27 @@ def _build_simple_text(jobs: list[dict], settings_obj) -> dict:
 
 
 def send_google_chat_alert(webhook_url: str, jobs: list[dict]):
-    """Send job alert to a Google Chat webhook."""
+    """Send job alert to a Google Chat webhook.
+
+    Regression finding 140 (CWE-918): the schema-layer validator in
+    `api/v1/alerts.py` blocks NEW malicious URLs at create/update
+    time, but this function is also called by the periodic worker
+    `check_and_send_alerts` against `AlertConfig.webhook_url` rows
+    that may have been persisted BEFORE the schema fix shipped.
+    Re-validate at the actual egress point — same SSRF guard as the
+    schema validator, plus DNS-rebinding mitigation by re-resolving
+    inside the request boundary. Refusal is silent (returns False)
+    so a hostile row doesn't blow up the worker for OTHER configs in
+    the batch; the warning log is the audit trail.
+    """
     settings = get_settings()
+    allowed, reason = url_is_safe_for_egress(webhook_url or "")
+    if not allowed:
+        logger.warning(
+            "F140: refused webhook egress to %r reason=%s",
+            (webhook_url or "")[:200], reason,
+        )
+        return False
     try:
         payload = _build_google_chat_card(jobs, settings)
         resp = httpx.post(webhook_url, json=payload, timeout=10)

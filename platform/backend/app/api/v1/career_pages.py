@@ -3,7 +3,7 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +57,13 @@ class CareerPageOut(BaseModel):
 
 
 class CareerPageCreate(BaseModel):
+    # F151 (SSRF defense-in-depth): `extra="forbid"` so unknown fields
+    # 422 at the schema layer. Without this, an attacker could smuggle
+    # extra keys into the payload that a future endpoint revision
+    # might pick up — the blast radius shrinks if the schema is
+    # closed.
+    model_config = ConfigDict(extra="forbid")
+
     company_id: UUID | None = None
     url: str
     is_active: bool = True
@@ -68,6 +75,9 @@ class CareerPageCreate(BaseModel):
 
 
 class CareerPageUpdate(BaseModel):
+    # F151: same `extra="forbid"` rationale as CareerPageCreate.
+    model_config = ConfigDict(extra="forbid")
+
     url: str | None = None
     is_active: bool | None = None
     company_id: UUID | None = None

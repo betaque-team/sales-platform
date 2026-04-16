@@ -53,7 +53,15 @@ class AICustomizationLog(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    success: Mapped[bool] = mapped_column(default=True)
+    # Regression finding 203: the default used to be `True`, which was a
+    # silent foot-gun — any code path that forgot to pass `success=`
+    # would accidentally count against the user's daily AI quota even
+    # when the API call never happened (no api key, upstream 5xx,
+    # timeout). Flipped to `False` so the quota-burning state is only
+    # reachable by an explicit `success=True` after the Claude call
+    # came back clean. Defense-in-depth alongside the handler-side
+    # early-return in `resume.py:customize_resume_for_job`.
+    success: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

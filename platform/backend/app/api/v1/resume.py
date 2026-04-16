@@ -285,7 +285,18 @@ async def list_resumes(
     db: AsyncSession = Depends(get_db),
     all_users: bool = False,
 ):
-    """List resumes. Admin/super_admin can pass ?all_users=true to see all."""
+    """List resumes. Admin/super_admin can pass ?all_users=true to see all.
+
+    Regression finding 205: this endpoint is intentionally unpaginated
+    because a user typically has 1-5 resumes (admin all_users view tops
+    out at a few hundred platform-wide). We still emit the canonical
+    pagination envelope keys (`total`, `page`, `page_size`, `total_pages`)
+    so shared frontend components (`<PaginatedList>`) don't render a
+    broken pager. `page_size` is always equal to `total` — a stable
+    signal to callers that client-side pagination isn't needed. If the
+    platform ever has >200 resumes per user, swap this for real
+    pagination driven by `page`/`page_size` query params.
+    """
     query = select(Resume).where(Resume.status != "archived")
     if all_users and user.role in ("admin", "super_admin"):
         # Admin sees all resumes across users
@@ -296,22 +307,31 @@ async def list_resumes(
 
     result = await db.execute(query)
     resumes = result.unique().scalars().all()
+    items = [
+        {
+            "id": str(r.id),
+            "label": r.label,
+            "filename": r.filename,
+            "file_type": r.file_type,
+            "word_count": r.word_count,
+            "status": r.status,
+            "uploaded_at": r.uploaded_at.isoformat(),
+            "is_active": str(user.active_resume_id) == str(r.id) if user.active_resume_id else False,
+            **({"owner_name": r.owner.name, "owner_email": r.owner.email}
+               if all_users and user.role in ("admin", "super_admin") and hasattr(r, "owner") and r.owner else {}),
+        }
+        for r in resumes
+    ]
+    total = len(items)
     return {
-        "items": [
-            {
-                "id": str(r.id),
-                "label": r.label,
-                "filename": r.filename,
-                "file_type": r.file_type,
-                "word_count": r.word_count,
-                "status": r.status,
-                "uploaded_at": r.uploaded_at.isoformat(),
-                "is_active": str(user.active_resume_id) == str(r.id) if user.active_resume_id else False,
-                **({"owner_name": r.owner.name, "owner_email": r.owner.email}
-                   if all_users and user.role in ("admin", "super_admin") and hasattr(r, "owner") and r.owner else {}),
-            }
-            for r in resumes
-        ],
+        "items": items,
+        # F205: unified envelope keys — even though this list is
+        # effectively unpaginated, emit the canonical shape so shared
+        # frontend components don't render a broken `0 of 0` pager.
+        "total": total,
+        "page": 1,
+        "page_size": total if total > 0 else 1,
+        "total_pages": 1,
         "active_resume_id": str(user.active_resume_id) if user.active_resume_id else None,
     }
 
@@ -372,10 +392,54 @@ async def get_score_task_status(
     resume_id: UUID,
     task_id: str,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Poll the status of a resume scoring task."""
+    """Poll the status of a resume scoring task.
+
+    Regression finding 204: `resume_id` was declared on the path but never
+    referenced in the handler — any authenticated user could poll ANY
+    task_id and receive its result, turning a 128-bit task_id from a
+    routing key into a bearer token for cross-resume status info-leak
+    (jobs_scored count, completion time). Two layers of defense now:
+
+      1. Require that `resume_id` exists AND belongs to the caller.
+         Someone with no resumes (or probing a different user's resume
+         by fabricated UUID) gets a generic 404 before Celery is
+         touched — matching the 404 semantics of every other
+         `/resume/{id}/...` endpoint.
+
+      2. Cross-validate that the task was actually dispatched by this
+         resume. `score_resume` calls `score_resume_task.delay(str(resume.id))`
+         so the first positional arg IS the resume_id. With
+         `result_extended=True` in celery_app.conf (enabled alongside
+         this fix) the args are persisted on the result row, so we can
+         reject a task_id that belongs to a different resume. Older
+         tasks queued before the config change won't carry args; for
+         those we fall back to the ownership check alone, which still
+         closes the attacker-with-no-resumes case.
+    """
+    owned = await db.execute(
+        select(Resume.id).where(Resume.id == resume_id, Resume.user_id == user.id)
+    )
+    if owned.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Resume not found")
+
     from celery.result import AsyncResult
     result = AsyncResult(task_id)
+
+    # Cross-validate: if celery recorded the task args (requires
+    # `result_extended=True`), ensure the task was dispatched by THIS
+    # resume. Don't 500 if `.args` raises (older celery versions, broker
+    # stripped, etc.) — treat it as "can't verify, allow through" which
+    # still has the ownership check above as a backstop.
+    try:
+        task_args = result.args
+    except Exception:
+        task_args = None
+    if task_args and len(task_args) >= 1 and str(task_args[0]) != str(resume_id):
+        # Generic 404 so a probe can't distinguish "task belongs to
+        # a different resume of mine" from "task doesn't exist".
+        raise HTTPException(status_code=404, detail="Task not found")
 
     if result.state == "PENDING":
         return {"status": "pending", "current": 0, "total": 0}
@@ -522,15 +586,29 @@ async def get_resume_scores(
 
     total_pages = (total_filtered + page_size - 1) // page_size if total_filtered > 0 else 1
 
+    # Regression finding 205: every other paginated list endpoint in the
+    # app returns the array under `items` (see `jobs.py`, `reviews.py`,
+    # `discovery.py:49` which has the F108 comment "unified pagination
+    # keys"). This endpoint used to emit `scores`, so the shared
+    # `<PaginatedList>` / `<Pagination>` components rendered empty
+    # silently. Emit `items` as the canonical key; keep `scores` as a
+    # deprecated alias for ONE release so existing frontends don't break
+    # mid-rollout. A follow-up round should grep for `\.scores` reads in
+    # frontend/src and migrate the call sites, then delete the alias.
+    # `total` (the filtered row count, matching the canonical envelope)
+    # is emitted alongside the legacy `total_filtered` key for the same
+    # reason.
     return {
         "resume_id": str(resume.id),
-        "scores": scores,
+        "items": scores,
+        "scores": scores,  # deprecated alias — see F205; drop next release
+        "total": total_filtered,
         "average_score": round(avg_score_all, 1),
         "best_score": round(best_score, 1),
         "above_70": above_70,
         "top_missing_keywords": top_missing,
         "jobs_scored": total_all,
-        "total_filtered": total_filtered,
+        "total_filtered": total_filtered,  # deprecated alias for `total`
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
@@ -603,11 +681,64 @@ async def customize_resume_for_job(
     job_id = body.job_id
     target_score = body.target_score
 
+    settings = get_settings()
+
+    # Regression finding 203: tester reports live `used_today` still
+    # increments on API-key-missing errors despite the round-15 fix.
+    # Code inspection confirms the handler already sets `success=False`
+    # on error rows and the quota query already filters
+    # `success==True` — so this is EITHER (a) deploy drift (older
+    # image running without the filter) OR (b) an accidentally-True
+    # row slipping through via the model's `default=True`. Defense-
+    # in-depth: short-circuit BEFORE any DB work when the API key is
+    # unset, so no log row can be written and no quota state can
+    # mutate regardless of what downstream code does. Returning the
+    # same 200 + `error:true` shape the frontend `ResumeScorePage`
+    # already renders (see `customization?.error &&` branch at
+    # line 824) so the UX doesn't regress.
+    #
+    # Tester item (5) on F203: a shared `AIConfiguredDependency` that
+    # 503s early would be cleaner than per-endpoint short-circuits,
+    # but that would break the inline-error UX on this page. Keep the
+    # 200+error shape here; use the dependency for future endpoints
+    # that don't have the same "render the error inline" UI.
+    if not settings.anthropic_api_key:
+        # Count quota for the response usage block (reads only, no
+        # write). Zero delta — the quota stays where it was.
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        used_today_ro = (await db.execute(
+            select(func.count(AICustomizationLog.id))
+            .where(
+                AICustomizationLog.user_id == user.id,
+                AICustomizationLog.created_at >= today_start,
+                AICustomizationLog.success == True,  # noqa: E712
+            )
+        )).scalar() or 0
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            "F203: refused /resume/%s/customize — ANTHROPIC_API_KEY not configured (user=%s)",
+            resume_id, user.id,
+        )
+        return {
+            "resume_id": str(resume_id),
+            "job_id": str(job_id),
+            "job_title": "",
+            "target_score": target_score,
+            "customized_text": "",
+            "changes_made": [],
+            "improvement_notes": "AI customization requires an Anthropic API key. Please configure ANTHROPIC_API_KEY.",
+            "error": True,
+            "usage": {
+                "used_today": used_today_ro,
+                "daily_limit": settings.ai_daily_limit_per_user,
+                "remaining": max(0, settings.ai_daily_limit_per_user - used_today_ro),
+            },
+        }
+
     # Check daily limit. Regression finding 170: the quota now counts
     # only `success=True` rows so failed AI calls (missing API key,
     # upstream 5xx, timeout) don't burn the user's daily budget. Keeps
     # the quota honest and lets clients retry after transient failures.
-    settings = get_settings()
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     used_today = (await db.execute(
         select(func.count(AICustomizationLog.id))
