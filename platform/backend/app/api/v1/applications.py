@@ -51,12 +51,59 @@ ApplicationStatus = Literal[
 ]
 
 
+# Regression finding 129: `prepared_answers` was `list[dict] | None =
+# None` with no per-item shape and no array cap, so a client could
+# POST 10,000 dicts × 100-char answer strings (1.37 MB parsed) and
+# have it persisted on `Application.prepared_answers` (typed JSON,
+# unbounded). On a user with 100 apps, that's ~137 MB per user in
+# storage, plus every analytics endpoint that joins `Application`
+# loads the blob into memory. Same failure-mode class as F130 (unbounded
+# comment), F131 (unbounded description), F80 (answer book). Per-item
+# ApplicationAnswer schema caps the two free-text fields; `max_length=
+# 200` on the outer array is ~10× a real ATS form (typical 5-30 fields).
+class ApplicationAnswer(BaseModel):
+    """One field of a prepared-application answer payload.
+
+    Mirrors the shape the `/applications/prepare` handler builds at
+    line 285 — only the free-text fields get length-capped here; the
+    rest are enums / bools / question_keys that are already length-
+    bounded by the ATS form they came from.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # `question_key` is derived from the ATS form schema and typically
+    # reads like `first_name`, `years_experience`, `cover_letter`.
+    # 200 chars is 5x the longest question_key the repo generates
+    # today, with room for provider-prefixed keys like
+    # `greenhouse_custom_field_1234`.
+    question_key: str | None = Field(default=None, max_length=200)
+    # `answer` is the actual user-entered value. Most answers are
+    # short (name, email, yes/no); cover-letter fields can go long but
+    # 5000 chars is a hard upper bound (typical cover letter is
+    # ~300 words ≈ 2000 chars). Above this we're clearly being
+    # DoS-payload'd, not getting real data.
+    answer: str | None = Field(default=None, max_length=5000)
+
+
 class ApplicationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: ApplicationStatus | None = None
-    notes: str | None = Field(default=None, max_length=10000)
-    prepared_answers: list[dict] | None = None
+    # F129: 5000-char cap matches the answer_book + cover_letter
+    # precedent. Pre-fix was 10000 (F194) which rejected the 10MB
+    # probe but still allowed ~40KB of prose per row. Tightening here
+    # now that we know the real-world upper bound. Rows with >5000
+    # chars written before this fix are grandfathered (PATCH only
+    # rejects oversize writes; reads still return whatever's there).
+    notes: str | None = Field(default=None, max_length=5000)
+    # F129: cap the outer list at 200 + enforce ApplicationAnswer on
+    # each item. `extra="allow"` on the inner schema keeps backward
+    # compatibility with any provider-specific fields the
+    # /applications/prepare handler adds (confidence, match_source,
+    # field_type, etc.) — those aren't free-text user input so they
+    # don't need capping.
+    prepared_answers: list[ApplicationAnswer] | None = Field(default=None, max_length=200)
 
 
 @router.get("/readiness/{job_id}")
