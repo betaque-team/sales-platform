@@ -40,6 +40,14 @@
   }
 }
 
+/* Regression finding 52: global focus-visible ring for keyboard
+   navigation. Only shows on keyboard (not click) thanks to
+   :focus-visible. Works on buttons, links, inputs, and other
+   focusable elements. */
+*:focus-visible {
+  @apply outline-none ring-2 ring-primary-500 ring-offset-2;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
