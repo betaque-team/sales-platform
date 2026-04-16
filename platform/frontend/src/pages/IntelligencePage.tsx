@@ -3,12 +3,31 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Brain, DollarSign, Clock, Users, AlertTriangle,
   CheckCircle2, XCircle, ArrowRight, Linkedin, Mail,
-  Zap,
+  Zap, AlertCircle, RefreshCw,
 } from "lucide-react";
 import {
+  ApiError,
   getSkillGaps, getSalaryInsights, getTimingIntelligence, getNetworkingSuggestions,
 } from "@/lib/api";
 import { formatCount } from "@/lib/format";
+
+// Regression finding 216 (mirror of F207 on IntelligencePage tabs):
+// previously each tab only destructured `{ data, isLoading }` and rendered
+// `null` on any non-loading state where `data` was falsy — so an expired
+// session (401), a backend outage (5xx), or a network drop all produced
+// the same blank tab panel. Users couldn't tell "the server is down" from
+// "there's no data to show you." This file now renders distinct error UX
+// for 401/403 (session expired → sign-in link), 5xx / network, and other
+// failures, while keeping the networking tab's empty-data state intact
+// (that one is a valid "no suggestions yet" message, not an error).
+type QueryRetry = (failureCount: number, err: unknown) => boolean;
+
+const skipAuthAnd404Retry: QueryRetry = (failureCount, err) => {
+  if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
+    return false;
+  }
+  return failureCount < 2;
+};
 
 const TABS = [
   { key: "skills", label: "Skill Gaps", icon: Brain },
@@ -78,12 +97,14 @@ export function IntelligencePage() {
 // ── Skill Gap Tab ─��─────────────────────────────────────────────────────────
 
 function SkillGapTab({ roleCluster }: { roleCluster: string }) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["skill-gaps", roleCluster],
     queryFn: () => getSkillGaps(roleCluster || undefined),
+    retry: skipAuthAnd404Retry,
   });
 
   if (isLoading) return <LoadingSkeleton />;
+  if (isError) return <TabErrorState error={error} onRetry={() => refetch()} />;
   if (!data) return null;
 
   const { summary, top_missing, category_breakdown, skills } = data;
@@ -190,12 +211,14 @@ function SkillGapTab({ roleCluster }: { roleCluster: string }) {
 // ── Salary Tab ──────────────────────────────────────────────────────────────
 
 function SalaryTab({ roleCluster }: { roleCluster: string }) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["salary-insights", roleCluster],
     queryFn: () => getSalaryInsights(roleCluster || undefined),
+    retry: skipAuthAnd404Retry,
   });
 
   if (isLoading) return <LoadingSkeleton />;
+  if (isError) return <TabErrorState error={error} onRetry={() => refetch()} />;
   if (!data) return null;
 
   const fmt = (n: number) => `$${Math.round(n / 1000)}k`;
@@ -294,12 +317,14 @@ function SalaryTab({ roleCluster }: { roleCluster: string }) {
 // ── Timing Tab ──────────────────────────────────────────────────────────────
 
 function TimingTab() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["timing-intelligence"],
     queryFn: getTimingIntelligence,
+    retry: skipAuthAnd404Retry,
   });
 
   if (isLoading) return <LoadingSkeleton />;
+  if (isError) return <TabErrorState error={error} onRetry={() => refetch()} />;
   if (!data) return null;
 
   return (
@@ -394,12 +419,18 @@ function TimingTab() {
 // ── Networking Tab ──────────────────────────────────────────────────────────
 
 function NetworkingTab() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["networking-suggestions"],
     queryFn: () => getNetworkingSuggestions(),
+    retry: skipAuthAnd404Retry,
   });
 
   if (isLoading) return <LoadingSkeleton />;
+  // F216: error must precede the empty-state check. A 5xx/401 returns
+  // `data === undefined`, which the old guard collapsed into the "no
+  // networking suggestions yet" message — silently lying to the user about
+  // whether the backend was reachable.
+  if (isError) return <TabErrorState error={error} onRetry={() => refetch()} />;
   if (!data?.suggestions?.length) {
     return (
       <div className="rounded-xl border border-gray-200 bg-white p-8 text-center">
@@ -502,6 +533,56 @@ function LoadingSkeleton() {
         ))}
       </div>
       <div className="rounded-xl border border-gray-200 bg-white p-5 h-48 animate-pulse" />
+    </div>
+  );
+}
+
+// F216: tab-level error state. Distinguishes session-expired (401/403 —
+// offer a sign-in link that preserves `next` so the user lands back here
+// after auth) from transient/server failures (5xx / network — offer a
+// retry). We don't render a 404 branch because the intelligence endpoints
+// are aggregates that don't take a resource id; a 404 from them means
+// the route is gone and retry won't help either, so we fall through to
+// the generic failure message.
+function TabErrorState({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const status = error instanceof ApiError ? error.status : 0;
+  const message = error instanceof Error ? error.message : "";
+
+  if (status === 401 || status === 403) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <p className="mt-3 text-sm font-medium text-gray-900">Your session has expired</p>
+        <p className="mt-1 text-sm text-gray-600">Please sign in again to continue.</p>
+        <button
+          onClick={() => {
+            const next = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.assign(`/login?next=${next}`);
+          }}
+          className="mt-4 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 transition-colors"
+        >
+          Sign in
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-8 text-center">
+      <AlertCircle className="mx-auto h-8 w-8 text-amber-400" />
+      <p className="mt-3 text-sm font-medium text-gray-900">Couldn't load this section</p>
+      <p className="mt-1 text-sm text-gray-500">
+        {status >= 500
+          ? "The server ran into a problem. Please try again in a moment."
+          : message || "Check your connection and try again."}
+      </p>
+      <button
+        onClick={onRetry}
+        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 transition-colors"
+      >
+        <RefreshCw className="h-4 w-4" />
+        Retry
+      </button>
     </div>
   );
 }

@@ -8,7 +8,9 @@ import {
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
+import { Button } from "@/components/Button";
 import {
+  ApiError,
   getCompanyDetail, triggerCompanyEnrichment,
   createCompanyContact, updateCompanyContact, deleteCompanyContact,
   updateContactOutreach, draftContactEmail,
@@ -50,10 +52,28 @@ export function CompanyDetailPage() {
   const [draftLoading, setDraftLoading] = useState<string | null>(null);
   const [localEnriching, setLocalEnriching] = useState(false);
 
-  const { data: company, isLoading, error } = useQuery({
+  // Regression finding 216 (mirror of F207 on CompanyDetailPage): previously
+  // destructured only `error`, fused with `!company` into a single "Company
+  // not found" render (see old `if (error || !company)` branch) — so a 401
+  // (expired session), 403, 404 (deleted company), 500, or network drop all
+  // rendered the same "Company not found" message. Same UX failure
+  // JobDetailPage had pre-F207. The api.ts global 401 interceptor (also
+  // F207) already preempts 401s with a /login redirect, but 404 / 5xx /
+  // network still need distinct UX so users can tell "this company was
+  // removed" from "something went wrong, retry".
+  const { data: company, isLoading, isError, error } = useQuery({
     queryKey: ["company-detail", id],
     queryFn: () => getCompanyDetail(id!),
     enabled: !!id,
+    // Don't retry auth failures or missing records — the 401 redirect fires
+    // immediately via the api.ts interceptor, and retrying a 404 never
+    // helps.
+    retry: (failureCount, err) => {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
+        return false;
+      }
+      return failureCount < 2;
+    },
     refetchInterval: (query) => {
         const data = query.state.data as any;
         if (!data) return false;
@@ -127,14 +147,79 @@ export function CompanyDetailPage() {
     );
   }
 
-  if (error || !company) {
+  // F216: split the failure state so users can tell the difference between
+  // "this company was deleted / never existed" and "something went wrong
+  // talking to the backend." 401 is handled by the api.ts global
+  // interceptor (redirect to /login). 403 gets a similar session-expired
+  // UI as a fallback in case the interceptor didn't fire.
+  if (isError) {
+    const status = error instanceof ApiError ? error.status : 0;
+    const message = (error as Error)?.message || "";
+
+    if (status === 404) {
+      return (
+        <div className="py-20 text-center">
+          <AlertCircle className="mx-auto h-10 w-10 text-red-300" />
+          <p className="mt-3 text-sm font-medium text-gray-900">Company not found</p>
+          <p className="mt-1 text-sm text-gray-500">
+            This record may have been removed or merged into another entry.
+          </p>
+          <button onClick={() => navigate("/companies")} className="mt-3 text-sm text-primary-600 hover:text-primary-700">
+            Back to companies
+          </button>
+        </div>
+      );
+    }
+
+    if (status === 401 || status === 403) {
+      return (
+        <div className="py-20 text-center">
+          <p className="text-gray-700 text-lg font-medium">Your session has expired</p>
+          <p className="mt-1 text-sm text-gray-500">Please sign in again to continue.</p>
+          <Button variant="primary" className="mt-4" onClick={() => {
+            const next = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.assign(`/login?next=${next}`);
+          }}>
+            Sign in
+          </Button>
+        </div>
+      );
+    }
+
+    // Generic failure (5xx, network, CORS, timeout). Give the user a retry
+    // path instead of letting them believe the company was deleted.
     return (
       <div className="py-20 text-center">
-        <AlertCircle className="mx-auto h-10 w-10 text-red-300" />
-        <p className="mt-3 text-sm font-medium text-gray-900">Company not found</p>
-        <button onClick={() => navigate("/companies")} className="mt-2 text-sm text-primary-600 hover:text-primary-700">
+        <AlertCircle className="mx-auto h-10 w-10 text-amber-300" />
+        <p className="mt-3 text-sm font-medium text-gray-900">Couldn't load this company</p>
+        <p className="mt-1 text-sm text-gray-500">
+          {status >= 500
+            ? "The server ran into a problem. Please try again in a moment."
+            : message || "Check your connection and try again."}
+        </p>
+        <div className="mt-4 flex justify-center gap-3">
+          <Button variant="primary" onClick={() => queryClient.invalidateQueries({ queryKey: ["company-detail", id] })}>
+            Retry
+          </Button>
+          <Button variant="secondary" onClick={() => navigate("/companies")}>
+            Back to companies
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!company) {
+    // Defensive: isLoading=false, isError=false, data=undefined happens if
+    // the query was disabled (no id in URL). Send the user back to the list
+    // rather than rendering "not found" (which implies the id resolved to
+    // nothing).
+    return (
+      <div className="py-20 text-center">
+        <p className="text-gray-500">No company selected</p>
+        <Button variant="secondary" className="mt-4" onClick={() => navigate("/companies")}>
           Back to companies
-        </button>
+        </Button>
       </div>
     );
   }
