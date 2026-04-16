@@ -14,6 +14,7 @@ from app.workers.tasks._role_matching import (
 from app.models.company import Company
 from app.models.job import Job
 from app.models.scoring_signal import ScoringSignal
+from app.models.discovery import DiscoveryRun
 from app.workers.tasks._feedback import get_feedback_adjustment
 
 logger = logging.getLogger(__name__)
@@ -305,6 +306,49 @@ def fix_stuck_enrichments():
 
     except Exception as e:
         logger.exception("fix_stuck_enrichments failed: %s", e)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@celery_app.task(name="app.workers.tasks.maintenance_task.fix_stuck_discovery_runs")
+def fix_stuck_discovery_runs():
+    """Sweep DiscoveryRun rows stuck in 'pending' or 'running' for >1 hour.
+
+    Regression finding 186: before the API/worker wiring fix, any
+    ``POST /discovery/runs`` call left a 'pending' row orphaned
+    forever. Even post-fix we still need a safety net for cases
+    where Celery was unreachable at dispatch time, or the worker
+    crashed mid-run. Marks anything older than the cutoff as
+    'failed' so admins can see failure in the UI and re-trigger,
+    rather than staring at a spinner.
+    """
+    logger.info("Starting fix_stuck_discovery_runs")
+    session = SyncSession()
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        result = session.execute(
+            update(DiscoveryRun)
+            .where(
+                DiscoveryRun.status.in_(["pending", "running"]),
+                DiscoveryRun.started_at < cutoff,
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        count = result.rowcount
+        session.commit()
+
+        logger.info("fix_stuck_discovery_runs: %d runs reset to 'failed'", count)
+        return {"reset": count}
+
+    except Exception as e:
+        logger.exception("fix_stuck_discovery_runs failed: %s", e)
         session.rollback()
         raise
     finally:

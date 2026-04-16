@@ -278,19 +278,52 @@ def _probe_linkedin_slugs(session, run: DiscoveryRun) -> int:
 
 
 @celery_app.task(name="app.workers.tasks.discovery_task.run_discovery", bind=True, max_retries=1)
-def run_discovery(self):
-    """Run a full discovery cycle: Greenhouse sitemap + multi-platform slug probes."""
-    logger.info("Starting run_discovery")
+def run_discovery(self, run_id: str | None = None):
+    """Run a full discovery cycle: Greenhouse sitemap + multi-platform slug probes.
+
+    Regression finding 186: `POST /discovery/runs` on the API side was
+    creating a `DiscoveryRun` row with `status="pending"` and
+    commenting "the actual discovery is executed by the background
+    worker that picks up runs with status='pending'" — but no such
+    polling worker existed. This task always created a fresh row
+    with `status="running"` and ignored any pending rows, so every
+    manual trigger from the admin UI left an orphan pending row that
+    aged indefinitely (3 found aged 3+ hours during regression
+    testing). Fix: accept an optional `run_id` from the API caller
+    and re-use that row instead of creating a new one. The scheduled
+    (cron) path still calls with no arg and creates its own row.
+    """
+    logger.info("Starting run_discovery run_id=%s", run_id)
     session = SyncSession()
 
     try:
-        run = DiscoveryRun(
-            id=uuid.uuid4(),
-            source="scheduled",
-            status="running",
-        )
-        session.add(run)
-        session.flush()
+        run = None
+        if run_id:
+            # F186: called from the API handler — it already inserted
+            # a pending row. Flip it to running and re-use it so we
+            # don't accumulate orphans.
+            run = session.execute(
+                select(DiscoveryRun).where(DiscoveryRun.id == run_id)
+            ).scalar_one_or_none()
+            if run is not None:
+                run.status = "running"
+                run.started_at = datetime.now(timezone.utc)
+                session.flush()
+            else:
+                logger.warning(
+                    "run_discovery called with run_id=%s but row not found — "
+                    "creating a fresh row instead",
+                    run_id,
+                )
+
+        if run is None:
+            run = DiscoveryRun(
+                id=uuid.uuid4(),
+                source="scheduled",
+                status="running",
+            )
+            session.add(run)
+            session.flush()
 
         total_new = 0
 

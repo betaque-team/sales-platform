@@ -2,7 +2,8 @@
 
 import csv
 import io
-from fastapi import APIRouter, Depends, Query, Request
+from typing import Literal
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +14,23 @@ from app.models.job import Job
 from app.models.company import Company
 from app.models.company_contact import CompanyContact
 from app.models.pipeline import PotentialClient
+from app.models.pipeline_stage import PipelineStage
 from app.models.role_config import RoleClusterConfig
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.utils.audit import log_action
+
+
+# Regression finding 187: `/export/jobs?status=XYZ_BOGUS` silently
+# returned an empty CSV (header only) because the endpoint did zero
+# validation on enum-shaped filters — a typo like `status=Accepted`
+# (capital A) looked to a client indistinguishable from "we legit
+# have no matching rows". `status` values are static in the codebase
+# (mirrors the comment on `Job.status` in models/job.py:33), so a
+# `Literal` type gives us parse-time 422s for free.
+JobStatusFilter = Literal[
+    "new", "under_review", "accepted", "rejected", "expired", "archived"
+]
 
 
 async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
@@ -29,6 +43,25 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
     )
     clusters = result.scalars().all()
     return list(clusters) if clusters else ["infra", "security"]
+
+
+async def _get_all_cluster_names(db: AsyncSession) -> list[str]:
+    """Get every configured cluster name (active or not) for validation.
+
+    F187: role clusters are admin-configurable so we can't hard-code
+    a `Literal`. We still want to reject typos, so we validate at
+    runtime against the full cluster catalog plus the "relevant"
+    pseudo-value that the filter path accepts (see jobs.py:91).
+    """
+    result = await db.execute(select(RoleClusterConfig.name))
+    return list(result.scalars().all())
+
+
+async def _get_pipeline_stage_keys(db: AsyncSession) -> list[str]:
+    """Get all pipeline stage keys for `/export/pipeline?stage=` validation."""
+    result = await db.execute(select(PipelineStage.key))
+    return list(result.scalars().all())
+
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -91,9 +124,14 @@ def _iter_csv(rows: list[list[str]], columns: list[str]):
 @router.get("/jobs")
 async def export_jobs(
     request: Request,
-    status: str | None = None,
+    # F187: `status` typed as Literal so FastAPI 422s bogus values
+    # at parse time instead of returning an empty CSV silently.
+    status: JobStatusFilter | None = None,
     platform: str | None = None,
     geography_bucket: str | None = None,
+    # `role_cluster` is admin-configurable so we can't use Literal —
+    # validated at runtime below against the DB catalog + "relevant"
+    # pseudo-value. Kept as `str | None` at the signature level.
     role_cluster: str | None = None,
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
@@ -107,6 +145,21 @@ async def export_jobs(
     if geography_bucket:
         query = query.where(Job.geography_bucket == geography_bucket)
     if role_cluster:
+        # F187: validate role_cluster against the configured cluster
+        # catalog before filtering. Clusters are admin-configurable
+        # (RoleClusterConfig) so we load the allowed set from the DB
+        # instead of hard-coding a Literal. The "relevant" pseudo-value
+        # is a UI alias for "all clusters marked relevant" (see F106)
+        # and must be whitelisted explicitly.
+        allowed_clusters = set(await _get_all_cluster_names(db)) | {"relevant"}
+        if role_cluster not in allowed_clusters:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid role_cluster. Must be one of: "
+                    + ", ".join(sorted(allowed_clusters))
+                ),
+            )
         # Regression finding 106: `role_cluster=relevant` is a UI pseudo-value
         # meaning "all clusters marked relevant" (e.g. infra + security), not a
         # literal DB string.  Previously this fell through to an equality check
@@ -171,6 +224,9 @@ async def export_jobs(
 @router.get("/pipeline")
 async def export_pipeline(
     request: Request,
+    # F187: `stage` values are stored in PipelineStage (admin-configurable)
+    # so we validate at runtime rather than with Literal. Same pattern as
+    # pipeline.py POST/PATCH which validates via _get_stage_keys.
     stage: str | None = None,
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
@@ -178,6 +234,17 @@ async def export_pipeline(
     query = select(PotentialClient).options(joinedload(PotentialClient.company))
 
     if stage:
+        # F187: reject unknown stages at the boundary so a typo returns
+        # a helpful 400 instead of an empty CSV.
+        allowed_stages = await _get_pipeline_stage_keys(db)
+        if allowed_stages and stage not in allowed_stages:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid stage. Must be one of: "
+                    + ", ".join(sorted(allowed_stages))
+                ),
+            )
         query = query.where(PotentialClient.stage == stage)
 
     query = query.order_by(PotentialClient.priority.desc(), PotentialClient.created_at.desc())

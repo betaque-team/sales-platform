@@ -87,6 +87,12 @@ if SCAN_MODE == "aggressive":
             "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
             "schedule": crontab(minute=45, hour="*/6"),  # Every 6 hours
         },
+        # F186: sweep DiscoveryRun rows stuck pending/running >1h (API
+        # dispatched but Celery was down, worker crashed mid-run, etc.)
+        "fix_stuck_discovery_runs": {
+            "task": "app.workers.tasks.maintenance_task.fix_stuck_discovery_runs",
+            "schedule": crontab(minute=50, hour="*/6"),  # Every 6 hours, staggered from enrichment sweep
+        },
         "deduplicate_contacts": {
             "task": "app.workers.tasks.enrichment_task.deduplicate_contacts",
             "schedule": crontab(minute=0, hour=2, day_of_week="sunday"),  # Weekly Sunday 2am

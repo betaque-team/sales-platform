@@ -55,7 +55,16 @@ def require_role(*roles: str):
     async def check(user: User = Depends(get_current_user)) -> User:
         user_permissions = ROLE_HIERARCHY.get(user.role, set())
         if not user_permissions.intersection(roles):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Requires role: {', '.join(roles)}")
+            # Regression finding 185: previously returned
+            # `"Requires role: super_admin"` — naming the exact role
+            # gave an attacker who held a viewer/reviewer token the
+            # precise target name for privilege escalation. Generic
+            # message here; the required role is still recorded in
+            # server-side access logs for ops debugging.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient privileges for this action",
+            )
         return user
     return check
 

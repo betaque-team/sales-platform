@@ -1,5 +1,6 @@
 """Company discovery API endpoints."""
 
+import logging
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -15,6 +16,8 @@ from app.models.company import Company, CompanyATSBoard
 from app.models.user import User
 from app.api.deps import get_current_user, require_role
 from app.schemas.discovery import DiscoveryRunOut, DiscoveredCompanyOut, DiscoveredCompanyUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class BulkIdsRequest(BaseModel):
@@ -57,8 +60,19 @@ async def trigger_discovery_run(
     user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new discovery run record. The actual discovery is executed
-    by the background worker that picks up runs with status='pending'."""
+    """Create a new discovery run record and dispatch it to the Celery worker.
+
+    Regression finding 186: previously this endpoint inserted a row with
+    ``status='pending'`` and returned, expecting a worker to pick it up —
+    but no worker polls for pending rows. The run_discovery Celery task
+    only created its OWN rows when fired by Celery Beat, so manually
+    triggered runs sat pending forever. The fix is direct dispatch:
+    insert the pending row, then hand the run_id to the Celery task so
+    it flips it to 'running' and executes. If Celery/Redis is down we
+    still return the pending row so the UI isn't blocked — a separate
+    cleanup task (fix_stuck_discovery_runs) sweeps rows that never got
+    picked up.
+    """
     run = DiscoveryRun(
         source="manual",
         status="pending",
@@ -67,6 +81,28 @@ async def trigger_discovery_run(
     db.add(run)
     await db.commit()
     await db.refresh(run)
+
+    # F186: dispatch the Celery task that will flip this row from
+    # 'pending' → 'running' and execute discovery. Imported here (not
+    # at module load) to avoid importing Celery + all its task deps
+    # every time the API module is imported, and to keep the API
+    # testable without a live Redis.
+    try:
+        from app.workers.tasks.discovery_task import run_discovery
+        run_discovery.delay(run_id=str(run.id))
+    except Exception:
+        # Celery broker unreachable or task registration failed —
+        # log and fall through. The row stays 'pending' and will be
+        # reaped by the stuck-pending cleanup task. Deliberately not
+        # raising 502 here: the user's intent (record that a run was
+        # requested) succeeded; only the async execution hand-off
+        # failed, and the UI can retry.
+        logger.exception(
+            "Failed to dispatch run_discovery task for run_id=%s — "
+            "row left in 'pending' state for cleanup sweep",
+            run.id,
+        )
+
     return DiscoveryRunOut.model_validate(run)
 
 
