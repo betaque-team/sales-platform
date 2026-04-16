@@ -260,7 +260,10 @@ function AlertSettings() {
 
   const { data: alerts } = useQuery({
     queryKey: ["alerts"],
-    queryFn: getAlerts,
+    // F220(A): getAlerts now accepts {page, page_size} opts — wrap in a
+    // thunk so TanStack Query doesn't pass its QueryFunctionContext into
+    // the opts slot (TS 2769 on direct passing).
+    queryFn: () => getAlerts(),
   });
 
   const createMutation = useMutation({
