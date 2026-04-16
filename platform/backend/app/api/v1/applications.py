@@ -394,7 +394,16 @@ async def get_application_stats(
 
 @router.get("")
 async def list_applications(
-    status: str | None = None,
+    # Regression finding 220(B): `status` was typed `str | None` while the
+    # `ApplicationStatus` Literal (used by `ApplicationUpdate` on line 57)
+    # was sitting right there in the same module. A typo like `?status=
+    # Rejected` (capital R), `?status=APPLIED` (all caps), or `?status=
+    # <script>` silently returned HTTP 200 with total=0 — users saw "no
+    # applications" for a valid-looking filter value. Reusing the Literal
+    # here gives us a parse-time 422 that enumerates the allowed states.
+    # Same bug class as F187 (/export/jobs), F218 (/jobs), and F191
+    # (/platforms).
+    status: ApplicationStatus | None = None,
     search: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
