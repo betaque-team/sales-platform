@@ -395,9 +395,22 @@ export async function getPlatforms(): Promise<{ platforms: PlatformStats[] }> {
   return request<{ platforms: PlatformStats[] }>("/platforms");
 }
 
-export async function getPlatformBoards(platform?: string): Promise<{ items: PlatformBoard[]; total: number }> {
-  const query = platform ? `?platform=${platform}` : "";
-  return request<{ items: PlatformBoard[]; total: number }>(`/platforms/boards${query}`);
+// F223: backend now returns canonical pagination envelope, accepts
+// page/page_size/search, and is admin-gated. Optional opts object
+// preserves the existing `getPlatformBoards(platform)` call signature.
+export async function getPlatformBoards(
+  platform?: string,
+  opts?: { page?: number; page_size?: number; search?: string }
+): Promise<{ items: PlatformBoard[]; total: number; page: number; page_size: number; total_pages: number }> {
+  const params = new URLSearchParams();
+  if (platform) params.set("platform", platform);
+  if (opts?.page) params.set("page", String(opts.page));
+  if (opts?.page_size) params.set("page_size", String(opts.page_size));
+  if (opts?.search) params.set("search", opts.search);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<{ items: PlatformBoard[]; total: number; page: number; page_size: number; total_pages: number }>(
+    `/platforms/boards${query}`
+  );
 }
 
 export async function toggleBoard(boardId: string): Promise<{ id: string; is_active: boolean }> {

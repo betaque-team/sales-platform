@@ -107,18 +107,59 @@ async def list_boards(
     # (wrong case) or `grenhouse` (typo) instead of silently returning
     # an empty list.
     platform: PlatformFilter | None = None,
-    user: User = Depends(get_current_user),
+    # Regression finding 223: previously this handler dumped the ENTIRE
+    # 871-row board registry (204,890 bytes) on every authenticated GET
+    # with no pagination, no search filter, and no role guard. Same
+    # "unbounded list + envelope drift" pair as F217 on scan-logs, but
+    # with the additional info-disclosure angle: boards reveal which
+    # company ATS slugs we scrape, which is internal ops data that
+    # viewer/reviewer roles shouldn't have a wholesale view of. Fix
+    # mirrors F217:
+    #   (a) `page` / `page_size` with ge/le bounds — page_size default
+    #       500 keeps the existing "one platform at a time" UX intact
+    #       (largest platform ~200 boards today) while bounding the
+    #       worst-case response at 1000 rows;
+    #   (b) optional `search` term (ilike on company name OR slug) so
+    #       the PlatformsPage "find by company" case stops requiring a
+    #       full-registry pull filtered client-side;
+    #   (c) canonical envelope `{items,total,page,page_size,total_pages}`
+    #       (was `{items,total}`) to match F108/F205/F212/F217/F220(A);
+    #   (d) `require_role("admin")` so viewer/reviewer roles 403 instead
+    #       of receiving the full internal scraping registry. The
+    #       downstream toggle/add/delete handlers are already admin-only,
+    #       so this closes the read-vs-write permission gap. Frontend
+    #       "Boards" expand button is hidden for non-admins in the same
+    #       round (mirroring the F217 Scan Logs pattern).
+    search: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(500, ge=1, le=1000),
+    user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all ATS boards with company info."""
+    """List ATS boards with company info (admin-only, paginated)."""
     from app.models.company import Company
     from sqlalchemy.orm import joinedload
 
+    count_q = select(func.count(CompanyATSBoard.id))
     query = select(CompanyATSBoard).options(joinedload(CompanyATSBoard.company))
     if platform:
         query = query.where(CompanyATSBoard.platform == platform)
+        count_q = count_q.where(CompanyATSBoard.platform == platform)
+    if search:
+        # Join once for the ILIKE against company.name; CompanyATSBoard.slug
+        # is on the table itself so no join needed for that side of the OR.
+        from sqlalchemy import or_
+        term = f"%{search.strip()}%"
+        query = query.join(Company, CompanyATSBoard.company_id == Company.id).where(
+            or_(Company.name.ilike(term), CompanyATSBoard.slug.ilike(term))
+        )
+        count_q = count_q.join(Company, CompanyATSBoard.company_id == Company.id).where(
+            or_(Company.name.ilike(term), CompanyATSBoard.slug.ilike(term))
+        )
     query = query.order_by(CompanyATSBoard.platform, CompanyATSBoard.slug)
+    query = query.offset((page - 1) * page_size).limit(page_size)
 
+    total = (await db.execute(count_q)).scalar() or 0
     result = await db.execute(query)
     boards = result.unique().scalars().all()
 
@@ -135,7 +176,10 @@ async def list_boards(
             }
             for b in boards
         ],
-        "total": len(boards),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
     }
 
 
