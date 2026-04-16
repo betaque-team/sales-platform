@@ -18,8 +18,27 @@ import {
   TableCell,
 } from "@/components/Table";
 import { getJobs, bulkAction, getActiveResume, prepareApplication, getRoleClusters } from "@/lib/api";
-import type { JobFilters, JobStatus } from "@/lib/types";
+import type {
+  JobFilters,
+  JobStatus,
+  BulkActionStatus,
+  BulkFilterCriteria,
+} from "@/lib/types";
 import { formatCount } from "@/lib/format";
+
+// F69: user-facing verb → backend status mapping. The buttons stay
+// labelled Accept/Reject/Reset (what the user intends) but the wire
+// payload must be one of the JobStatusLiteral values (F99 tightened
+// the backend to reject verbs). The previous code sent the verb
+// directly and 422'd in prod on every bulk action — silently,
+// because the UI still showed a loading spinner and invalidated
+// the query. Kept as a const map so a future status addition lands
+// in one place.
+const VERB_TO_STATUS: Record<"accept" | "reject" | "reset", BulkActionStatus> = {
+  accept: "accepted",
+  reject: "rejected",
+  reset: "new",
+};
 
 // Regression finding 87: synthetic dropdown value used for the
 // "Unclassified" option. Keeps the `<select>`'s `value` shape
@@ -146,14 +165,34 @@ export function JobsPage() {
   }, [filters]);
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // F69: when true, the bulk action targets *every* row matching the
+  // current filter (server-side enumeration), not just the ids in
+  // `selectedIds`. The banner below the filter Card flips this on,
+  // and any filter change or cancel flips it off. Kept separate from
+  // `selectedIds` so the existing per-page select-all path is
+  // unchanged when the user hasn't opted into the full-matching mode.
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
+  // F69: remember the last bulk error so the banner above the action
+  // Card can show "Filter matches 8,342 jobs which exceeds the cap of
+  // 5000" instead of silently failing. `bulkMutation.error` also
+  // carries it, but extracting the .detail payload and clearing on
+  // success is clearer as its own state.
+  const [bulkErrorMsg, setBulkErrorMsg] = useState<string | null>(null);
 
   // Regression finding 70: clear checkbox selections when filters change —
   // stale selections from a previous filter-set could silently target
   // jobs the user can no longer see in the table. F87: `is_classified`
   // is also a filter axis (Unclassified dropdown option), so toggling
   // between "classified" and "unclassified" views must likewise reset.
+  // F69: `selectAllMatching` is explicitly scoped to the filter set
+  // active at click-time, so the same "filters changed" event must
+  // cancel it too — otherwise a user could narrow the filter AFTER
+  // clicking "Select all N matching" and silently shrink the blast
+  // radius (surprising) or broaden it (dangerous).
   useEffect(() => {
     setSelectedIds(new Set());
+    setSelectAllMatching(false);
+    setBulkErrorMsg(null);
   }, [
     filters.search, filters.status, filters.platform, filters.geography,
     filters.role_cluster, filters.is_classified, filters.sort_by, filters.sort_dir,
@@ -228,6 +267,23 @@ export function JobsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
       setSelectedIds(new Set());
+      // F69: clear full-matching intent after it fires — otherwise
+      // the next bulk click would silently re-target the whole
+      // (now-invalidated) filter set, which is a foot-gun. The user
+      // re-opts in by clicking "Select all N matching" again.
+      setSelectAllMatching(false);
+      setBulkErrorMsg(null);
+    },
+    onError: (err: any) => {
+      // F69: surface backend 400s from the filter branch (cap exceeded
+      // or zero-match) in the UI instead of silently failing. Fall
+      // back to a generic message if the error shape is unexpected.
+      const detail =
+        err?.body?.detail ||
+        err?.detail ||
+        err?.message ||
+        "Bulk action failed. Please try again.";
+      setBulkErrorMsg(typeof detail === "string" ? detail : "Bulk action failed.");
     },
   });
 
@@ -267,15 +323,63 @@ export function JobsPage() {
     });
   };
 
+  // F69: translate the current filters state into the BulkFilterCriteria
+  // shape the backend expects. Only non-empty fields survive so the
+  // generated WHERE chain matches what `GET /jobs` produced for the
+  // page the user is looking at. The frontend uses `geography` in its
+  // JobFilters state but the backend field is `geography_bucket`, so
+  // we rename here. `sort_by` / `sort_dir` / `page` are intentionally
+  // left out — they don't affect the matching id set and sending them
+  // would just produce audit-log noise.
+  const buildFilterCriteria = (): BulkFilterCriteria => {
+    const c: BulkFilterCriteria = {};
+    if (filters.search && filters.search.trim()) c.search = filters.search.trim();
+    if (filters.status) c.status = filters.status;
+    if (filters.platform) c.platform = filters.platform;
+    if (filters.geography) c.geography_bucket = filters.geography;
+    if (filters.role_cluster) c.role_cluster = filters.role_cluster;
+    if (filters.is_classified !== undefined) c.is_classified = filters.is_classified;
+    return c;
+  };
+
   // Regression finding 71: gate bulk actions behind window.confirm() so a
   // misclick doesn't silently change the status of dozens of jobs.
-  const handleBulkAction = (action: "accept" | "reject" | "reset") => {
+  // F69: route between id-list and filter branches based on
+  // `selectAllMatching`. The confirm prompt includes the real blast
+  // radius — "X selected jobs" for the id path, "all N matching" for
+  // the filter path — so the user can't mistake one for the other.
+  const handleBulkAction = (verb: "accept" | "reject" | "reset") => {
+    const status = VERB_TO_STATUS[verb];
+    const verbLabel = verb === "accept" ? "Accept" : verb === "reject" ? "Reject" : "Reset";
+    const total = data?.total ?? 0;
+
+    if (selectAllMatching) {
+      // Filter branch — target everything matching the current filter.
+      // Confirm message calls out the total so the user sees the actual
+      // row count they're about to mutate. Backend caps at 5000; if the
+      // filter exceeds that, the mutation rejects with a 400 surfaced
+      // via `bulkErrorMsg` (no need to pre-check — single round trip).
+      if (!window.confirm(
+        `${verbLabel} all ${total.toLocaleString()} jobs matching the current filter? This cannot be undone.`
+      )) return;
+      setBulkErrorMsg(null);
+      bulkMutation.mutate({
+        filter: buildFilterCriteria(),
+        action: status,
+      });
+      return;
+    }
+
+    // Legacy id-list branch — unchanged semantics, correct status value.
     const count = selectedIds.size;
-    const verb = action === "accept" ? "Accept" : action === "reject" ? "Reject" : "Reset";
-    if (!window.confirm(`${verb} ${count} selected job${count !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    if (count === 0) return;
+    if (!window.confirm(
+      `${verbLabel} ${count} selected job${count !== 1 ? "s" : ""}? This cannot be undone.`
+    )) return;
+    setBulkErrorMsg(null);
     bulkMutation.mutate({
       job_ids: Array.from(selectedIds),
-      action,
+      action: status,
     });
   };
 
@@ -467,13 +571,47 @@ export function JobsPage() {
         </div>
       </Card>
 
-      {selectedIds.size > 0 && (
+      {/* F69: "Select all N matching" banner. Appears only when the
+          user has checked every row on the current page AND there are
+          rows beyond this page (i.e. `total > data.items.length`).
+          Clicking the action flips `selectAllMatching` to true so the
+          next bulk click POSTs the filter payload instead of the id
+          list. We deliberately don't show the banner when the user
+          has partially selected — that signals deliberate curation,
+          and the banner would nudge them away from it. Hidden once
+          already in filter-mode (we show the filter-mode badge
+          inside the action Card below instead). */}
+      {data &&
+        data.items.length > 0 &&
+        selectedIds.size > 0 &&
+        data.items.every((j) => selectedIds.has(j.id)) &&
+        data.total > data.items.length &&
+        !selectAllMatching && (
+          <Card padding="sm">
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm text-gray-700">
+                All <strong>{data.items.length}</strong> jobs on this page are selected.
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setSelectAllMatching(true)}
+              >
+                Select all {data.total.toLocaleString()} jobs matching the filter
+              </Button>
+            </div>
+          </Card>
+        )}
+
+      {(selectedIds.size > 0 || selectAllMatching) && (
         <Card padding="sm">
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <CheckSquare className="h-4 w-4 text-primary-600" />
               <span className="text-sm font-medium text-gray-700">
-                {selectedIds.size} selected
+                {selectAllMatching
+                  ? `All ${(data?.total ?? 0).toLocaleString()} jobs matching the filter selected`
+                  : `${selectedIds.size} selected`}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -504,11 +642,25 @@ export function JobsPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setSelectedIds(new Set())}
+                onClick={() => {
+                  setSelectedIds(new Set());
+                  setSelectAllMatching(false);
+                  setBulkErrorMsg(null);
+                }}
               >
                 Cancel
               </Button>
             </div>
+            {/* F69: surface the backend 400 message inline. The most
+                likely case is "Filter matches X jobs which exceeds the
+                bulk cap of 5000. Narrow the filter before retrying." —
+                pre-fix that message was swallowed and the user saw
+                only a dead spinner. */}
+            {bulkErrorMsg && (
+              <div className="w-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {bulkErrorMsg}
+              </div>
+            )}
           </div>
         </Card>
       )}

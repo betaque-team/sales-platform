@@ -487,6 +487,70 @@ async def update_job_status(
     return {"ok": True}
 
 
+# Regression finding 69: hard cap on the filter branch. 47k-row corpora
+# are realistic, so a "Select all N matching" click on no filter could
+# trivially flip the status of every row in the DB. We reject requests
+# whose filter matches > BULK_FILTER_MAX rows with a 400 that tells
+# the caller the current count, so they can narrow before retry. The
+# cap is deliberately generous (5000) — enough for a sales team to
+# reject an entire source platform in one go, but small enough that
+# a misclick can't corrupt the full corpus without visible friction.
+BULK_FILTER_MAX = 5000
+
+
+async def _build_bulk_filter_query(
+    criteria, db: AsyncSession
+):
+    """Rebuild the same WHERE chain that `GET /jobs` uses so the filter
+    branch and the list endpoint agree on which rows match — otherwise
+    the "Select all 47,776 matching" count displayed in the UI could
+    diverge from the set that actually gets updated, which would be
+    exactly the kind of silent-blast-radius bug we're trying to
+    prevent. Returns a select(Job) that the caller can execute or
+    wrap in a count. Validates `role_cluster` against the configured
+    catalog (same contract as `/jobs` F218) so a typo 400s here too
+    instead of quietly updating zero rows."""
+    query = select(Job)
+
+    if criteria.status:
+        query = query.where(Job.status == criteria.status)
+    if criteria.platform:
+        query = query.where(Job.platform == criteria.platform)
+    if criteria.company_id:
+        query = query.where(Job.company_id == criteria.company_id)
+    if criteria.geography_bucket:
+        query = query.where(Job.geography_bucket == criteria.geography_bucket)
+    if criteria.role_cluster:
+        allowed_clusters = set(await _get_all_cluster_names(db)) | {"relevant"}
+        if criteria.role_cluster not in allowed_clusters:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid role_cluster. Must be one of: "
+                    + ", ".join(sorted(allowed_clusters))
+                ),
+            )
+        if criteria.role_cluster == "relevant":
+            relevant_clusters = await _get_relevant_clusters(db)
+            query = query.where(Job.role_cluster.in_(relevant_clusters))
+        else:
+            query = query.where(Job.role_cluster == criteria.role_cluster)
+    if criteria.is_classified is True:
+        query = query.where(Job.role_cluster.is_not(None), Job.role_cluster != "")
+    elif criteria.is_classified is False:
+        query = query.where(or_(Job.role_cluster.is_(None), Job.role_cluster == ""))
+    if criteria.search and criteria.search.strip():
+        needle = f"%{escape_like(criteria.search.strip())}%"
+        query = query.where(
+            or_(
+                Job.title.ilike(needle, escape="\\"),
+                Job.company.has(Company.name.ilike(needle, escape="\\")),
+                Job.location_raw.ilike(needle, escape="\\"),
+            )
+        )
+    return query
+
+
 @router.post("/bulk-action")
 async def bulk_action(
     body: BulkActionRequest,
@@ -494,8 +558,71 @@ async def bulk_action(
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Job).where(Job.id.in_(body.job_ids)))
-    jobs = result.scalars().all()
+    # Regression finding 69: two mutually-exclusive input shapes.
+    # Reject requests that provide neither or both — ambiguous input
+    # shouldn't silently prefer one path.
+    if body.job_ids is None and body.filter is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either `job_ids` or `filter` must be provided.",
+        )
+    if body.job_ids is not None and body.filter is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either `job_ids` or `filter`, not both.",
+        )
+
+    if body.job_ids is not None:
+        # Legacy id-list branch — unchanged semantics.
+        if len(body.job_ids) == 0:
+            raise HTTPException(status_code=400, detail="`job_ids` cannot be empty.")
+        # F69: cap even the id-list branch at BULK_FILTER_MAX. Nothing
+        # in the old path prevented a client from POSTing 100k ids;
+        # applying the same cap keeps the blast-radius story single-
+        # bullet ("at most BULK_FILTER_MAX rows change per call").
+        if len(body.job_ids) > BULK_FILTER_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many job_ids ({len(body.job_ids)}). Max per request is {BULK_FILTER_MAX}.",
+            )
+        result = await db.execute(select(Job).where(Job.id.in_(body.job_ids)))
+        jobs = result.scalars().all()
+        metadata = {
+            "mode": "ids",
+            "job_ids": [str(j) for j in body.job_ids],
+            "count": len(jobs),
+        }
+    else:
+        # Filter branch — rebuild the same WHERE chain /jobs uses and
+        # cap the matching set before mutating anything. The cap
+        # check uses a COUNT so we don't pull thousands of rows into
+        # memory just to reject them.
+        assert body.filter is not None
+        filter_query = await _build_bulk_filter_query(body.filter, db)
+        count = (await db.execute(
+            select(func.count()).select_from(filter_query.subquery())
+        )).scalar() or 0
+        if count == 0:
+            raise HTTPException(status_code=400, detail="Filter matched zero jobs.")
+        if count > BULK_FILTER_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Filter matches {count} jobs which exceeds the bulk cap of "
+                    f"{BULK_FILTER_MAX}. Narrow the filter before retrying."
+                ),
+            )
+        result = await db.execute(filter_query)
+        jobs = result.scalars().all()
+        # Serialize the filter into the audit log so post-hoc review
+        # can reconstruct exactly which criteria triggered the mass
+        # update. Using `model_dump(mode='json')` coerces UUID to str.
+        metadata = {
+            "mode": "filter",
+            "filter": body.filter.model_dump(mode="json"),
+            "count": len(jobs),
+        }
+
     for j in jobs:
         j.status = body.action
     await db.commit()
@@ -505,7 +632,7 @@ async def bulk_action(
         action=f"bulk.{body.action}",
         resource="jobs",
         request=request,
-        metadata={"job_ids": [str(j) for j in body.job_ids], "count": len(jobs)},
+        metadata=metadata,
     )
 
     return {"updated": len(jobs)}
