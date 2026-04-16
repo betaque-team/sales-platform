@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.workers.celery_app import celery_app
 from app.workers.tasks._db import SyncSession
@@ -110,7 +111,18 @@ def score_resume_task(self, resume_id: str):
                 description_text=desc_text,
             )
 
-            score = ResumeScore(
+            # Upsert on (resume_id, job_id). The delete-then-add above is
+            # supposed to guarantee no existing row, but two concurrent
+            # invocations of this task (post-upload + manual rescore +
+            # `rescore_all_active_resumes` beat) race past the delete
+            # and both try to insert the same (resume_id, job_id) pair
+            # — that's how the table accumulated 10,414 rows for ~13k
+            # jobs on test-admin. Once migration p6k7l8m9n0o1 lands the
+            # UNIQUE index, plain `INSERT` would fail loudly with
+            # IntegrityError and crash the whole rescore. ON CONFLICT
+            # DO UPDATE is race-safe AND constraint-safe; the row
+            # count stabilizes to exactly one per pair.
+            stmt = pg_insert(ResumeScore.__table__).values(
                 id=uuid.uuid4(),
                 resume_id=resume.id,
                 job_id=job.id,
@@ -121,8 +133,22 @@ def score_resume_task(self, resume_id: str):
                 matched_keywords=result["matched_keywords"],
                 missing_keywords=result["missing_keywords"],
                 suggestions=result["suggestions"],
+                scored_at=datetime.now(timezone.utc),
             )
-            session.add(score)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["resume_id", "job_id"],
+                set_={
+                    "overall_score": stmt.excluded.overall_score,
+                    "keyword_score": stmt.excluded.keyword_score,
+                    "role_match_score": stmt.excluded.role_match_score,
+                    "format_score": stmt.excluded.format_score,
+                    "matched_keywords": stmt.excluded.matched_keywords,
+                    "missing_keywords": stmt.excluded.missing_keywords,
+                    "suggestions": stmt.excluded.suggestions,
+                    "scored_at": stmt.excluded.scored_at,
+                },
+            )
+            session.execute(stmt)
             scored += 1
 
             # Update progress every 50 jobs
