@@ -31,13 +31,96 @@ router = APIRouter(prefix="/feedback", tags=["feedback"])
 UPLOAD_DIR = Path("/app/uploads/feedback")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# Regression finding 189: previously included "image/svg+xml". SVG is
+# XML and can carry <script> — a user could upload an SVG payload and
+# (if the frontend ever renders it inline) achieve stored XSS. Plain
+# bitmap images + PDFs + Office docs + CSV/plaintext are enough for
+# the use-case (screenshot, log file, sample spreadsheet); SVG was a
+# latent vulnerability with no real UX win.
 ALLOWED_TYPES = {
-    "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+    "image/png", "image/jpeg", "image/gif", "image/webp",
     "application/pdf",
     "text/plain", "text/csv",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+# Regression finding 189: the previous upload path trusted the
+# client-declared `Content-Type`. A user could send a JS file with
+# `Content-Type: application/pdf` or an HTML payload with `image/png`
+# and the server would happily store it as-is — a classic stored-XSS
+# precursor if the file is ever served inline. We now sniff magic
+# bytes on the first 16 bytes of the upload and reject when the
+# sniffed type doesn't match the claimed Content-Type.
+#
+# Mapping is magic-bytes → the set of Content-Type values that a
+# real file with those bytes could legitimately carry. Kept inline
+# (no `python-magic` dep) because the set of allowed types is small
+# and all have cheap, unambiguous signatures.
+_MAGIC_BYTES = [
+    # (signature, allowed_content_types)
+    (b"\x89PNG\r\n\x1a\n", {"image/png"}),
+    (b"\xff\xd8\xff", {"image/jpeg"}),
+    (b"GIF87a", {"image/gif"}),
+    (b"GIF89a", {"image/gif"}),
+    (b"RIFF", {"image/webp"}),  # WebP begins with "RIFF....WEBP" — chunk check below
+    (b"%PDF-", {"application/pdf"}),
+    (b"PK\x03\x04", {
+        # DOCX and XLSX are both ZIP packages. We accept either; the
+        # claimed Content-Type disambiguates which one the client
+        # meant, and both signatures are legal.
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+]
+
+
+def _sniff_content_type(content: bytes, claimed: str) -> bool:
+    """Return True when the file's magic bytes are consistent with `claimed`.
+
+    F189: reject MIME spoofing. text/plain and text/csv don't have a
+    magic-byte signature (they're literally just text) so we accept
+    them only after confirming the body decodes as UTF-8 and contains
+    no NUL bytes — a cheap-but-effective heuristic that keeps
+    binary-as-text spoofs out without a full format parser.
+    """
+    if claimed in ("text/plain", "text/csv"):
+        if b"\x00" in content[:4096]:
+            return False
+        try:
+            content[:4096].decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            return False
+
+    for signature, allowed_claimed in _MAGIC_BYTES:
+        if content.startswith(signature):
+            # Extra WebP discriminator — "RIFF" alone isn't enough
+            # since WAV / AVI also start with RIFF. Require the
+            # "WEBP" chunk marker at offset 8.
+            if signature == b"RIFF":
+                if len(content) < 12 or content[8:12] != b"WEBP":
+                    continue
+            return claimed in allowed_claimed
+    return False
+
+
+def _sanitize_original_name(name: str) -> str:
+    """Strip path-traversal characters from the client-provided filename.
+
+    F189: the previous code stored `original_name` verbatim, so a
+    filename like `../../etc/passwd` was persisted as-is. No traversal
+    at write time (the on-disk name is a fresh UUID), but this leaks
+    a confusing string into admin UIs and log viewers, and plays
+    badly with any future download-with-original-filename feature.
+    """
+    if not name:
+        return "unnamed"
+    # Strip any directory segments — keep only the final path
+    # component, then drop leading dots to kill "..", "...", etc.
+    bare = Path(name).name.lstrip(".")
+    return bare[:255] if bare else "unnamed"
 
 
 @router.post("", response_model=FeedbackOut)
@@ -139,6 +222,23 @@ async def upload_attachment(
     if content_type not in ALLOWED_TYPES:
         raise HTTPException(400, f"File type '{content_type}' not allowed")
 
+    # F189: the client-supplied Content-Type can't be trusted. Sniff
+    # the magic bytes and reject when the body doesn't actually match
+    # what the client claimed. Blocks JS-as-PDF / HTML-as-PNG uploads
+    # that would otherwise sit in storage waiting for an inline
+    # rendering path to turn into XSS.
+    if not _sniff_content_type(content, content_type):
+        raise HTTPException(
+            400,
+            "Uploaded file contents do not match the declared Content-Type",
+        )
+
+    # F189: sanitize the client-provided filename before we persist
+    # it in the attachments JSON. Disk filename is already a UUID so
+    # we're not preventing traversal at write time — this is about
+    # keeping "../../etc/passwd" out of admin UI / audit logs.
+    original_name = _sanitize_original_name(file.filename or "unnamed")
+
     # Save file
     ext = Path(file.filename or "file").suffix or ""
     stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -149,7 +249,7 @@ async def upload_attachment(
     existing = json.loads(fb.attachments or "[]")
     existing.append({
         "filename": stored_name,
-        "original_name": file.filename or "unnamed",
+        "original_name": original_name,
         "size": len(content),
         "content_type": content_type,
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
@@ -230,7 +330,19 @@ async def get_attachment(
     if owner_id != user.id and user.role not in ("admin", "super_admin"):
         raise HTTPException(403, "Not authorized")
 
-    return FileResponse(file_path)
+    # F189: force download rather than inline rendering. Even after
+    # MIME sniffing at upload time, we want the browser to treat the
+    # blob as a file to save — closes the attack path where an HTML
+    # or SVG payload persisted before the sniff fix still renders
+    # when served via an <iframe> / <img> preview. `Content-
+    # Disposition: attachment` is the standard defense.
+    return FileResponse(
+        file_path,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("")
