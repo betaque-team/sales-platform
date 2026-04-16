@@ -8,6 +8,7 @@ import {
 import {
   ApiError,
   getSkillGaps, getSalaryInsights, getTimingIntelligence, getNetworkingSuggestions,
+  getRoleClusters,
 } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 
@@ -42,6 +43,22 @@ export function IntelligencePage() {
   const [tab, setTab] = useState<TabKey>("skills");
   const [roleFilter, setRoleFilter] = useState("");
 
+  // F87 twin on IntelligencePage: the role-cluster dropdown previously
+  // hard-coded `infra / security / qa` — only two of those three ("infra",
+  // "security") are the platform defaults and `qa` was an aspirational
+  // label that only works if an admin has explicitly configured it.
+  // Admins can add / remove / rename clusters via `/role-clusters`, so
+  // the dropdown needs to read the live catalog just like JobsPage does.
+  // 10-minute `staleTime` because cluster config is extremely low-churn.
+  const roleClustersQ = useQuery({
+    queryKey: ["role-clusters"],
+    queryFn: getRoleClusters,
+    staleTime: 10 * 60 * 1000,
+  });
+  const activeClusters = (roleClustersQ.data?.items ?? [])
+    .filter((c) => c.is_active)
+    .sort((a, b) => a.sort_order - b.sort_order);
+
   return (
     <div className="space-y-4">
       <div>
@@ -72,16 +89,19 @@ export function IntelligencePage() {
       {/* Role filter for skills and salary */}
       {(tab === "skills" || tab === "salary") && (
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-600">Role cluster:</label>
+          <label className="text-sm text-gray-600" htmlFor="intelligence-role-filter">Role cluster:</label>
           <select
+            id="intelligence-role-filter"
             value={roleFilter}
             onChange={(e) => setRoleFilter(e.target.value)}
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
           >
             <option value="">All</option>
-            <option value="infra">Infrastructure</option>
-            <option value="security">Security</option>
-            <option value="qa">QA / Testing</option>
+            {activeClusters.map((c) => (
+              <option key={c.id} value={c.name}>
+                {c.display_name || c.name}
+              </option>
+            ))}
           </select>
         </div>
       )}
@@ -344,8 +364,48 @@ function TimingTab() {
             <div className="text-lg font-bold text-gray-900">{data.recommendations.peak_posting_hours}</div>
           </div>
           <div className="rounded-lg bg-white p-3">
-            <div className="text-xs text-gray-500 uppercase font-medium">Ideal Apply Window</div>
+            <div className="text-xs text-gray-500 uppercase font-medium flex items-center gap-1.5">
+              Ideal Apply Window
+              {/* F65: badge communicates whether this number was derived
+                  from real accepted-review timings vs. the generic
+                  heuristic fallback. The old page hard-coded "Apply
+                  within 24-48 hours of posting for best results" with
+                  no data backing — now the backend returns either a
+                  derived range (green "Data" badge) or the fallback
+                  copy (amber "Heuristic" badge with a small disclaimer
+                  subtitle). Sample size is surfaced so viewers can
+                  judge how confident the derived window is. */}
+              {data.recommendations.ideal_apply_window_data_driven ? (
+                <span
+                  className="rounded-full bg-green-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-green-700"
+                  title={
+                    data.recommendations.ideal_apply_window_sample_size
+                      ? `Derived from ${data.recommendations.ideal_apply_window_sample_size} accepted review${
+                          data.recommendations.ideal_apply_window_sample_size === 1 ? "" : "s"
+                        } in the last 90 days`
+                      : undefined
+                  }
+                >
+                  Data
+                </span>
+              ) : (
+                <span
+                  className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-700"
+                  title="Not enough accepted-review data yet; shown value is a generic heuristic."
+                >
+                  Heuristic
+                </span>
+              )}
+            </div>
             <div className="text-sm font-medium text-gray-900">{data.recommendations.ideal_apply_window}</div>
+            {data.recommendations.ideal_apply_window_data_driven &&
+              data.recommendations.ideal_apply_window_median_hours != null && (
+                <div className="mt-1 text-[10px] text-gray-500">
+                  Median {data.recommendations.ideal_apply_window_median_hours}h ·{" "}
+                  p75 {data.recommendations.ideal_apply_window_p75_hours}h ·{" "}
+                  {data.recommendations.ideal_apply_window_sample_size ?? 0} accepted
+                </div>
+              )}
           </div>
           <div className="rounded-lg bg-white p-3">
             <div className="text-xs text-gray-500 uppercase font-medium">Avg Time to Review</div>

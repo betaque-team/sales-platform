@@ -534,6 +534,85 @@ async def timing_intelligence(
     """))
     avg_hours = avg_review_time.scalar() or 0
 
+    # Regression finding 65 (remaining half): the prior `"Apply within 24-48
+    # hours of posting for best results"` text was hard-coded marketing copy
+    # with no data backing — the data-quality half of F65 already rebuilt
+    # the per-day histogram, so it's time to stop lying about the window
+    # too. Derive the recommended window from the timing of *accepted*
+    # reviews: take the median and 75th-percentile age (in hours) of a job
+    # at the moment its review landed in `accepted` state, in the last
+    # 90 days. Those two numbers bracket a realistic "most accepted
+    # candidates were within X-Y hours of the job going live" statement.
+    #
+    # Confidence:
+    #   - `sample_size` — count of qualifying accepted reviews; the frontend
+    #     can label windows derived from <10 samples as "low confidence" or
+    #     hide them entirely. We also return a string fallback so the UI
+    #     never has to invent copy itself.
+    #   - `data_driven` — explicit flag so the UI can visually distinguish
+    #     a derived recommendation from the fallback copy instead of
+    #     string-sniffing the text.
+    #
+    # We cap the upper bound at 168h (1 week) because anything later is
+    # almost certainly a review catch-up run, not a user-driven timing
+    # signal, and would push the copy into noise territory ("Apply within
+    # 30-400 hours" would be actively misleading).
+    apply_window_sql = text("""
+        SELECT
+            COUNT(*) AS sample_size,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (r.created_at - j.first_seen_at)) / 3600
+            ) AS median_hours,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (r.created_at - j.first_seen_at)) / 3600
+            ) AS p75_hours
+        FROM reviews r
+        JOIN jobs j ON r.job_id = j.id
+        WHERE r.decision = 'accepted'
+          AND r.created_at >= NOW() - INTERVAL '90 days'
+          AND r.created_at > j.first_seen_at
+    """)
+    apply_window_row = (await db.execute(apply_window_sql)).first()
+    apply_sample = int(apply_window_row[0] or 0) if apply_window_row else 0
+    apply_median = float(apply_window_row[1] or 0) if apply_window_row else 0.0
+    apply_p75 = float(apply_window_row[2] or 0) if apply_window_row else 0.0
+
+    def _fmt_hours(h: float) -> str:
+        """Render a positive hours value as the closest human-friendly
+        unit. Keeps the copy tight ("6h" vs "6.0 hours", "2 days" vs "48
+        hours")."""
+        if h < 1:
+            mins = max(1, int(round(h * 60)))
+            return f"{mins}m"
+        if h < 48:
+            return f"{int(round(h))}h"
+        return f"{int(round(h / 24))}d"
+
+    if apply_sample >= 10 and apply_p75 > 0:
+        # Clamp the upper bound so a long-tail catch-up review doesn't
+        # produce absurd copy. Median stays as-is — if half of accepted
+        # reviews came >1 week after posting, that *is* the signal and we
+        # should report it honestly, but we still flag it via a low
+        # confidence band in the UI.
+        upper_hours = min(apply_p75, 168.0)
+        lower_hours = max(apply_median, 0.5)
+        if upper_hours <= lower_hours + 0.25:
+            # Near-degenerate distribution (everyone reviews at the same
+            # age) — report a single number instead of a meaningless range.
+            ideal_apply_window = f"Most accepted candidates apply within {_fmt_hours(upper_hours)} of posting"
+        else:
+            ideal_apply_window = (
+                f"Most accepted candidates apply within "
+                f"{_fmt_hours(lower_hours)}–{_fmt_hours(upper_hours)} of posting"
+            )
+        apply_window_data_driven = True
+    else:
+        # Not enough accepted-review data to derive a window. Be explicit
+        # that this is a generic heuristic, not a platform-specific stat,
+        # so viewers don't assume it's computed from their funnel.
+        ideal_apply_window = "Not enough accepted reviews yet — aim to apply within 24–48h of posting"
+        apply_window_data_driven = False
+
     # Platform posting patterns (which platforms post most frequently)
     platform_timing = await db.execute(text("""
         SELECT platform,
@@ -561,7 +640,14 @@ async def timing_intelligence(
         "recommendations": {
             "best_day": best_day,
             "peak_posting_hours": peak_hour_str,
-            "ideal_apply_window": "Apply within 24-48 hours of posting for best results",
+            "ideal_apply_window": ideal_apply_window,
+            # F65: extra metadata for the UI — lets the frontend distinguish
+            # the derived recommendation from the fallback copy without
+            # having to string-sniff the window text.
+            "ideal_apply_window_data_driven": apply_window_data_driven,
+            "ideal_apply_window_sample_size": apply_sample,
+            "ideal_apply_window_median_hours": round(apply_median, 1) if apply_median else None,
+            "ideal_apply_window_p75_hours": round(apply_p75, 1) if apply_p75 else None,
             "fastest_platforms": [p["platform"] for p in platform_velocity[:3]],
         },
     }
