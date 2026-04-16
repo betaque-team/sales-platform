@@ -263,10 +263,15 @@ export interface PipelineItem {
   last_job_at: string | null;
 }
 
+// F215: backend `/pipeline` now returns canonical `items: PipelineItem[]`
+// (flat list) + `by_stage: Record<string, PipelineItem[]>` (kanban view).
+// PipelinePage renders the kanban columns so it reads `by_stage`. Any
+// future consumer that wants a generic pager can use `items`.
 export interface PipelineResponse {
   stages: string[];
   stages_config: { key: string; label: string; color: string }[];
-  items: Record<string, PipelineItem[]>;
+  items: PipelineItem[];
+  by_stage: Record<string, PipelineItem[]>;
   total: number;
 }
 
