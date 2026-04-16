@@ -21,6 +21,39 @@ JOB_STATUS_VALUES = (
 )
 JobStatusLiteral = Literal["new", "under_review", "accepted", "rejected", "hidden", "archived"]
 
+# Regression finding 187 / 218: filter endpoints accept an extended status
+# vocabulary that includes `expired` (terminal state for jobs that fell off
+# the source board) in addition to the write-side `JobStatusLiteral` values.
+# Two reasons they differ: (a) historical rows persisted under a legacy
+# "expired" status predate the F99 vocabulary cleanup and still need to be
+# filterable; (b) `hidden` is a user-driven workflow state (reviewer hid
+# this row from their queue) that's written via JobStatusUpdate, while
+# `expired` is set by the scan worker. The write and filter vocabularies
+# will converge once the legacy "expired" rows are migrated to "archived".
+# Filters live here (not in export.py) so jobs.py / export.py can both
+# import — F218 is the case where diverging local definitions bit us.
+JobStatusFilter = Literal[
+    "new", "under_review", "accepted", "rejected", "expired", "archived"
+]
+
+# Regression finding 218: `geography_bucket` was a free-form `str` query
+# param on `/jobs`, so a typo (`geography_bucket=global-remote` with a
+# dash instead of underscore, `geography_bucket=USA_ONLY` mis-cased, etc.)
+# silently filtered to total=0 instead of 422-ing with the allowed values.
+# Values mirror the `Job.geography_bucket` column comment in models/job.py.
+GeographyBucketFilter = Literal["global_remote", "usa_only", "uae_only"]
+
+# Regression finding 191 (moved here in F218 for reuse): the platform set
+# is fixed in code (BaseFetcher subclasses under `app/fetchers/`), so a
+# Literal catches typos like `platform=GREENHOUSE` (uppercase) at parse
+# time. Was originally declared in `api/v1/platforms.py:24`; moved here
+# to avoid duplicate Literals drifting as new fetchers are added. Both
+# `platforms.py` and `jobs.py` import this one definition.
+PlatformFilter = Literal[
+    "greenhouse", "lever", "ashby", "workable", "bamboohr",
+    "smartrecruiters", "jobvite", "recruitee", "wellfound", "himalayas",
+]
+
 
 class JobOut(BaseModel):
     id: UUID

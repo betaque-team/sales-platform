@@ -1,6 +1,5 @@
 """Platform monitoring API endpoints."""
 
-from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, case
@@ -15,16 +14,14 @@ from app.api.deps import get_current_user, require_role
 from app.utils.company_name import looks_like_junk_company_name
 from app.utils.scan_lock import acquire_scan_lock, release_scan_lock
 
-# Regression finding 191: `?platform=` on the list endpoints wasn't
-# validated, so typos (`GREENHOUSE`, `grenhouse`) silently returned
-# `{"items":[],"total":0}` — same F128 pattern that was already fixed
-# on feedback list (F162). The platform set is fixed in code
-# (BaseFetcher subclasses in app/fetchers/) so Literal is the right
-# tool.
-PlatformFilter = Literal[
-    "greenhouse", "lever", "ashby", "workable", "bamboohr",
-    "smartrecruiters", "jobvite", "recruitee", "wellfound", "himalayas",
-]
+# Regression finding 191 (re-exported from schemas.job in F218): `?platform=`
+# on the list endpoints wasn't validated, so typos (`GREENHOUSE`,
+# `grenhouse`) silently returned `{"items":[],"total":0}` — same F128 /
+# F162 pattern. The platform set is fixed in code (BaseFetcher subclasses
+# in app/fetchers/) so Literal is the right tool. Moved the definition to
+# `schemas/job.py` so jobs.py can reuse the same Literal rather than
+# declaring a parallel one that could drift.
+from app.schemas.job import PlatformFilter  # noqa: F401 (re-exported)
 
 router = APIRouter(prefix="/platforms", tags=["platforms"])
 
