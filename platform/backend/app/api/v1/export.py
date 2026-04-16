@@ -4,7 +4,7 @@ import csv
 import io
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -121,6 +121,59 @@ def _iter_csv(rows: list[list[str]], columns: list[str]):
         output.truncate(0)
 
 
+# Regression finding 225: previously the three export endpoints declared
+# no `format` query param at all, so `?format=xlsx`, `?format=xml`,
+# `?format=json`, `?format=pdf` all silently returned `Content-Type:
+# text/csv` with the same CSV filename. A user pointing their spreadsheet
+# tool at `?format=xlsx` got garbled rows/wrong types and a very
+# confused experience — classic silent-accept-wrong-input failure.
+#
+# Fix: declare `format: Literal["csv", "json"]` (matching the formats
+# the server actually produces) so FastAPI 422s everything else at parse
+# time with the allowed values in the error detail. JSON export just
+# serializes the same row tuples to a list of objects keyed by column
+# name — no additional schema/deserializer plumbing, and the
+# `Content-Disposition` filename extension matches the format so
+# downstream tooling (browsers, CLIs) auto-chooses the right viewer.
+ExportFormat = Literal["csv", "json"]
+
+
+def _export_response(
+    *,
+    fmt: ExportFormat,
+    rows: list[list[str]],
+    columns: list[str],
+    filename_base: str,
+):
+    """Serialize `rows` × `columns` as CSV (streaming) or JSON (materialized).
+
+    JSON emits the canonical pagination-style envelope
+    (`{items, total, format, columns}`) so frontends that already consume
+    paginated list endpoints can reuse parsers. CSV keeps the streaming
+    path that was already there — important for the 47k-row jobs export
+    where materializing to a list first would spike memory.
+    """
+    if fmt == "json":
+        items = [dict(zip(columns, row)) for row in rows]
+        return JSONResponse(
+            {
+                "items": items,
+                "total": len(items),
+                "format": "json",
+                "columns": columns,
+            },
+            headers={
+                "Content-Disposition": f"attachment; filename={filename_base}.json"
+            },
+        )
+    # default: csv
+    return StreamingResponse(
+        _iter_csv(rows, columns),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename_base}.csv"},
+    )
+
+
 @router.get("/jobs")
 async def export_jobs(
     request: Request,
@@ -133,6 +186,10 @@ async def export_jobs(
     # validated at runtime below against the DB catalog + "relevant"
     # pseudo-value. Kept as `str | None` at the signature level.
     role_cluster: str | None = None,
+    # F225: `format` declared as Literal so unknown values (xlsx, xml,
+    # pdf) return 422 with the allowed list instead of silently falling
+    # through to CSV with a misleading filename.
+    format: ExportFormat = "csv",
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
@@ -205,6 +262,7 @@ async def export_jobs(
         request=request,
         metadata={
             "row_count": len(rows),
+            "format": format,
             "filters": _prune_none({
                 "status": status,
                 "platform": platform,
@@ -214,10 +272,11 @@ async def export_jobs(
         },
     )
 
-    return StreamingResponse(
-        _iter_csv(rows, JOB_CSV_COLUMNS),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=jobs_export.csv"},
+    return _export_response(
+        fmt=format,
+        rows=rows,
+        columns=JOB_CSV_COLUMNS,
+        filename_base="jobs_export",
     )
 
 
@@ -228,6 +287,8 @@ async def export_pipeline(
     # so we validate at runtime rather than with Literal. Same pattern as
     # pipeline.py POST/PATCH which validates via _get_stage_keys.
     stage: str | None = None,
+    # F225: see /export/jobs.
+    format: ExportFormat = "csv",
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
@@ -276,14 +337,16 @@ async def export_pipeline(
         request=request,
         metadata={
             "row_count": len(rows),
+            "format": format,
             "filters": _prune_none({"stage": stage}),
         },
     )
 
-    return StreamingResponse(
-        _iter_csv(rows, PIPELINE_CSV_COLUMNS),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=pipeline_export.csv"},
+    return _export_response(
+        fmt=format,
+        rows=rows,
+        columns=PIPELINE_CSV_COLUMNS,
+        filename_base="pipeline_export",
     )
 
 
@@ -309,6 +372,8 @@ async def export_contacts(
     outreach_status: str | None = None,
     has_email: bool | None = None,
     is_decision_maker: bool | None = None,
+    # F225: see /export/jobs.
+    format: ExportFormat = "csv",
     user: User = Depends(_EXPORT_ROLE_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
@@ -366,6 +431,7 @@ async def export_contacts(
         request=request,
         metadata={
             "row_count": len(rows),
+            "format": format,
             "filters": _prune_none({
                 "role_category": role_category,
                 "outreach_status": outreach_status,
@@ -375,8 +441,9 @@ async def export_contacts(
         },
     )
 
-    return StreamingResponse(
-        _iter_csv(rows, CONTACT_CSV_COLUMNS),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=contacts_export.csv"},
+    return _export_response(
+        fmt=format,
+        rows=rows,
+        columns=CONTACT_CSV_COLUMNS,
+        filename_base="contacts_export",
     )
