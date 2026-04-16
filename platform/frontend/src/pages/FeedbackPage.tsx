@@ -346,11 +346,26 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
           </div>
 
           <div>
+            {/* Regression finding 44: the whole "+ New Ticket" form was
+                DOM-unlabeled — `htmlFor`/`id`/`name`/`aria-required` all
+                missing across every field. A11y tooling (VoiceOver,
+                axe, password managers) saw 7 anonymous inputs. The pass
+                below wires every `<label>` to its input/textarea via a
+                stable `feedback-<field>` id, adds `name` so the form is
+                HTTP-submittable as a fallback, and adds `aria-required`
+                on the required branches so AT announces them the same
+                way native browser `required` announces for simple
+                forms. Added a visible `{title.length}/200` counter the
+                finding specifically called out. */}
             <label htmlFor="feedback-title" className="block text-sm font-medium text-gray-700 mb-1">
               Title <span className="text-red-500">*</span>
+              <span className="ml-2 text-xs font-normal text-gray-400" aria-live="polite">
+                {title.length}/200
+              </span>
             </label>
             <input
               id="feedback-title"
+              name="title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -363,6 +378,7 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
               }
               className="input w-full"
               required
+              aria-required="true"
               minLength={5}
               maxLength={200}
             />
@@ -396,56 +412,76 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
             </label>
             <textarea
               id="feedback-description"
+              name="description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={4}
               placeholder="Provide a detailed description..."
               className="input w-full"
               required
+              aria-required="true"
+              /* F44: cap matches schemas/feedback.py LONG_TEXT_MAX (F25). */
+              maxLength={8000}
               minLength={20}
             />
           </div>
 
+          {/* F44: every conditional textarea below now gets a stable id
+              + name + aria-required + `maxLength={8000}` matching
+              schemas/feedback.py (F25). Label `htmlFor` wires click-to-
+              focus and gives AT the text→field relationship. */}
           {category === "bug" && (
             <>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="feedback-steps" className="block text-sm font-medium text-gray-700 mb-1">
                   Steps to Reproduce <span className="text-red-500">*</span>
                 </label>
                 <textarea
+                  id="feedback-steps"
+                  name="steps_to_reproduce"
                   value={stepsToReproduce}
                   onChange={(e) => setStepsToReproduce(e.target.value)}
                   rows={4}
                   placeholder={"1. Go to the Jobs page\n2. Apply a filter for 'Infrastructure'\n3. Navigate to page 2\n4. Observe the filter resets to 'All'"}
                   className="input w-full font-mono text-sm"
                   required
+                  aria-required="true"
+                  maxLength={8000}
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="feedback-expected" className="block text-sm font-medium text-gray-700 mb-1">
                     Expected Behavior <span className="text-red-500">*</span>
                   </label>
                   <textarea
+                    id="feedback-expected"
+                    name="expected_behavior"
                     value={expectedBehavior}
                     onChange={(e) => setExpectedBehavior(e.target.value)}
                     rows={3}
                     placeholder="What should happen?"
                     className="input w-full"
                     required
+                    aria-required="true"
+                    maxLength={8000}
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="feedback-actual" className="block text-sm font-medium text-gray-700 mb-1">
                     Actual Behavior <span className="text-red-500">*</span>
                   </label>
                   <textarea
+                    id="feedback-actual"
+                    name="actual_behavior"
                     value={actualBehavior}
                     onChange={(e) => setActualBehavior(e.target.value)}
                     rows={3}
                     placeholder="What actually happens?"
                     className="input w-full"
                     required
+                    aria-required="true"
+                    maxLength={8000}
                   />
                 </div>
               </div>
@@ -455,29 +491,37 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
           {category === "feature_request" && (
             <>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="feedback-use-case" className="block text-sm font-medium text-gray-700 mb-1">
                   Use Case <span className="text-red-500">*</span>
                 </label>
                 <textarea
+                  id="feedback-use-case"
+                  name="use_case"
                   value={useCase}
                   onChange={(e) => setUseCase(e.target.value)}
                   rows={3}
                   placeholder="Describe the scenario where you need this feature."
                   className="input w-full"
                   required
+                  aria-required="true"
+                  maxLength={8000}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="feedback-impact-fr" className="block text-sm font-medium text-gray-700 mb-1">
                   Expected Impact <span className="text-red-500">*</span>
                 </label>
                 <textarea
+                  id="feedback-impact-fr"
+                  name="impact"
                   value={impact}
                   onChange={(e) => setImpact(e.target.value)}
                   rows={2}
                   placeholder="How would this impact your workflow?"
                   className="input w-full"
                   required
+                  aria-required="true"
+                  maxLength={8000}
                 />
               </div>
             </>
@@ -485,33 +529,44 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
 
           {category === "improvement" && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Expected Impact</label>
+              <label htmlFor="feedback-impact-imp" className="block text-sm font-medium text-gray-700 mb-1">Expected Impact</label>
               <textarea
+                id="feedback-impact-imp"
+                name="impact"
                 value={impact}
                 onChange={(e) => setImpact(e.target.value)}
                 rows={2}
                 placeholder="How would this improvement help you?"
                 className="input w-full"
+                maxLength={8000}
               />
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label htmlFor="feedback-proposed" className="block text-sm font-medium text-gray-700 mb-1">
               Proposed Solution <span className="text-gray-400">(optional)</span>
             </label>
             <textarea
+              id="feedback-proposed"
+              name="proposed_solution"
               value={proposedSolution}
               onChange={(e) => setProposedSolution(e.target.value)}
               rows={2}
               placeholder="If you have a suggestion for how to solve this..."
               className="input w-full"
+              maxLength={8000}
             />
           </div>
 
           {/* File attachments */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            {/* F44: the drop-zone is a div with onClick — labeling it
+                `htmlFor` would target the hidden <input type="file">.
+                We give the input a stable id, and the label's text
+                still clicks through to the hidden input via the
+                onClick on the parent div (existing behavior). */}
+            <label htmlFor="feedback-attachments" className="block text-sm font-medium text-gray-700 mb-1">
               Attachments <span className="text-gray-400">(optional)</span>
             </label>
             <div
@@ -520,6 +575,8 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
             >
               <input
                 ref={fileRef}
+                id="feedback-attachments"
+                name="attachments"
                 type="file"
                 multiple
                 className="hidden"
