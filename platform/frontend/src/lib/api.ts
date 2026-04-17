@@ -50,6 +50,8 @@ import type {
   TimingIntelligence,
   NetworkingSuggestion,
   AIUsage,
+  UserInsightsResponse,
+  ProductInsightsResponse,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -620,6 +622,37 @@ export async function customizeResume(
 // cover_letter, interview_prep}: {used, limit, remaining}}.
 export async function getAIUsage(): Promise<AIUsage> {
   return request<AIUsage>("/ai/usage");
+}
+
+// F237: AI Intelligence endpoints.
+export async function getMyInsights(history = 0): Promise<UserInsightsResponse> {
+  return request<UserInsightsResponse>(
+    `/insights/me${history ? `?history=${history}` : ""}`,
+  );
+}
+
+export async function getProductInsights(
+  status: "pending" | "actioned" | "dismissed" | "all" = "pending",
+  page = 1,
+): Promise<ProductInsightsResponse> {
+  return request<ProductInsightsResponse>(
+    `/insights/product?status=${status}&page=${page}`,
+  );
+}
+
+export async function actionProductInsight(
+  insightId: string,
+  status: "actioned" | "dismissed" | "duplicate",
+  note?: string,
+): Promise<{ id: string; actioned_status: string; actioned_at: string; actioned_note: string | null }> {
+  return request(`/insights/${insightId}/action`, {
+    method: "POST",
+    body: JSON.stringify({ status, ...(note ? { note } : {}) }),
+  });
+}
+
+export async function triggerInsightsRun(): Promise<{ task_id: string; status: string }> {
+  return request("/insights/run", { method: "POST" });
 }
 
 // Company Scores

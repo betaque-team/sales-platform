@@ -22,6 +22,7 @@ import { CompanyDetailPage } from "./pages/CompanyDetailPage";
 import { FeedbackPage } from "./pages/FeedbackPage";
 import { DocsPage } from "./pages/DocsPage";
 import { IntelligencePage } from "./pages/IntelligencePage";
+import { InsightsPage } from "./pages/InsightsPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -184,6 +185,14 @@ export default function App() {
         element={
           <ProtectedLayout>
             <IntelligencePage />
+          </ProtectedLayout>
+        }
+      />
+      <Route
+        path="/insights"
+        element={
+          <ProtectedLayout>
+            <InsightsPage />
           </ProtectedLayout>
         }
       />

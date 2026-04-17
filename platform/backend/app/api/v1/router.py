@@ -5,7 +5,7 @@ from app.api.v1 import (
     auth, jobs, reviews, pipeline, analytics,
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
-    alerts, cover_letter, interview_prep, intelligence, audit, ai,
+    alerts, cover_letter, interview_prep, intelligence, audit, ai, insights,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -36,3 +36,5 @@ api_router.include_router(intelligence.router)
 api_router.include_router(audit.router)
 # F236: cross-cutting AI utility endpoints (usage snapshot etc).
 api_router.include_router(ai.router)
+# F237: AI Intelligence endpoints — user insights + admin product insights.
+api_router.include_router(insights.router)
