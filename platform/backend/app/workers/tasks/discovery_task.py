@@ -410,12 +410,51 @@ def discover_and_add_boards(self):
 
         session.commit()
 
-        # Now auto-add newly discovered companies as boards
+        # Now auto-add newly discovered companies as boards.
+        #
+        # Cap per run — `_crawl_greenhouse_sitemap` registers every slug
+        # in the public sitemap (3k+ entries) without probing whether
+        # each board has jobs, so an uncapped promotion would flood
+        # `company_ats_boards` with 3k rows on first run. The
+        # stale-board auto-deactivator (scan_task._STALE_BOARD_ZERO_
+        # SCAN_THRESHOLD = 5 consecutive empty scans) eventually culls
+        # dead slugs, but each empty scan burns ~30s of worker time
+        # against the real scan budget. Bounding at
+        # `settings.discovery_promote_batch_size` per run spreads the
+        # backlog across beat ticks and keeps the first scan cycle
+        # after a discovery sane.
+        #
+        # Platform ordering: Ashby, Lever, Greenhouse come off the
+        # queue first because their APIs are the most stable and have
+        # the highest conversion to live jobs in our existing corpus.
+        # BambooHR + Wellfound + Himalayas last because those produce
+        # the most stale-cull churn. `ORDER BY CASE platform…` lets us
+        # express this inline without a separate priority column.
+        from sqlalchemy import case
+        from app.config import get_settings
+        settings = get_settings()
+        platform_priority = case(
+            (DiscoveredCompany.platform == "ashby", 0),
+            (DiscoveredCompany.platform == "lever", 1),
+            (DiscoveredCompany.platform == "greenhouse", 2),
+            (DiscoveredCompany.platform == "smartrecruiters", 3),
+            (DiscoveredCompany.platform == "workable", 4),
+            (DiscoveredCompany.platform == "recruitee", 5),
+            (DiscoveredCompany.platform == "jobvite", 6),
+            (DiscoveredCompany.platform == "bamboohr", 7),
+            (DiscoveredCompany.platform == "wellfound", 8),
+            (DiscoveredCompany.platform == "himalayas", 9),
+            (DiscoveredCompany.platform == "linkedin", 10),
+            else_=99,
+        )
         new_discoveries = session.execute(
-            select(DiscoveredCompany).where(
+            select(DiscoveredCompany)
+            .where(
                 DiscoveredCompany.discovery_run_id == run.id,
                 DiscoveredCompany.status == "new",
             )
+            .order_by(platform_priority, DiscoveredCompany.created_at.asc())
+            .limit(settings.discovery_promote_batch_size)
         ).scalars().all()
 
         boards_added = 0

@@ -50,6 +50,90 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
     return list(clusters) if clusters else ["infra", "security"]
 
 
+@router.get("/enrichment-coverage")
+async def enrichment_coverage(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only visibility into the enrichment pipeline.
+
+    Returns counts by ``enrichment_status`` plus the top recent error
+    messages, so an operator can tell at a glance whether the
+    ``enrich_target_companies_batch`` beat task is working and where
+    it's failing. Prompted by user feedback that "many companies have
+    no data"; before this endpoint, the only way to audit coverage was
+    to `SELECT COUNT(*) … GROUP BY enrichment_status` by hand.
+
+    The ``with_active_board_total`` count is the denominator that
+    matters for the current enrichment batch task (which requires at
+    least one active board before it'll queue a company) — a huge gap
+    between that and ``enriched`` is the signal that enrichment is
+    behind.
+
+    Read-only. No side effects. Admin-gated because the error messages
+    can leak domain names, scraped URLs, and upstream API response
+    snippets that a non-admin shouldn't see.
+    """
+    # Count by status — one round-trip. GROUP BY on a non-indexed
+    # column is fine here because `companies` is small (~1k rows).
+    rows = (await db.execute(
+        select(Company.enrichment_status, func.count(Company.id))
+        .group_by(Company.enrichment_status)
+    )).all()
+    by_status: dict[str, int] = {status or "": count for status, count in rows}
+
+    total = sum(by_status.values())
+
+    # Subquery: companies that the batch task would consider — must
+    # have at least one active board. Mirrors the predicate in
+    # `enrich_target_companies_batch` so the two stay reconcilable.
+    from app.models.company import CompanyATSBoard
+    from sqlalchemy import exists
+    has_active_board = exists().where(
+        CompanyATSBoard.company_id == Company.id,
+        CompanyATSBoard.is_active.is_(True),
+    )
+    with_active_board_total = (await db.execute(
+        select(func.count(Company.id)).where(has_active_board)
+    )).scalar() or 0
+
+    # Top recent errors so the admin doesn't have to pop open the
+    # Celery logs. Grouped by message to collapse repeats, capped at
+    # 10 distinct messages. The `func.count(…)` filter shape is a
+    # standard "top-N of grouped column" pattern.
+    error_rows = (await db.execute(
+        select(Company.enrichment_error, func.count(Company.id))
+        .where(
+            Company.enrichment_status == "failed",
+            Company.enrichment_error != "",
+        )
+        .group_by(Company.enrichment_error)
+        .order_by(func.count(Company.id).desc())
+        .limit(10)
+    )).all()
+    top_errors = [{"error": msg, "count": count} for msg, count in error_rows]
+
+    return {
+        "total": total,
+        "by_status": {
+            "pending": by_status.get("pending", 0),
+            "enriching": by_status.get("enriching", 0),
+            "enriched": by_status.get("enriched", 0),
+            "failed": by_status.get("failed", 0),
+            "other": sum(
+                count for status, count in by_status.items()
+                if status not in ("pending", "enriching", "enriched", "failed")
+            ),
+        },
+        "with_active_board_total": with_active_board_total,
+        "enriched_pct_of_active": (
+            round(by_status.get("enriched", 0) / with_active_board_total * 100, 1)
+            if with_active_board_total else 0
+        ),
+        "top_errors": top_errors,
+    }
+
+
 @router.get("/scores")
 async def company_scores(
     user: User = Depends(get_current_user),

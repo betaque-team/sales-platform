@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     scan_rate_limit_per_second: float = 2.0
     job_expiry_days: int = 14
 
+    # Discovery — cap per-run promotion of DiscoveredCompany rows to
+    # CompanyATSBoard rows. Without a cap, a fresh Greenhouse sitemap
+    # crawl (3k+ slugs, no probe gate) would try to register 3k new
+    # boards in a single beat tick. The stale-board auto-deactivator
+    # eventually culls dead slugs, but at 30s average per scan that's
+    # hours of wasted worker cycles on first ingest. 200/run bounded
+    # by the scheduler frequency lets us spread ingestion: aggressive
+    # mode (every 30m) fills a 3k backlog in ~7.5h; normal mode (daily)
+    # in ~15 days. Both reasonable given the stale-cull backstop.
+    discovery_promote_batch_size: int = 200
+
     # Enrichment
     enrichment_stale_days: int = 30
     contact_verify_stale_days: int = 14
