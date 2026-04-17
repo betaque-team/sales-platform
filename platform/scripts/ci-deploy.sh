@@ -100,7 +100,14 @@ ghcr_logout() {
 # so the next `$COMPOSE up -d --no-deps backend` (already in `action_deploy`)
 # picks up the new value on container restart.
 persist_anthropic_key_from_stdin() {
-  local env_file="$APP_DIR/platform/.env"
+  # F234 (Round 65 hotfix): the live VM has `.env` at $APP_DIR/.env
+  # (verified: only `/opt/sales-platform/.env` exists; no
+  # `platform/.env`). The earlier Round 63 helper wrote the wrong path
+  # and silently no-op'd on every deploy with the WARN message
+  # `.env not found at /opt/sales-platform/platform/.env`. Fix: use
+  # the same path that `set_release_tag` and the rest of this script
+  # already use (cd "$APP_DIR" && touch .env).
+  local env_file="$APP_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
     log "WARN: .env not found at $env_file — refusing to persist ANTHROPIC_API_KEY"
     # Drain the line so it doesn't sit on stdin and break later reads.
