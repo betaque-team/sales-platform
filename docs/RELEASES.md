@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · 93f27e8 · sha-93f27e8
+Merge feat/bulk-fingerprint-companies: reverse-discovery via Company.website scraping
+
+
 ## 2026-04-17 · affbd5a · sha-affbd5a
 Merge feat/workday-fetcher-and-ats-fingerprint: 7k enterprise jobs + discovery foundation
 
