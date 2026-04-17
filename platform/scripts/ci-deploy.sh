@@ -76,6 +76,61 @@ ghcr_logout() {
 }
 
 # -----------------------------------------------------------------------------
+# Regression finding 234 (critical, F234): the prior ci-deploy.sh only read
+# line 1 of stdin (the GHCR token via `ghcr_login_from_stdin`). deploy.yml
+# (commit 0261ac1) writes ANTHROPIC_API_KEY on line 2 expecting the VM-side
+# script to consume it — but those bytes fell into the void on connection
+# close. Result: every deploy since 0261ac1 reported success with all CI
+# logs green, but the key never reached /opt/sales-platform/platform/.env,
+# so all three AI features (resume customize, cover-letter, interview-prep)
+# returned "Contact an administrator" in prod with no signal that the
+# Secret-was-set / VM-state-empty mismatch existed.
+#
+# This helper closes the gap. Called RIGHT AFTER `ghcr_login_from_stdin` in
+# `action_deploy` and `action_rollback`. Reads one line (with a short
+# timeout — deploy.yml always sends both lines back-to-back, so a slow read
+# means the key wasn't piped). Empty value = "leave .env unchanged" per the
+# documented contract (deploy.yml comment lines 274-279). A non-empty value
+# replaces any existing `ANTHROPIC_API_KEY=` line in .env, atomically via a
+# tmp file + `mv -f` so a partial write can't corrupt the file mid-deploy.
+# Mode 600 on the tmp file before the move so the key never has a window
+# of world-readability.
+#
+# The .env file is mounted into the backend container by docker-compose,
+# so the next `$COMPOSE up -d --no-deps backend` (already in `action_deploy`)
+# picks up the new value on container restart.
+persist_anthropic_key_from_stdin() {
+  local env_file="$APP_DIR/platform/.env"
+  if [[ ! -f "$env_file" ]]; then
+    log "WARN: .env not found at $env_file — refusing to persist ANTHROPIC_API_KEY"
+    # Drain the line so it doesn't sit on stdin and break later reads.
+    local _drain
+    IFS= read -rs -t 2 _drain 2>/dev/null || true
+    return 0
+  fi
+  local anthropic_key=""
+  # 5 s timeout: deploy.yml always emits the key right after the GHCR
+  # token, so a real send arrives in <100 ms. A timeout here means the
+  # key was either omitted (e.g. running this script manually) or the
+  # caller hung up early — both safe to treat as "no change".
+  if IFS= read -rs -t 5 anthropic_key 2>/dev/null && [[ -n "$anthropic_key" ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    chmod 600 "$tmp"
+    # Strip any existing ANTHROPIC_API_KEY line (idempotent — multi-deploy
+    # re-runs don't accrete duplicates), then append the new value.
+    grep -v '^ANTHROPIC_API_KEY=' "$env_file" > "$tmp" || true
+    printf 'ANTHROPIC_API_KEY=%s\n' "$anthropic_key" >> "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$env_file"
+    log "ANTHROPIC_API_KEY persisted to .env (length=${#anthropic_key})"
+    unset anthropic_key
+  else
+    log "ANTHROPIC_API_KEY: empty or unset on stdin — leaving .env unchanged"
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # Set RELEASE_TAG in .env (persisted for future compose commands) and export
 # -----------------------------------------------------------------------------
 set_release_tag() {
@@ -169,6 +224,12 @@ action_deploy() {
     trap 'ghcr_logout' EXIT
   fi
 
+  # F234: read line 2 from stdin (ANTHROPIC_API_KEY) and persist to .env
+  # before the rolling restart, so the backend container picks up the new
+  # value when it comes back up. No-op if the line is empty (documented
+  # "leave .env alone" contract from deploy.yml).
+  persist_anthropic_key_from_stdin
+
   pre_deploy_backup "$tag"
 
   log "Pulling images tagged $tag"
@@ -261,6 +322,11 @@ action_rollback() {
     ghcr_login_from_stdin "$ghcr_user"
     trap 'ghcr_logout' EXIT
   fi
+
+  # F234: rollback path also reads the ANTHROPIC_API_KEY line so a
+  # rollback re-run with a fresh Secret value rotates the key on the
+  # way back. No-op when the line is empty.
+  persist_anthropic_key_from_stdin
 
   # Check the image tag exists locally
   if ! docker image inspect "platform-backend:${tag}" >/dev/null 2>&1; then
