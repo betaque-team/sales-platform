@@ -698,29 +698,29 @@ async def get_ai_usage(
     incremented, locking the user out after 10 failed calls they never
     benefited from. Filter to `success=True` so the quota tracks
     actual AI work completed.
+
+    F236: response now includes a `features` block with all three
+    AI features (customize / cover_letter / interview_prep) plus the
+    legacy top-level customize keys for backwards compatibility with
+    existing frontend code (`lib/api.ts::getAIUsage`). New frontend
+    code should read from `features[<feature>]` so adding a fourth
+    AI feature is a config change, not a frontend type change.
     """
-    from app.models.resume import AICustomizationLog
-    from app.config import get_settings
+    from app.utils.ai_rate_limit import usage_snapshot
+    from app.models.resume import AI_FEATURE_CUSTOMIZE
 
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    used_today = (await db.execute(
-        select(func.count(AICustomizationLog.id))
-        .where(
-            AICustomizationLog.user_id == user.id,
-            AICustomizationLog.created_at >= today_start,
-            AICustomizationLog.success == True,  # noqa: E712
-        )
-    )).scalar() or 0
-
-    settings = get_settings()
+    snap = await usage_snapshot(db, user)
+    cust = snap["features"][AI_FEATURE_CUSTOMIZE]
     return {
-        "used_today": used_today,
-        "daily_limit": settings.ai_daily_limit_per_user,
-        "remaining": max(0, settings.ai_daily_limit_per_user - used_today),
-        # SecretStr → explicitly check the underlying value. `bool()` on a
-        # SecretStr instance is not guaranteed to reflect emptiness the
-        # same way across Pydantic versions; `.get_secret_value()` does.
-        "has_api_key": bool(settings.anthropic_api_key.get_secret_value()),
+        # Legacy keys (customize-only) preserved for backwards
+        # compatibility with the current ResumeScorePage UI.
+        "used_today": cust["used"],
+        "daily_limit": cust["limit"],
+        "remaining": cust["remaining"],
+        "has_api_key": snap["has_api_key"],
+        # F236 new keys.
+        "reset_at_utc": snap["reset_at_utc"],
+        "features": snap["features"],
     }
 
 
@@ -807,25 +807,17 @@ async def customize_resume_for_job(
             },
         }
 
-    # Check daily limit. Regression finding 170: the quota now counts
-    # only `success=True` rows so failed AI calls (missing API key,
-    # upstream 5xx, timeout) don't burn the user's daily budget. Keeps
-    # the quota honest and lets clients retry after transient failures.
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    used_today = (await db.execute(
-        select(func.count(AICustomizationLog.id))
-        .where(
-            AICustomizationLog.user_id == user.id,
-            AICustomizationLog.created_at >= today_start,
-            AICustomizationLog.success == True,  # noqa: E712
-        )
-    )).scalar() or 0
-
-    if used_today >= settings.ai_daily_limit_per_user:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Daily AI customization limit reached ({settings.ai_daily_limit_per_user}/day). Resets at midnight UTC."
-        )
+    # F236: lifted the rate-limit + audit-log into the shared
+    # `app.utils.ai_rate_limit` helper so all three AI handlers
+    # (customize, cover-letter, interview-prep) use the same code path.
+    # Behavior is unchanged from the original F170 inline implementation:
+    # only success=True rows count toward the daily quota; 429 with
+    # Retry-After when the cap hits.
+    from app.utils.ai_rate_limit import (
+        check_ai_quota, log_ai_call, usage_snapshot,
+    )
+    from app.models.resume import AI_FEATURE_CUSTOMIZE
+    used_today = await check_ai_quota(db, user, AI_FEATURE_CUSTOMIZE)
 
     # Load resume
     result = await db.execute(
@@ -897,26 +889,26 @@ async def customize_resume_for_job(
         target_score=target_score,
     )
 
-    # Log usage. Rows are recorded for BOTH successful and failed calls
-    # so operators can audit failures without losing visibility — but
-    # only successful rows count against the daily quota (see the
-    # rate-limit query above and the F170 docstring on get_ai_usage).
+    # F236: shared audit-log helper. Same semantics as before — both
+    # success and failure rows persist (so operators can debug failure
+    # rates) but only success=True rows count toward the daily quota
+    # via the shared `count_ai_calls_today` filter.
     succeeded = not ai_result.get("error", False)
-    log_entry = AICustomizationLog(
-        user_id=user.id,
+    await log_ai_call(
+        db, user, AI_FEATURE_CUSTOMIZE,
         resume_id=resume.id,
         job_id=job.id,
         input_tokens=ai_result.get("input_tokens", 0),
         output_tokens=ai_result.get("output_tokens", 0),
         success=succeeded,
     )
-    db.add(log_entry)
-    await db.commit()
 
-    # Reflect the same "successful calls only" semantics in the
-    # returned usage block so the UI doesn't lie to the user. A
-    # failed call leaves `used_today` unchanged.
-    delta = 1 if succeeded else 0
+    # F236: usage snapshot uses the same canonical helper that powers
+    # /api/v1/ai/usage so the customize-only `used_today/daily_limit/
+    # remaining` keys stay backwards-compatible while the new per-
+    # feature breakdown arrives via the snapshot's `features` block.
+    snap = await usage_snapshot(db, user)
+    cust = snap["features"][AI_FEATURE_CUSTOMIZE]
     return {
         "resume_id": str(resume.id),
         "job_id": str(job.id),
@@ -926,9 +918,13 @@ async def customize_resume_for_job(
         "changes_made": ai_result["changes_made"],
         "improvement_notes": ai_result["improvement_notes"],
         "error": ai_result.get("error", False),
+        # Backwards-compatible top-level keys (existing
+        # `lib/api.ts::customizeResume` reads these). The new
+        # `features` map mirrors the /ai/usage envelope so a future
+        # frontend can read both numbers from one place.
         "usage": {
-            "used_today": used_today + delta,
-            "daily_limit": settings.ai_daily_limit_per_user,
-            "remaining": max(0, settings.ai_daily_limit_per_user - used_today - delta),
+            "used_today": cust["used"],
+            "daily_limit": cust["limit"],
+            "remaining": cust["remaining"],
         },
     }

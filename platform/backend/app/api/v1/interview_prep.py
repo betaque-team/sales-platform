@@ -43,6 +43,15 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
             detail="AI interview prep is not configured on this server. Contact an administrator.",
         )
 
+    # F236: per-user daily rate limit. Pre-fix this endpoint was
+    # uncapped — a single user could spam it indefinitely. Now capped
+    # at 10/day (default, configurable via
+    # `ai_interview_prep_daily_limit_per_user`). 429 fires before the
+    # Claude call; failed calls don't count (F170/F203).
+    from app.utils.ai_rate_limit import check_ai_quota, log_ai_call, usage_snapshot
+    from app.models.resume import AI_FEATURE_INTERVIEW_PREP
+    await check_ai_quota(db, user, AI_FEATURE_INTERVIEW_PREP)
+
     job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
     if not job:
         raise HTTPException(404, "Job not found")
@@ -90,11 +99,25 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
         company_info=company_info,
     )
 
+    # F236: log every call (success and failure) so the audit trail is
+    # complete. Failure rows don't count toward the quota.
+    is_success = not bool(result.get("error"))
+    await log_ai_call(
+        db, user, AI_FEATURE_INTERVIEW_PREP,
+        job_id=job.id,
+        input_tokens=int(result.get("input_tokens", 0) or 0),
+        output_tokens=int(result.get("output_tokens", 0) or 0),
+        success=is_success,
+    )
+
     if result.get("error"):
         # F183: upstream Anthropic API errors (rate limit, upstream
         # outage, safety refusal) map to 502 Bad Gateway, not 500.
         raise HTTPException(502, result.get("error_message", "Upstream AI generation failed"))
 
+    # F236: usage block in the response so the frontend can update its
+    # "X of Y left today" badge inline.
+    usage = await usage_snapshot(db, user)
     return {
         "job_title": job.title,
         "company_name": company_name,
@@ -102,4 +125,5 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
         "talking_points": result.get("talking_points", []),
         "company_research": result.get("company_research", []),
         "red_flags": result.get("red_flags", []),
+        "usage": usage["features"][AI_FEATURE_INTERVIEW_PREP],
     }

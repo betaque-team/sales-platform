@@ -49,6 +49,7 @@ import type {
   SalaryInsights,
   TimingIntelligence,
   NetworkingSuggestion,
+  AIUsage,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -611,6 +612,14 @@ export async function customizeResume(
     method: "POST",
     body: JSON.stringify({ job_id: jobId, target_score: targetScore }),
   });
+}
+
+// F236: per-feature AI usage snapshot. Single source of truth for the
+// "X of Y left today" badges on the AI Tools panel + ResumeScorePage.
+// Backend returns {has_api_key, reset_at_utc, features: {customize,
+// cover_letter, interview_prep}: {used, limit, remaining}}.
+export async function getAIUsage(): Promise<AIUsage> {
+  return request<AIUsage>("/ai/usage");
 }
 
 // Company Scores

@@ -39,7 +39,17 @@ class Settings(BaseSettings):
     # the explicitness is the point: ripgrep finds every place the
     # raw key materializes.
     anthropic_api_key: SecretStr = SecretStr("")
-    ai_daily_limit_per_user: int = 10  # max AI customizations per user per day
+    # F236: per-feature AI rate limits — see docs/AI_USAGE.md for the
+    # full policy + cost back-of-envelope. All three counters share the
+    # same `ai_customization_logs` table (discriminated by the `feature`
+    # column added in migration s9n0o1p2q3r4) and the same midnight-UTC
+    # reset cadence. Numbers chosen by user 2026-04-17 based on cost vs
+    # workflow-velocity tradeoff (10/30/10 = $0.05 × 50 worst-case per
+    # user per day = $2.50/user/day worst, ~$30/day platform-wide at 50
+    # active users).
+    ai_daily_limit_per_user: int = 10           # customize: max AI customizations per user per day
+    ai_cover_letter_daily_limit_per_user: int = 30  # cover letter: max generations per user per day
+    ai_interview_prep_daily_limit_per_user: int = 10  # interview prep: max generations per user per day
 
     # Security
     credential_encryption_key: str = ""  # Falls back to jwt_secret if empty

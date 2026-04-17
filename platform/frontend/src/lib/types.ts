@@ -549,6 +549,28 @@ export interface ResumeCustomization {
   error: boolean;
 }
 
+// F236: per-feature AI usage snapshot returned by GET /api/v1/ai/usage
+// and embedded in the post-call responses on the three AI generation
+// endpoints. `reset_at_utc` is the START of today's window (midnight
+// UTC); the next reset is +24h. `has_api_key` mirrors the public
+// /api/health flag — when false, all three features 503 immediately
+// without burning quota.
+export interface AIFeatureUsage {
+  used: number;
+  limit: number;
+  remaining: number;
+}
+
+export interface AIUsage {
+  has_api_key: boolean;
+  reset_at_utc: string; // ISO timestamp, start of today's UTC window
+  features: {
+    customize: AIFeatureUsage;
+    cover_letter: AIFeatureUsage;
+    interview_prep: AIFeatureUsage;
+  };
+}
+
 export interface CompanyScore {
   company_id: string;
   company_name: string;
