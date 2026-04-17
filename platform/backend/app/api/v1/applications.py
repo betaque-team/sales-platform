@@ -464,6 +464,17 @@ async def list_applications(
     # Same bug class as F187 (/export/jobs), F218 (/jobs), and F191
     # (/platforms).
     status: ApplicationStatus | None = None,
+    # Regression finding 228: `submission_source` was ADDED as a response
+    # field by the Feature C migration (r8m9n0o1p2q3) and consumed by the
+    # frontend as a "Source" badge + gating for the "What we sent" modal
+    # (ApplicationsPage.tsx:201,262), but the matching INPUT filter was
+    # missed. Live verification at deploy showed `?submission_source=
+    # review_queue` silently returned total=9 (unfiltered). Same
+    # F220(A)/(C) silent-accept class — declared params validate
+    # cleanly, undeclared params are discarded by FastAPI without
+    # warning. Literal-typing here gives a parse-time 422 on typos and
+    # the matching WHERE below makes the filter actually bite.
+    submission_source: Literal["review_queue", "manual_prepare"] | None = None,
     search: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
@@ -481,6 +492,8 @@ async def list_applications(
 
     if status:
         query = query.where(Application.status == status)
+    if submission_source:
+        query = query.where(Application.submission_source == submission_source)
     if search and search.strip():
         # Findings 84+85: escape LIKE metachars + drop whitespace-only input.
         term = f"%{escape_like(search.strip())}%"

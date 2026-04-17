@@ -40,6 +40,10 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 export function ApplicationsPage() {
   const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState("");
+  // F228 — provenance filter. "" = all, "review_queue" | "manual_prepare"
+  // = narrow to that source. Matches the backend Literal values from
+  // applications.py:list_applications.
+  const [sourceFilter, setSourceFilter] = useState<"" | "review_queue" | "manual_prepare">("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   // Feature C — id of the application whose apply-time snapshot is
@@ -55,8 +59,14 @@ export function ApplicationsPage() {
   const stats = statsQ.data;
 
   const applicationsQ = useQuery({
-    queryKey: ["applications", statusFilter, search, page],
-    queryFn: () => getApplications({ status: statusFilter || undefined, search: search || undefined, page, page_size: 25 }),
+    queryKey: ["applications", statusFilter, sourceFilter, search, page],
+    queryFn: () => getApplications({
+      status: statusFilter || undefined,
+      submission_source: sourceFilter || undefined,
+      search: search || undefined,
+      page,
+      page_size: 25,
+    }),
   });
   const { data, isLoading } = applicationsQ;
 
@@ -133,6 +143,22 @@ export function ApplicationsPage() {
             </button>
           ))}
         </div>
+        {/* F228 — Source dropdown. Values match the backend Literal on
+            GET /applications. Labels match the badge text in the row
+            below for a consistent mental model. */}
+        <select
+          value={sourceFilter}
+          onChange={(e) => {
+            setSourceFilter(e.target.value as "" | "review_queue" | "manual_prepare");
+            setPage(1);
+          }}
+          className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm"
+          aria-label="Filter by source"
+        >
+          <option value="">All sources</option>
+          <option value="review_queue">Review queue</option>
+          <option value="manual_prepare">Manual</option>
+        </select>
         <input
           type="text"
           placeholder="Search by job title or company..."

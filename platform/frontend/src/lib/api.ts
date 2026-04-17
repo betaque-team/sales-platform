@@ -802,7 +802,17 @@ export async function prepareApplication(jobId: string): Promise<any> {
   return request<any>("/applications/prepare", { method: "POST", body: JSON.stringify({ job_id: jobId }) });
 }
 
-export async function getApplications(params: { status?: string; search?: string; page?: number; page_size?: number } = {}): Promise<PaginatedResponse<Application>> {
+export async function getApplications(
+  params: {
+    status?: string;
+    // F228 — provenance filter. Backend Literal-validates the value;
+    // undefined / "" = no filter.
+    submission_source?: "review_queue" | "manual_prepare";
+    search?: string;
+    page?: number;
+    page_size?: number;
+  } = {},
+): Promise<PaginatedResponse<Application>> {
   const query = buildQuery(params);
   return request<PaginatedResponse<Application>>(`/applications${query}`);
 }
