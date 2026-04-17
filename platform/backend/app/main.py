@@ -128,8 +128,20 @@ async def health():
     couldn't already infer by hitting an AI endpoint and reading the
     503 vs 200 response.
     """
-    from app.config import settings
-    raw_key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
+    # F234 hotfix: `app.config` exposes `get_settings()` (lru_cached
+    # factory), not a module-level `settings`. Calling the factory is
+    # the canonical access pattern across the codebase (every router
+    # does `from app.config import get_settings; settings =
+    # get_settings()`). The earlier Round 63 commit imported a
+    # non-existent name and 500'd `/api/health` on every request —
+    # which broke the deploy verify step + every load-balancer probe.
+    from app.config import get_settings
+    settings = get_settings()
+    raw_key = (
+        settings.anthropic_api_key.get_secret_value()
+        if settings.anthropic_api_key
+        else ""
+    )
     return {
         "status": "ok",
         "version": "0.1.0",

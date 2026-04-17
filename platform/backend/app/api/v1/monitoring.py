@@ -163,8 +163,16 @@ async def get_system_health(
     # really the deploy script wasn't persisting it). Now the
     # MonitoringPage can render a red badge when this is False even
     # though the deploy reported success.
-    from app.config import settings
-    raw_key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
+    #
+    # `get_settings()` factory not module-level `settings` — same
+    # access pattern every other router uses (see resume.py:704).
+    from app.config import get_settings
+    settings = get_settings()
+    raw_key = (
+        settings.anthropic_api_key.get_secret_value()
+        if settings.anthropic_api_key
+        else ""
+    )
     ai_configured = bool(raw_key.strip())
 
     return {
