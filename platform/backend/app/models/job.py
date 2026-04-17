@@ -41,6 +41,17 @@ class Job(Base):
     # Raw data
     raw_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # Provenance (Feature A — manual link submission).
+    # `submission_source` = "scan" for every row written by the scan
+    # pipeline (the default), "manual_link" for rows created by
+    # POST /jobs/submit-link. Kept as a plain string column to match
+    # the existing `status` convention. `submitted_by_user_id` is only
+    # populated for `manual_link` rows.
+    submission_source: Mapped[str] = mapped_column(String(30), default="scan", nullable=False)
+    submitted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Relationships
     company: Mapped["Company"] = relationship()
     description: Mapped["JobDescription | None"] = relationship(back_populates="job", uselist=False, cascade="all, delete-orphan")

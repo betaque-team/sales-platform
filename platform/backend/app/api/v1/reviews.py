@@ -159,3 +159,246 @@ async def list_reviews(
         items.append(item)
 
     return {"items": items, "total": total, "page": page, "page_size": per_page, "total_pages": (total + per_page - 1) // per_page}
+
+
+# --- Feature C: "Applied" action from the review queue -----------------------
+#
+# POST /reviews/apply — a reviewer hits the fourth review-queue button
+# ("Applied", P shortcut) to mark a job as actually submitted, not just
+# "worth pursuing". Applied implies Accept, so the handler atomically:
+#   1. Creates a Review row with decision="accepted" (so analytics and
+#      /jobs/review-queue exclusion treat it identically to a plain Accept).
+#   2. Flips Job.status="accepted".
+#   3. Creates/updates the company's PotentialClient pipeline row.
+#   4. Upserts the user's Application row for this job, with
+#      status="applied", applied_at=now, and the three snapshot columns
+#      populated so the Applications page can show "what we sent".
+#
+# The state machine in applications.py VALID_TRANSITIONS doesn't list a
+# direct `None -> applied` transition — that's intentional for PATCH
+# /applications/{id}, which represents a user editing an existing app.
+# This endpoint bypasses the state machine because it's a CREATE path:
+# there's no "current state" to transition from.
+
+from datetime import datetime as _dt, timezone as _tz
+from pydantic import BaseModel as _ABase, ConfigDict as _AConfig, Field as _AField  # noqa: E402
+from app.models.application import Application
+from app.models.resume import Resume, ResumeScore, AICustomizationLog
+
+
+class ApplyFromReviewRequest(_ABase):
+    """Payload for POST /reviews/apply.
+
+    Most fields are optional — the reviewer may just click Applied with
+    no customization, in which case we snapshot the raw active resume
+    text + the most recent ResumeScore for this (resume, job) pair.
+    """
+    model_config = _AConfig(extra="forbid")
+
+    job_id: UUID
+    # Optional — defaults to the reviewer's `user.active_resume_id`.
+    # Allows the UI to let the user pick a different resume before
+    # clicking Applied (not shipped in the first frontend pass but
+    # unblocks the next iteration).
+    resume_id: UUID | None = None
+    # F129 precedent — 5000-char cap on free-text user input.
+    notes: str | None = _AField(default=None, max_length=5000)
+    # When present, overrides the raw resume text at snapshot time —
+    # typically the Claude-customized output from the AI customize flow.
+    # Cap at 100k chars which is ~5x a long resume (PDFs clock in at
+    # 10-20k typically); matches the upper bound on the customize API.
+    customized_resume_text: str | None = _AField(default=None, max_length=100_000)
+    # If an AI run produced ``customized_resume_text``, pass its log id
+    # for audit linkage. The FK is validated below.
+    ai_customization_log_id: UUID | None = None
+
+
+@router.post("/apply")
+async def apply_from_review(
+    body: ApplyFromReviewRequest,
+    request: Request,
+    user: User = Depends(require_role("admin", "reviewer")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a job as Applied from the review queue.
+
+    Semantics: Applied implies Accept. The handler flips ``Job.status``
+    to ``accepted``, creates the accepted Review row and the company
+    pipeline entry (same side-effects as submit_review with Accept),
+    and upserts the user's Application row with the apply-time snapshot.
+    """
+    # 1. Load the job. 404 if missing.
+    job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # 2. Resolve the resume to snapshot. Caller override wins; otherwise
+    #    fall back to the reviewer's active resume.
+    resume_id = body.resume_id or user.active_resume_id
+    if not resume_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No resume selected. Set an active resume or pass resume_id.",
+        )
+    resume = (await db.execute(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id)
+    )).scalar_one_or_none()
+    if not resume:
+        raise HTTPException(status_code=404, detail="Resume not found")
+
+    # 3. If the caller claims an AI customization log, validate it
+    #    belongs to this user + matches (resume, job). Don't let a
+    #    client link an Application to someone else's AI log.
+    ai_log_id = None
+    if body.ai_customization_log_id:
+        ai_log = (await db.execute(
+            select(AICustomizationLog).where(
+                AICustomizationLog.id == body.ai_customization_log_id,
+                AICustomizationLog.user_id == user.id,
+                AICustomizationLog.resume_id == resume.id,
+                AICustomizationLog.job_id == job.id,
+            )
+        )).scalar_one_or_none()
+        if not ai_log:
+            raise HTTPException(
+                status_code=400,
+                detail="ai_customization_log_id not found for this user/resume/job.",
+            )
+        ai_log_id = ai_log.id
+
+    # 4. Snapshot the resume score at apply-time. Uses the same
+    #    "most recent" ordering as apply-readiness (resume_scores has
+    #    no UNIQUE constraint in legacy rows) so duplicates don't
+    #    raise MultipleResultsFound.
+    score_row = (await db.execute(
+        select(ResumeScore)
+        .where(ResumeScore.resume_id == resume.id, ResumeScore.job_id == job.id)
+        .order_by(ResumeScore.scored_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    score_snapshot = None
+    if score_row is not None:
+        score_snapshot = {
+            "overall": round(score_row.overall_score, 1),
+            "keyword": round(score_row.keyword_score, 1),
+            "role_match": round(score_row.role_match_score, 1),
+            "format": round(score_row.format_score, 1),
+        }
+
+    # 5. Resume text to snapshot. Customized text wins; otherwise raw
+    #    resume body. If neither is available (legacy resume with no
+    #    extracted text), store an empty string — we still want the
+    #    other snapshot columns populated.
+    snapshot_text = body.customized_resume_text or resume.text_content or ""
+
+    now = _dt.now(_tz.utc)
+
+    # 6. Upsert the Application. The UNIQUE(user_id, job_id) constraint
+    #    means a second Applied click flips the existing row to a
+    #    second-submission state rather than duplicating. We treat that
+    #    as "user re-applied" — refresh the snapshot and applied_at but
+    #    keep the row.
+    existing_app = (await db.execute(
+        select(Application).where(
+            Application.user_id == user.id,
+            Application.job_id == job.id,
+        )
+    )).scalar_one_or_none()
+
+    if existing_app:
+        existing_app.status = "applied"
+        existing_app.applied_at = now
+        existing_app.resume_id = resume.id
+        existing_app.applied_resume_text = snapshot_text
+        existing_app.applied_resume_score_snapshot = score_snapshot
+        existing_app.ai_customization_log_id = ai_log_id
+        existing_app.submission_source = "review_queue"
+        if body.notes is not None:
+            existing_app.notes = body.notes
+        app_id = existing_app.id
+        app_is_new = False
+    else:
+        new_app = Application(
+            user_id=user.id,
+            job_id=job.id,
+            resume_id=resume.id,
+            status="applied",
+            apply_method="manual_copy",
+            prepared_answers=[],
+            applied_at=now,
+            notes=body.notes or "",
+            applied_resume_text=snapshot_text,
+            applied_resume_score_snapshot=score_snapshot,
+            ai_customization_log_id=ai_log_id,
+            submission_source="review_queue",
+        )
+        db.add(new_app)
+        await db.flush()
+        app_id = new_app.id
+        app_is_new = True
+
+    # 7. Record the accepted Review. Applied implies Accept. We always
+    #    write a fresh Review row rather than updating prior ones — the
+    #    reviews table is an event log, not a per-(job,reviewer) state.
+    review = Review(
+        job_id=job.id,
+        reviewer_id=user.id,
+        decision="accepted",
+        comment=(body.notes or "Applied via review queue"),
+        tags=[],
+    )
+    db.add(review)
+
+    # 8. Flip Job.status and create/refresh the PotentialClient pipeline
+    #    entry — mirrors the side-effects in submit_review for Accept.
+    job.status = "accepted"
+
+    client = (await db.execute(
+        select(PotentialClient).where(PotentialClient.company_id == job.company_id)
+    )).scalar_one_or_none()
+    if not client:
+        company = (await db.execute(
+            select(Company).where(Company.id == job.company_id)
+        )).scalar_one_or_none()
+        if company:
+            company.is_target = True
+            db.add(PotentialClient(
+                company_id=job.company_id,
+                stage="new_lead",
+                resume_id=resume.id,
+                applied_by=user.id,
+            ))
+    else:
+        # Annotate the existing pipeline row with who applied + which
+        # resume was used. `resume_id` / `applied_by` on PotentialClient
+        # were explicitly added for this kind of link — we stamp them
+        # here on every Applied click, overwriting any prior value
+        # because the most recent application is the most relevant
+        # signal for Pipeline views.
+        client.resume_id = resume.id
+        client.applied_by = user.id
+
+    await db.commit()
+
+    # 9. Audit. Dedicated action verb so the audit-log filter UI can
+    #    show "who Applied to what" distinctly from plain Accepts.
+    await log_action(
+        db, user,
+        action="review.applied",
+        resource="application",
+        request=request,
+        metadata={
+            "job_id": str(job.id),
+            "application_id": str(app_id),
+            "resume_id": str(resume.id),
+            "application_is_new": app_is_new,
+            "ai_customization_log_id": str(ai_log_id) if ai_log_id else None,
+        },
+    )
+
+    return {
+        "application_id": str(app_id),
+        "job_id": str(job.id),
+        "status": "applied",
+        "application_is_new": app_is_new,
+    }

@@ -1,18 +1,21 @@
 """Job listing API endpoints."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
-from sqlalchemy import select, func, or_, literal, case
+from sqlalchemy import select, func, or_, literal, case, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.database import get_db
 from app.models.job import Job, JobDescription
-from app.models.company import Company
+from app.models.company import Company, CompanyATSBoard
 from app.models.user import User
 from app.models.resume import ResumeScore
+from app.models.review import Review
 from app.models.role_config import RoleClusterConfig
+from app.models.audit_log import AuditLog
 from app.api.deps import get_current_user, require_role
 from app.schemas.job import (
     JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest,
@@ -399,23 +402,95 @@ async def review_queue(
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get next batch of unreviewed jobs sorted by relevance score."""
+    """Return the next batch of unreviewed jobs, prioritized by discovery
+    recency → team-wide best resume fit → platform relevance.
+
+    Ordering (each tier DESC, NULLS LAST):
+      1. ``DATE(first_seen_at)``    — today first, then yesterday, then older.
+         Bucketing by calendar date (not timestamp) so the UI can surface a
+         single "12 today / 8 yesterday" summary that matches the order.
+      2. ``max(ResumeScore.overall_score)`` across every resume that has
+         scored this job — a team-wide "best resume fit" signal. Jobs that
+         no resume has scored yet fall to the bottom of this tier.
+      3. ``Job.relevance_score``     — platform-wide role/geography match.
+
+    Also excludes jobs the *current reviewer* has already decided on
+    (NOT EXISTS against reviews.reviewer_id), which is defense-in-depth
+    against any future flow where a review is recorded without flipping
+    ``Job.status`` off ``"new"``.
+    """
+    max_scores_sq = (
+        select(
+            ResumeScore.job_id.label("rs_job_id"),
+            func.max(ResumeScore.overall_score).label("max_score"),
+        )
+        .group_by(ResumeScore.job_id)
+        .subquery()
+    )
+
+    # Today/yesterday are computed in UTC — matches how first_seen_at is
+    # stamped (scan_task uses datetime.now(timezone.utc)). A reviewer in
+    # a non-UTC timezone may see a job stamped "today" that rolled over
+    # locally, but the bucket boundaries are the same for every user and
+    # every scan — consistency wins over per-user TZ conversion here.
+    today = datetime.now(timezone.utc).date()
+    yesterday = today - timedelta(days=1)
+
+    reviewer_decided = exists().where(
+        Review.job_id == Job.id,
+        Review.reviewer_id == user.id,
+    )
+
     query = (
-        select(Job).options(joinedload(Job.company))
-        .where(Job.status == "new")
-        .order_by(Job.relevance_score.desc(), Job.first_seen_at.desc())
+        select(Job, max_scores_sq.c.max_score)
+        .options(joinedload(Job.company))
+        .outerjoin(max_scores_sq, Job.id == max_scores_sq.c.rs_job_id)
+        .where(Job.status == "new", ~reviewer_decided)
+        .order_by(
+            func.date(Job.first_seen_at).desc(),
+            func.coalesce(max_scores_sq.c.max_score, literal(-1.0)).desc(),
+            Job.relevance_score.desc(),
+        )
         .limit(limit)
     )
     result = await db.execute(query)
-    jobs = result.unique().scalars().all()
+    rows = result.unique().all()
+
+    # Queue stats — tile counts by discovery-date bucket so the UI can
+    # render "12 today · 8 yesterday · 47 older" chips alongside the
+    # prioritized list. Uses the same NOT EXISTS + status filter as the
+    # main query so the numbers reconcile 1:1 with what's actually
+    # being surfaced.
+    stats_q = select(
+        func.count(Job.id).label("total"),
+        func.sum(case((func.date(Job.first_seen_at) == today, 1), else_=0)).label("today_count"),
+        func.sum(case((func.date(Job.first_seen_at) == yesterday, 1), else_=0)).label("yesterday_count"),
+        func.sum(case((func.date(Job.first_seen_at) < yesterday, 1), else_=0)).label("older_count"),
+    ).where(Job.status == "new", ~reviewer_decided)
+    stats_row = (await db.execute(stats_q)).one()
 
     items = []
-    for j in jobs:
+    for j, max_score in rows:
         item = JobOut.model_validate(j)
         item.company_name = j.company.name if j.company else None
-        items.append(item)
+        d = item.model_dump(mode="json")
+        d["max_resume_score"] = round(max_score, 1) if max_score is not None else None
+        items.append(d)
 
-    return {"items": items, "total": len(items), "page": 1, "page_size": limit, "total_pages": 1}
+    total = int(stats_row.total or 0)
+    return {
+        "items": items,
+        "total": total,
+        "page": 1,
+        "page_size": limit,
+        "total_pages": 1 if total <= limit else (total + limit - 1) // limit,
+        "stats": {
+            "today": int(stats_row.today_count or 0),
+            "yesterday": int(stats_row.yesterday_count or 0),
+            "older": int(stats_row.older_count or 0),
+            "total": total,
+        },
+    }
 
 
 @router.get("/{job_id}")
@@ -752,3 +827,293 @@ async def bulk_action(
     )
 
     return {"updated": len(jobs)}
+
+
+# --- Feature A: manual job link submission -----------------------------------
+#
+# POST /jobs/submit-link — a sales user pastes an ATS URL; we detect the ATS
+# from the hostname, fetch the single posting via that fetcher's single-job
+# API, and run the result through the same `_upsert_job` pipeline the
+# scanners use so classification, geography, and relevance scoring behave
+# identically to scanned rows. Provenance is captured on two new columns:
+# `Job.submission_source="manual_link"` and `Job.submitted_by_user_id`.
+# Idempotency is free via the existing UNIQUE(external_id) — re-submitting
+# the same URL returns the existing job with `is_new=false`.
+
+import uuid as _uuid_mod  # noqa: E402 — Feature A additions
+from pydantic import BaseModel as _BaseModel, ConfigDict as _ConfigDict, Field as _PField  # noqa: E402
+
+# Per-user cap. Sales users paste 1-2 links at a time in practice; 20/hour
+# is 10x headroom while still capping a runaway script / compromised session
+# before it ingests thousands of rows. Enforced via the audit_logs table so
+# we don't add a Redis dependency — audit writes already happen for every
+# submit-link call.
+_SUBMIT_LINK_RATE_LIMIT_PER_HOUR = 20
+
+
+class SubmitJobLinkRequest(_BaseModel):
+    """Payload for ``POST /jobs/submit-link``.
+
+    ``extra="forbid"`` — a typo'd key produces a 422 at parse time rather
+    than silently dropping the field and importing nothing.
+    """
+    model_config = _ConfigDict(extra="forbid")
+    # Job.url is 1000 chars — match that cap here so the Pydantic reject
+    # message is "URL too long" rather than a cryptic DB error later.
+    url: str = _PField(..., min_length=10, max_length=1000)
+
+
+class SubmitJobLinkResponse(_BaseModel):
+    id: str
+    title: str
+    company_name: str
+    platform: str
+    is_new: bool
+    status: str
+    url: str
+
+
+def _do_manual_ingest_sync(platform: str, slug: str, external_id: str, source_url: str, user_id) -> dict:
+    """Run the manual-link upsert inside a sync SyncSession.
+
+    Lives in its own function because the existing scan pipeline
+    (`_upsert_job`, `_get_fetcher_for_platform`, `load_cluster_config_sync`)
+    is all sync code — wrapping it in ``asyncio.to_thread`` from the async
+    handler is cheaper than reimplementing the normalization/scoring chain
+    for AsyncSession. Returns a plain outcome dict; does not raise
+    HTTPException (that's the async caller's job based on the ``outcome``
+    discriminator).
+
+    Outcomes:
+      * ``"created"``   — new Job row; provenance columns stamped.
+      * ``"updated"``   — existing row refreshed via ``_upsert_job``'s
+        update branch. Provenance is left alone — the original source wins.
+      * ``"not_found"`` — ATS says the posting is gone. Nothing persists.
+      * ``"no_fetcher"`` — parsed platform isn't in ``FETCHER_MAP``. The
+        URL parser only emits supported platforms, so this is defensive.
+    """
+    from app.workers.tasks._db import SyncSession
+    from app.workers.tasks._role_matching import load_cluster_config_sync
+    from app.workers.tasks.scan_task import _upsert_job, _get_fetcher_for_platform
+
+    session = SyncSession()
+    try:
+        # 1. Find or placeholder-create the Company. Sales admin renames
+        #    / enriches later via /companies — we seed `name=slug` so
+        #    the list view isn't blank, and `is_target=False` because a
+        #    manual paste is not a curated target.
+        company = session.execute(
+            select(Company).where(Company.slug == slug)
+        ).scalar_one_or_none()
+        company_created = False
+        if not company:
+            company = Company(
+                id=_uuid_mod.uuid4(),
+                name=slug,
+                slug=slug,
+                is_target=False,
+            )
+            session.add(company)
+            session.flush()
+            company_created = True
+
+        # 2. Find or placeholder-create the CompanyATSBoard. Manual
+        #    submissions seed an INACTIVE board — manual paste is NOT
+        #    opting the whole board into scanning. An admin can flip
+        #    is_active later from the Platforms admin.
+        board = session.execute(
+            select(CompanyATSBoard).where(
+                CompanyATSBoard.company_id == company.id,
+                CompanyATSBoard.platform == platform,
+                CompanyATSBoard.slug == slug,
+            )
+        ).scalar_one_or_none()
+        if not board:
+            board = CompanyATSBoard(
+                id=_uuid_mod.uuid4(),
+                company_id=company.id,
+                platform=platform,
+                slug=slug,
+                is_active=False,
+            )
+            session.add(board)
+            session.flush()
+
+        # 3. Idempotency — if the scanner (or a prior paste) already
+        #    imported this job, skip the HTTP call entirely.
+        existing = session.execute(
+            select(Job).where(Job.external_id == str(external_id))
+        ).scalar_one_or_none()
+        if existing:
+            session.commit()
+            return {
+                "outcome": "updated",
+                "id": str(existing.id),
+                "title": existing.title,
+                "company_name": company.name,
+                "platform": existing.platform,
+                "status": existing.status,
+                "url": existing.url,
+            }
+
+        # 4. Fetch the single posting. `fetch_one` returns None on 404 /
+        #    network error — treat as "job no longer listed".
+        fetcher = _get_fetcher_for_platform(platform)
+        if fetcher is None:
+            session.rollback()
+            return {"outcome": "no_fetcher"}
+
+        raw_job = fetcher.fetch_one(slug, external_id)
+        if not raw_job:
+            if company_created:
+                # Undo the placeholder Company/Board we created — a dead
+                # posting shouldn't leave a shell company for ops cleanup.
+                session.rollback()
+            else:
+                session.commit()
+            return {"outcome": "not_found"}
+
+        # 5. Normalize + score via the same pipeline the scanners use.
+        #    Keep the user's pasted URL if the fetcher didn't populate one.
+        if source_url and not raw_job.get("url"):
+            raw_job["url"] = source_url
+
+        cluster_config = load_cluster_config_sync(session)
+        action = _upsert_job(session, company, board, raw_job, cluster_config)
+
+        # 6. Re-load the job to stamp provenance. `_upsert_job` doesn't
+        #    know about the two new columns; we set them here before
+        #    commit. Only stamp on a brand-new row — an existing row's
+        #    original `submission_source` must not be overwritten.
+        job = session.execute(
+            select(Job).where(Job.external_id == str(external_id))
+        ).scalar_one()
+        is_new = action == "new"
+        if is_new:
+            job.submission_source = "manual_link"
+            job.submitted_by_user_id = user_id
+
+        session.commit()
+        return {
+            "outcome": "created" if is_new else "updated",
+            "id": str(job.id),
+            "title": job.title,
+            "company_name": company.name,
+            "platform": job.platform,
+            "status": job.status,
+            "url": job.url,
+        }
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@router.post("/submit-link", response_model=SubmitJobLinkResponse)
+async def submit_job_link(
+    body: SubmitJobLinkRequest,
+    request: Request,
+    user: User = Depends(require_role("admin", "reviewer")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import a job from a pasted ATS URL.
+
+    Supported hosts: Greenhouse, Lever, Ashby, Workable, BambooHR,
+    SmartRecruiters, Jobvite, Recruitee. Non-ATS URLs (generic career
+    pages, LinkedIn, Indeed) are rejected with a 400 — silent fallback
+    to a generic scraper routinely produces garbage rows.
+
+    The pasted link is parsed into ``(platform, slug, external_id)``,
+    fetched via the matching fetcher's single-job API, normalized + scored
+    through the same pipeline the scanners use, and persisted with
+    ``submission_source="manual_link"`` + ``submitted_by_user_id`` for
+    provenance. Re-submitting an already-imported URL is idempotent and
+    returns ``is_new=false``.
+    """
+    from app.fetchers.url_parser import parse_job_url, UnsupportedJobUrlError
+
+    # 1. Parse URL → (platform, slug, external_id). Any parse failure
+    #    becomes a 400 with an actionable message, before DB work.
+    try:
+        parsed = parse_job_url(body.url)
+    except UnsupportedJobUrlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # 2. Rate limit via the audit log. Fail-open on a count query error
+    #    (same posture the audit module itself takes for writes) — a
+    #    transient audit-DB issue must not block legitimate submissions.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    try:
+        recent_count = (await db.execute(
+            select(func.count()).select_from(AuditLog).where(
+                AuditLog.user_id == user.id,
+                AuditLog.action == "job.submit_link",
+                AuditLog.created_at >= cutoff,
+            )
+        )).scalar() or 0
+    except Exception:
+        recent_count = 0
+    if recent_count >= _SUBMIT_LINK_RATE_LIMIT_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit: at most {_SUBMIT_LINK_RATE_LIMIT_PER_HOUR} "
+                "link submissions per hour."
+            ),
+        )
+
+    # 3. Run the sync ingest pipeline in a worker thread so the event
+    #    loop stays free during the ATS HTTP call + DB writes.
+    import asyncio
+    outcome = await asyncio.to_thread(
+        _do_manual_ingest_sync,
+        parsed.platform,
+        parsed.slug,
+        parsed.external_id,
+        body.url,
+        user.id,
+    )
+
+    if outcome.get("outcome") == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail="Job posting is no longer listed on the ATS.",
+        )
+    if outcome.get("outcome") == "no_fetcher":
+        raise HTTPException(
+            status_code=500,
+            detail=f"No fetcher registered for platform '{parsed.platform}'.",
+        )
+
+    is_new = outcome.get("outcome") == "created"
+
+    # 4. Audit every call — including idempotent re-submissions — so ops
+    #    can reconstruct who imported what and detect abuse. The same
+    #    table feeds the rate-limit check above.
+    await log_action(
+        db, user,
+        action="job.submit_link",
+        resource="job",
+        request=request,
+        metadata={
+            "url": body.url,
+            "platform": parsed.platform,
+            "slug": parsed.slug,
+            "external_id": parsed.external_id,
+            "is_new": is_new,
+            "job_id": outcome.get("id"),
+        },
+    )
+
+    return SubmitJobLinkResponse(
+        id=outcome["id"],
+        title=outcome["title"],
+        company_name=outcome["company_name"],
+        platform=outcome["platform"],
+        status=outcome["status"],
+        url=outcome["url"],
+        is_new=is_new,
+    )

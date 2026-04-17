@@ -10,6 +10,10 @@ from app.fetchers.base import BaseFetcher
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api.lever.co/v0/postings/{slug}"
+# Single-posting endpoint for paste-link ingestion — Lever responds
+# to `/v0/postings/{slug}/{posting_id}` with the same object shape
+# as a list element, so `_normalize` works unchanged.
+API_URL_SINGLE = "https://api.lever.co/v0/postings/{slug}/{external_id}"
 
 
 class LeverFetcher(BaseFetcher):
@@ -38,6 +42,27 @@ class LeverFetcher(BaseFetcher):
             return []
 
         return [self._normalize(posting, slug) for posting in data]
+
+    def fetch_one(self, slug: str, external_id: str) -> Optional[dict]:
+        """Fetch a single Lever posting via the per-posting endpoint."""
+        client = self._get_client()
+        url = API_URL_SINGLE.format(slug=slug, external_id=external_id)
+        try:
+            resp = client.get(url)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.info(
+                "Lever single-posting %s/%s returned %s",
+                slug, external_id, exc.response.status_code,
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.warning("Lever single-posting %s/%s request failed: %s", slug, external_id, exc)
+            return None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        return self._normalize(data, slug)
 
     def _normalize(self, raw: dict[str, Any], slug: str) -> dict:
         categories = raw.get("categories", {}) or {}

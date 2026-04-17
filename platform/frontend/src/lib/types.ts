@@ -627,6 +627,7 @@ export interface AnswerBookEntry {
 // Applications
 export type ApplicationStatus = "prepared" | "submitted" | "applied" | "interview" | "offer" | "rejected" | "withdrawn";
 export type ApplyMethod = "api_submit" | "manual_copy" | "career_page";
+export type ApplicationSubmissionSource = "manual_prepare" | "review_queue";
 
 export interface Application {
   id: string;
@@ -643,6 +644,35 @@ export interface Application {
   submitted_at: string | null;
   created_at: string;
   notes: string;
+  // Feature C — provenance + top-level snapshot score. Full snapshot
+  // (resume text + components) is only on GET /applications/{id}.
+  submission_source?: ApplicationSubmissionSource;
+  applied_resume_score_overall?: number | null;
+}
+
+// Full application detail — shape of GET /applications/{id}. Adds the
+// apply-time snapshot columns introduced for Feature C.
+export interface ApplicationDetail {
+  id: string;
+  job: { id: string; title: string; company_name: string; platform: string; url: string };
+  resume: { id: string; label: string };
+  status: ApplicationStatus;
+  apply_method: ApplyMethod;
+  prepared_answers: unknown[];
+  submitted_at: string | null;
+  applied_at: string | null;
+  platform_response: unknown;
+  notes: string;
+  created_at: string;
+  submission_source: ApplicationSubmissionSource;
+  applied_resume_text: string | null;
+  applied_resume_score_snapshot: {
+    overall: number;
+    keyword: number;
+    role_match: number;
+    format: number;
+  } | null;
+  ai_customization_log_id: string | null;
 }
 
 export interface ApplicationStats {

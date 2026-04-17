@@ -515,6 +515,16 @@ async def list_applications(
             "submitted_at": app.submitted_at.isoformat() if app.submitted_at else None,
             "created_at": app.created_at.isoformat(),
             "notes": app.notes,
+            # Feature C — expose provenance + top-level score on the list
+            # view. Not including `applied_resume_text` here on purpose;
+            # the text blob can be ~20KB and a 25-row list shouldn't ship
+            # half a megabyte. Callers who want the full snapshot fetch
+            # the single-application endpoint.
+            "submission_source": app.submission_source,
+            "applied_resume_score_overall": (
+                (app.applied_resume_score_snapshot or {}).get("overall")
+                if app.applied_resume_score_snapshot else None
+            ),
         })
 
     total_pages = (total + page_size - 1) // page_size if total > 0 else 1
@@ -693,6 +703,16 @@ async def get_application(
         "platform_response": app.platform_response,
         "notes": app.notes,
         "created_at": app.created_at.isoformat(),
+        # Feature C — apply-time snapshot. `applied_resume_text` can be
+        # large (~20KB), so callers that just need the score / source
+        # should read the list endpoint instead. Nullable for legacy
+        # rows that predate the snapshot columns.
+        "submission_source": app.submission_source,
+        "applied_resume_text": app.applied_resume_text,
+        "applied_resume_score_snapshot": app.applied_resume_score_snapshot,
+        "ai_customization_log_id": (
+            str(app.ai_customization_log_id) if app.ai_customization_log_id else None
+        ),
     }
 
 

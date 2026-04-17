@@ -16,6 +16,7 @@ import type {
   TrendDataPoint,
   FunnelStep,
   PaginatedResponse,
+  ReviewQueueResponse,
   JobFilters,
   BulkActionPayload,
   ReviewPayload,
@@ -223,9 +224,31 @@ export async function bulkAction(payload: BulkActionPayload): Promise<void> {
   });
 }
 
+// Feature A — manual job link submission. Paste an ATS URL, server
+// parses the hostname, fetches the single posting, and runs it through
+// the same scoring/classification pipeline the scanners use. Returns
+// the upserted job with `is_new` telling the UI whether it was a brand-
+// new import or an idempotent re-submission.
+export interface SubmitJobLinkResult {
+  id: string;
+  title: string;
+  company_name: string;
+  platform: string;
+  is_new: boolean;
+  status: string;
+  url: string;
+}
+
+export async function submitJobLink(url: string): Promise<SubmitJobLinkResult> {
+  return request<SubmitJobLinkResult>("/jobs/submit-link", {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  });
+}
+
 // Review Queue
-export async function getReviewQueue(): Promise<PaginatedResponse<Job>> {
-  return request<PaginatedResponse<Job>>("/jobs/review-queue");
+export async function getReviewQueue(): Promise<ReviewQueueResponse> {
+  return request<ReviewQueueResponse>("/jobs/review-queue");
 }
 
 export async function submitReview(
@@ -233,6 +256,35 @@ export async function submitReview(
   payload: ReviewPayload
 ): Promise<Review> {
   return request<Review>("/reviews", {
+    method: "POST",
+    body: JSON.stringify({ job_id: jobId, ...payload }),
+  });
+}
+
+// Feature C — Applied action from the review queue. Atomically:
+//   * upserts an Application with status="applied" + snapshot columns
+//   * flips Job.status to "accepted"
+//   * creates/updates the company pipeline row
+// Returns the Application id so the UI can link to the detail page.
+export interface ApplyFromReviewPayload {
+  notes?: string;
+  resume_id?: string;
+  customized_resume_text?: string;
+  ai_customization_log_id?: string;
+}
+
+export interface ApplyFromReviewResult {
+  application_id: string;
+  job_id: string;
+  status: "applied";
+  application_is_new: boolean;
+}
+
+export async function applyFromReview(
+  jobId: string,
+  payload: ApplyFromReviewPayload = {},
+): Promise<ApplyFromReviewResult> {
+  return request<ApplyFromReviewResult>("/reviews/apply", {
     method: "POST",
     body: JSON.stringify({ job_id: jobId, ...payload }),
   });

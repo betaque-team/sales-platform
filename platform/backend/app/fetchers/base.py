@@ -42,6 +42,28 @@ class BaseFetcher(ABC):
             location_raw, remote_scope, department, raw_json
         """
 
+    def fetch_one(self, slug: str, external_id: str) -> Optional[dict]:
+        """Fetch a single job by its (slug, external_id) pair.
+
+        Used by ``POST /jobs/submit-link`` (Feature A — manual link
+        submission) so a pasted URL resolves to exactly one upsertable
+        job dict without paging through an entire board.
+
+        Default implementation: call :meth:`fetch` and filter. Cheap
+        and safe for small boards (Lever, Ashby, Recruitee), but
+        expensive on large Greenhouse boards where a single-job API
+        endpoint exists — concrete fetchers with such an endpoint
+        override this method to avoid the full-board round-trip.
+
+        Returns the normalized job dict or ``None`` if no posting
+        with ``external_id`` is live on the board. The caller
+        translates ``None`` into HTTP 404 "job no longer listed".
+        """
+        for job in self.fetch(slug):
+            if str(job.get("external_id", "")) == str(external_id):
+                return job
+        return None
+
     def _normalize(self, raw: dict, slug: str) -> dict:
         """Override in subclass to normalize a raw API response to the standard format."""
         raise NotImplementedError

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Search, Filter, CheckSquare, X, Send, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Search, Filter, CheckSquare, X, Send, ArrowUp, ArrowDown, ArrowUpDown, Link as LinkIcon } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -9,6 +9,7 @@ import { ScoreBar } from "@/components/ScoreBar";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
+import { SubmitLinkModal } from "@/components/SubmitLinkModal";
 import {
   Table,
   TableHeader,
@@ -245,6 +246,9 @@ export function JobsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   // Regression finding 34: ref guards against infinite URL ↔ state loops
   const syncingFromUrl = useRef(false);
+
+  // Feature A — Submit Job Link modal open/closed state.
+  const [submitLinkOpen, setSubmitLinkOpen] = useState(false);
 
   const [filters, setFilters] = useState<JobFilters>(() =>
     buildInitialFilters(searchParams)
@@ -672,7 +676,20 @@ export function JobsPage() {
             {data && filters.role_cluster === "relevant" ? ` · ${formatCount(data.total)} jobs found` : ""}
           </p>
         </div>
+        {/* Feature A — submit-link modal trigger. Pasting an ATS URL runs
+            it through the normal scoring/classification pipeline and is
+            idempotent by external_id. */}
+        <Button variant="secondary" size="md" onClick={() => setSubmitLinkOpen(true)}>
+          <LinkIcon className="h-4 w-4" />
+          Submit link
+        </Button>
       </div>
+
+      <SubmitLinkModal
+        open={submitLinkOpen}
+        onClose={() => setSubmitLinkOpen(false)}
+        onOpenJob={(jobId) => navigate(`/jobs/${jobId}`)}
+      />
 
       {/* F222: surfaces /jobs failures with a Retry button. */}
       <BackendErrorBanner queries={[jobsQ, activeResumeQ]} />

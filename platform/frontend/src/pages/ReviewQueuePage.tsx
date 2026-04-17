@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   XCircle,
   SkipForward,
+  Send,
   ExternalLink,
   ChevronLeft,
   ChevronRight,
@@ -17,7 +18,7 @@ import { Button } from "@/components/Button";
 import { Badge } from "@/components/Badge";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
-import { getReviewQueue, submitReview } from "@/lib/api";
+import { getReviewQueue, submitReview, applyFromReview } from "@/lib/api";
 import type { Job, ReviewPayload } from "@/lib/types";
 import { QueryBoundary } from "@/components/QueryBoundary";
 
@@ -44,6 +45,7 @@ export function ReviewQueuePage() {
   });
   const { data: queueData } = queueQ;
   const queue: Job[] = queueData?.items ?? [];
+  const stats = queueData?.stats;
 
   const reviewMutation = useMutation({
     mutationFn: ({ jobId, payload, decision: _d }: { jobId: string; payload: ReviewPayload; decision: string }) =>
@@ -66,6 +68,23 @@ export function ReviewQueuePage() {
     },
   });
 
+  // Feature C — Applied action. Calls POST /reviews/apply which
+  // atomically creates the Application + Review + Pipeline rows and
+  // flips Job.status to accepted. On success we drop out of the queue
+  // (same clamp logic as Accept) and invalidate the applications list
+  // so the Applications page shows the new row without a hard refresh.
+  const applyMutation = useMutation({
+    mutationFn: (jobId: string) => applyFromReview(jobId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["review", "queue"] });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+      setComment("");
+      setSelectedTags([]);
+      setCurrentIndex((idx) => Math.min(idx, Math.max(0, queue.length - 2)));
+    },
+  });
+
   const currentJob = queue[currentIndex] ?? queue[0];
 
   const handleReview = useCallback(
@@ -85,6 +104,11 @@ export function ReviewQueuePage() {
     [currentJob, selectedTags, comment, reviewMutation],
   );
 
+  const handleApplied = useCallback(() => {
+    if (!currentJob) return;
+    applyMutation.mutate(currentJob.id);
+  }, [currentJob, applyMutation]);
+
   // Regression finding 51: keyboard shortcuts for the review-queue-of-one
   // workflow. Guarded when focus is inside an input/textarea so typing a
   // comment doesn't accidentally fire an action.
@@ -96,6 +120,11 @@ export function ReviewQueuePage() {
       switch (e.key.toLowerCase()) {
         case "a":
           handleReview("accept");
+          break;
+        case "p":
+          // Feature C — Applied shortcut. "A" is taken by Accept, so
+          // Applied gets the next best letter (P for aPplied).
+          handleApplied();
           break;
         case "r":
           handleReview("reject");
@@ -121,7 +150,7 @@ export function ReviewQueuePage() {
           break;
       }
     },
-    [currentIndex, queue.length, handleReview],
+    [currentIndex, queue.length, handleReview, handleApplied],
   );
 
   useEffect(() => {
@@ -170,9 +199,25 @@ export function ReviewQueuePage() {
           <p className="mt-1 text-sm text-gray-500">
             {queue.length} jobs awaiting review
             <span className="ml-2 text-xs text-gray-400">
-              Keys: A accept · R reject · S skip · J/K navigate
+              Keys: A accept · P applied · R reject · S skip · J/K navigate
             </span>
           </p>
+          {stats && (stats.total ?? 0) > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <span className="rounded-full bg-primary-50 px-2.5 py-0.5 text-xs font-medium text-primary-700 ring-1 ring-primary-200">
+                {stats.today} today
+              </span>
+              <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">
+                {stats.yesterday} yesterday
+              </span>
+              <span className="rounded-full bg-gray-50 px-2.5 py-0.5 text-xs font-medium text-gray-500 ring-1 ring-gray-200">
+                {stats.older} older
+              </span>
+              <span className="ml-1 text-xs text-gray-400">
+                ordered by recency · team-wide best resume fit · relevance
+              </span>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-500">
           <span>
@@ -231,6 +276,12 @@ export function ReviewQueuePage() {
               <span className="text-xs text-gray-500">Relevance:</span>
               <ScoreBar score={currentJob.relevance_score} />
             </div>
+            {typeof currentJob.max_resume_score === "number" && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">Best resume fit:</span>
+                <ScoreBar score={currentJob.max_resume_score} />
+              </div>
+            )}
             {currentJob.role_cluster && <Badge variant="primary">{currentJob.role_cluster}</Badge>}
             {currentJob.geography_bucket && (
               <Badge variant="info">
@@ -366,6 +417,19 @@ export function ReviewQueuePage() {
                 >
                   <CheckCircle2 className="h-4 w-4" />
                   Accept
+                </Button>
+                {/* Feature C — Applied implies Accept + creates an
+                    Application row with apply-time snapshot. Placed
+                    as the rightmost action since it's the most
+                    committed step in the review workflow. */}
+                <Button
+                  variant="primary"
+                  size="md"
+                  onClick={handleApplied}
+                  loading={applyMutation.isPending}
+                >
+                  <Send className="h-4 w-4" />
+                  Applied
                 </Button>
               </div>
             </div>
