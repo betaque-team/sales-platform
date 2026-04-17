@@ -397,6 +397,40 @@ jobs:
             *)  echo "::warning::Unexpected backend status $STATUS — not failing the deploy but investigate";;
           esac
 
+      # F234 post-mortem: deploy.yml piped ANTHROPIC_API_KEY to ci-deploy.sh
+      # on stdin line 2, but the VM script only read line 1 (the GHCR token).
+      # The line-2 bytes fell into the void on connection close, every deploy
+      # ran green, and all three AI features were dead in prod for weeks.
+      # The post-deploy assertion below catches this drift on day 1: if the
+      # GitHub Secret is non-empty but the running backend reports
+      # ai_configured=false, fail the deploy loudly instead of silently
+      # leaving prod in a half-rolled state.
+      - name: Verify ANTHROPIC_API_KEY reached the backend
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Skip the assertion if the Secret is intentionally unset (some
+          # forks deploy without AI features). We only fail on the
+          # asymmetric case: Secret IS set, backend reports it ISN'T.
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::notice::ANTHROPIC_API_KEY Secret is unset — skipping ai_configured assertion."
+            exit 0
+          fi
+          # /api/health is public (auth-free) and exposes the boolean
+          # `ai_configured` without leaking the key value/prefix/length.
+          # F234 added it specifically as a CI assertion target.
+          BODY="$(curl -sL --max-time 10 "${{ env.PROD_URL }}/api/health" || echo '')"
+          if echo "$BODY" | grep -q '"ai_configured": *true'; then
+            echo "✓ Backend reports ANTHROPIC_API_KEY is configured."
+            exit 0
+          fi
+          if echo "$BODY" | grep -q '"ai_configured": *false'; then
+            echo "::error::F234 SILENT HALF-ROLLOUT — GitHub Secret ANTHROPIC_API_KEY is set but backend reports ai_configured=false."
+            echo "::error::Likely cause: ci-deploy.sh on the VM didn't persist the key to .env. Verify the VM-side script matches platform/scripts/ci-deploy.sh and includes persist_anthropic_key_from_stdin."
+            exit 1
+          fi
+          echo "::warning::Could not parse ai_configured from /api/health response — soft-passing. Body excerpt: ${BODY:0:200}"
+
       - name: Verification summary
         if: always()
         run: |

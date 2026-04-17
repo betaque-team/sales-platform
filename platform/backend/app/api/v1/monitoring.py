@@ -155,9 +155,22 @@ async def get_system_health(
     # --- Uptime ---
     uptime_seconds = int(time.time() - _BOOT_TIME)
 
+    # F234: top-level `ai_configured` flag so admins see at a glance
+    # whether the ANTHROPIC_API_KEY env var made it into the running
+    # container. Pre-fix, the only signal was hitting an AI endpoint
+    # and reading "Contact an administrator" — that sent the wrong
+    # support cycle (admins assumed the GitHub Secret was unset, when
+    # really the deploy script wasn't persisting it). Now the
+    # MonitoringPage can render a red badge when this is False even
+    # though the deploy reported success.
+    from app.config import settings
+    raw_key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
+    ai_configured = bool(raw_key.strip())
+
     return {
         "timestamp": now.isoformat(),
         "uptime_seconds": uptime_seconds,
+        "ai_configured": ai_configured,
         "database": {
             "healthy": db_healthy,
             "size_bytes": db_size_bytes,
