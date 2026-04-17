@@ -449,6 +449,21 @@ async def salary_insights(
 
 @router.get("/timing")
 async def timing_intelligence(
+    # Regression finding 232: `/timing` previously declared zero query
+    # params, so `?days=7`, `?days=abc`, `?junk=value` all returned the
+    # same 2094-byte aggregate body. Declaring `days` here gives FastAPI
+    # an attachment point to 422 garbage values at parse time and lets
+    # the response echo back the requested window so callers can detect
+    # silent-drop. The SQL queries below use a parameterized window
+    # rather than the prior hardcoded `INTERVAL '90 days'`, so a caller
+    # asking for `?days=7` actually narrows the time-range. Apply-
+    # window math (median/p75 over accepted reviews) keeps its 90-day
+    # heuristic floor — narrower windows under-sample the >30-review
+    # threshold needed for the data-driven path (F65). `role_cluster`
+    # is tracked as a follow-up; current SQL aggregates across all
+    # clusters and adding the filter requires a join restructure
+    # outside this round's scope.
+    days: int = Query(90, ge=1, le=365),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -484,28 +499,40 @@ async def timing_intelligence(
         )
     """
 
-    dow_result = await db.execute(text(f"""
-        SELECT EXTRACT(DOW FROM posted_at) AS dow, COUNT(*) AS cnt
-        FROM jobs
-        WHERE posted_at IS NOT NULL
-          AND posted_at >= NOW() - INTERVAL '90 days'
-          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
-          {_SEED_RUN_EXCLUSION}
-        GROUP BY dow ORDER BY dow
-    """))
+    # F232: parameterize the day-of-week / hour-of-day windows with the
+    # request-level `days` value. The apply-window math (median/p75
+    # over accepted reviews) keeps the 90-day floor below because it
+    # under-samples on narrow windows. `make_interval(days => :days)`
+    # is the safe param form — string-format would risk SQL injection,
+    # but the int-only Query bound already makes that impossible.
+    dow_result = await db.execute(
+        text(f"""
+            SELECT EXTRACT(DOW FROM posted_at) AS dow, COUNT(*) AS cnt
+            FROM jobs
+            WHERE posted_at IS NOT NULL
+              AND posted_at >= NOW() - make_interval(days => :days)
+              AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
+              {_SEED_RUN_EXCLUSION}
+            GROUP BY dow ORDER BY dow
+        """),
+        {"days": days},
+    )
     days_of_week = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     posting_by_day = [{"day": days_of_week[int(r[0])], "count": r[1]} for r in dow_result]
 
     # Jobs posted by hour — same rationale as above.
-    hour_result = await db.execute(text(f"""
-        SELECT EXTRACT(HOUR FROM posted_at) AS hr, COUNT(*) AS cnt
-        FROM jobs
-        WHERE posted_at IS NOT NULL
-          AND posted_at >= NOW() - INTERVAL '90 days'
-          AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
-          {_SEED_RUN_EXCLUSION}
-        GROUP BY hr ORDER BY hr
-    """))
+    hour_result = await db.execute(
+        text(f"""
+            SELECT EXTRACT(HOUR FROM posted_at) AS hr, COUNT(*) AS cnt
+            FROM jobs
+            WHERE posted_at IS NOT NULL
+              AND posted_at >= NOW() - make_interval(days => :days)
+              AND ABS(EXTRACT(EPOCH FROM (posted_at - first_seen_at))) > 60
+              {_SEED_RUN_EXCLUSION}
+            GROUP BY hr ORDER BY hr
+        """),
+        {"days": days},
+    )
     posting_by_hour = [{"hour": int(r[0]), "count": r[1]} for r in hour_result]
 
     # Job freshness distribution (how old are accepted jobs since first seen)
@@ -632,6 +659,11 @@ async def timing_intelligence(
     peak_hour_str = ", ".join([f"{h['hour']}:00" for h in peak_hours]) if peak_hours else "9:00-11:00"
 
     return {
+        # F232: echo the requested window so callers can detect silent-
+        # drop by comparing what they sent vs what the server received.
+        # FastAPI's 422 already covers typos (`?days=abc`); this covers
+        # the "caller forgot to pass it" case.
+        "days": days,
         "posting_by_day": posting_by_day,
         "posting_by_hour": posting_by_hour,
         "freshness_distribution": freshness,
@@ -769,6 +801,17 @@ async def networking_suggestions(
     # same as the old truthy-string check now that `""` is ruled
     # out).
     job_id: UUID | None = None,
+    # Regression finding 232: `limit` was hardcoded at 10 (per-job)
+    # and 20 (general) — no way for a UI to ask for more or for an
+    # admin sweep to ask for less. Bounded `Query(20, ge=1, le=100)`
+    # gives FastAPI a 422 attachment point for garbage values
+    # (`?limit=abc`, `?limit=-1`, `?limit=99999` all rejected at
+    # parse time) and lets callers narrow or widen the result set
+    # within sane bounds. Default kept at 20 to match the previous
+    # general-mode default; the per-job branch caps at min(limit, 60)
+    # since the inner query already pulls 60 candidates max to leave
+    # headroom for the corrupted-contact filter.
+    limit: int = Query(20, ge=1, le=100),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -821,7 +864,9 @@ async def networking_suggestions(
             })
 
         suggestions.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return {"suggestions": suggestions[:10], "job_title": job.title, "company_id": str(job.company_id)}
+        # F232: honor the requested limit (capped at 60 — same ceiling
+        # as the inner query's pre-filter pull).
+        return {"suggestions": suggestions[:min(limit, 60)], "job_title": job.title, "company_id": str(job.company_id)}
 
     else:
         # General: top contacts across accepted/pipeline companies
@@ -864,9 +909,11 @@ async def networking_suggestions(
                 "suggested_approach": "Reach out via LinkedIn first, then email" if r.linkedin_url else "Send a personalized email",
             })
 
-        # Trim to the 20 the UI expects — we pulled up to 60 candidates
-        # above so the corrupted-row filter couldn't starve the list.
-        return {"suggestions": suggestions[:20]}
+        # F232: honor the requested limit (default 20, max 60). We
+        # pulled up to 60 candidates from SQL so the corrupted-row
+        # filter couldn't starve the list, then trim to whatever the
+        # caller asked for.
+        return {"suggestions": suggestions[:min(limit, 60)]}
 
 
 def _contact_relevance(contact: CompanyContact, job: Job) -> dict:

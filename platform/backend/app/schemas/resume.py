@@ -21,7 +21,7 @@ comparison, and never log a 500 stack trace.
 
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # Target-score bounds mirror the original manual guard in
@@ -40,7 +40,18 @@ class CustomizeRequest(BaseModel):
     Pydantic enforces UUID parsing on `job_id` and an int-coercible
     value in [60, 95] on `target_score`. String `"85"` is accepted
     (Pydantic coerces); string `"high"` is rejected with a 422.
+
+    Regression finding 231: `extra="forbid"` is the missing parity fix
+    — `CoverLetterRequest` and `InterviewPrepRequest` got it via F157
+    but this schema was overlooked. Without it, a frontend typo on
+    `target_score` (e.g. `targetScore`, `target_Score`, `targetscore`)
+    silently falls back to the default 85, producing a different
+    customization than the user asked for with no error to surface
+    the mismatch. Forbidding unknowns turns silent drops into a clean
+    422 with the offending field name in the detail.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     job_id: UUID
     target_score: int = Field(
