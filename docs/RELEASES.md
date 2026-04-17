@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · affbd5a · sha-affbd5a
+Merge feat/workday-fetcher-and-ats-fingerprint: 7k enterprise jobs + discovery foundation
+
+
 ## 2026-04-17 · eaf6191 · sha-eaf6191
 Merge fix/refresh-fetcher-probe-slugs: fetcher survey + live-API tests
 
