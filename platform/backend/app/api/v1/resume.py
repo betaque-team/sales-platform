@@ -148,6 +148,26 @@ async def upload_resume(
         user.active_resume_id = resume.id
         db.add(user)
 
+    # Auto-populate the answer book from the resume's extracted text.
+    # Previously users had to click an "Import from Resume" button on the
+    # Answer Book page after uploading — a redundant step since the data
+    # already exists in `text_content` at this point. The helper is
+    # idempotent (checks for existing keys before inserting), so a user
+    # with multiple resumes uploading a second one just fills in any
+    # fields the first resume didn't have. Failures here don't block the
+    # upload — if the extractor regex hits a weird edge case, we'd rather
+    # the user still get a ready resume than see their upload 500.
+    try:
+        from app.api.v1.answer_book import auto_populate_from_resume
+        await auto_populate_from_resume(db, user.id, resume)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "auto_populate_from_resume failed for resume_id=%s",
+            resume.id,
+            exc_info=True,
+        )
+
     await db.commit()
     await db.refresh(resume)
 
@@ -198,6 +218,25 @@ async def switch_active_resume(
 
     user.active_resume_id = resume.id
     db.add(user)
+
+    # Backfill answer-book fields from the newly-active resume. A user
+    # with multiple resumes may have uploaded one with an email and a
+    # different one with a LinkedIn URL — switching pulls whichever
+    # fields the new one has that the old one didn't. Idempotent by
+    # question_key, so switching back-and-forth never creates dupes.
+    # Errors here don't block the switch — the worst case is the new
+    # resume's personal-info fields just don't auto-populate.
+    try:
+        from app.api.v1.answer_book import auto_populate_from_resume
+        await auto_populate_from_resume(db, user.id, resume)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "auto_populate_from_resume failed on switch for resume_id=%s",
+            resume.id,
+            exc_info=True,
+        )
+
     await db.commit()
 
     return {

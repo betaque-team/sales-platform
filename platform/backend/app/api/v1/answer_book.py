@@ -39,6 +39,111 @@ def normalize_question_key(question: str) -> str:
     return key[:255]
 
 
+def _extract_fields_from_resume_text(text: str) -> list[tuple[str, str, str]]:
+    """Regex-extract personal-info fields from resume text.
+
+    Returns a list of ``(question, answer, category)`` tuples for the
+    fields found in ``text``. Pure function — no DB or session touch —
+    so it's safe to unit-test and to call from sync or async contexts.
+
+    Kept here rather than in ``utils/`` because the question wording
+    must match what the persist step uses when it computes
+    ``question_key`` — co-locating avoids the drift bug where the
+    extractor and the persist step disagree on key normalization.
+    """
+    extracted: list[tuple[str, str, str]] = []
+
+    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text)
+    if email_match:
+        extracted.append(("What is your email address?", email_match.group(), "personal_info"))
+
+    phone_match = re.search(r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
+    if phone_match:
+        extracted.append(("What is your phone number?", phone_match.group(), "personal_info"))
+
+    linkedin_match = re.search(r"linkedin\.com/in/[\w-]+", text, re.IGNORECASE)
+    if linkedin_match:
+        extracted.append(("What is your LinkedIn URL?", f"https://{linkedin_match.group()}", "personal_info"))
+
+    github_match = re.search(r"github\.com/[\w-]+", text, re.IGNORECASE)
+    if github_match:
+        extracted.append(("What is your GitHub URL?", f"https://{github_match.group()}", "personal_info"))
+
+    return extracted
+
+
+async def auto_populate_from_resume(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    resume: Resume,
+) -> dict:
+    """Extract personal-info fields from a resume and upsert them as
+    base (non-resume-scoped) answer-book entries for ``user_id``.
+
+    Called from three places:
+      * Resume upload (``resume.py:upload_resume``) — auto-populates on
+        first ingest so a brand-new user doesn't have to click a button.
+      * Resume switch (``resume.py:switch_active_resume``) — backfills
+        any fields the previous active resume didn't have.
+      * The optional ``/answer-book/import-from-resume`` manual endpoint
+        (kept for callers that pre-date the auto-hook).
+
+    Upsert semantics: for each extracted field, we check for an existing
+    base entry (resume_id IS NULL) with the same normalized question_key.
+    Presence wins — we don't overwrite an answer the user may have edited
+    by hand. Only adds rows; never updates or deletes. Idempotent: calling
+    twice on the same resume is a no-op on the second call.
+
+    Does NOT commit — the caller's transaction owns the commit lifecycle,
+    so auto-populate can share a commit with resume upload. ``db.flush()``
+    happens inside to propagate FK constraints, but the final commit is
+    the caller's.
+
+    Returns ``{"extracted": N, "added": M, "fields": [...]}`` — matches
+    the legacy manual-endpoint response shape so existing callers don't
+    break.
+    """
+    text = resume.text_content or ""
+    extracted = _extract_fields_from_resume_text(text)
+
+    added = 0
+    for question, answer, category in extracted:
+        question_key = normalize_question_key(question)
+        existing = (await db.execute(
+            select(AnswerBookEntry).where(
+                AnswerBookEntry.user_id == user_id,
+                AnswerBookEntry.question_key == question_key,
+                AnswerBookEntry.resume_id.is_(None),
+            )
+        )).scalar_one_or_none()
+
+        if existing:
+            continue
+
+        db.add(AnswerBookEntry(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            resume_id=None,
+            category=category,
+            question=question,
+            question_key=question_key,
+            answer=answer,
+            source="resume_extracted",
+        ))
+        added += 1
+
+    # Flush so any immediate reads in the same transaction see the new
+    # rows. Commit is intentionally the caller's responsibility.
+    if added:
+        await db.flush()
+
+    return {
+        "extracted": len(extracted),
+        "added": added,
+        "fields": [{"question": q, "answer": a} for q, a, _ in extracted],
+    }
+
+
 @router.get("")
 async def get_answer_book(
     category: str | None = None,
@@ -249,67 +354,29 @@ async def import_from_resume(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Extract personal info from resume text into answer book base entries."""
+    """Extract personal info from resume text into answer book base entries.
+
+    Note: answer-book population now runs automatically on resume upload
+    and on active-resume switch (see ``resume.py``), so the frontend's
+    "Import from Resume" button is gone and this endpoint is rarely
+    called directly. Retained for:
+
+    * Re-populating after the user deleted one of the extracted entries
+      and wants it back from the resume.
+    * Scripting / API clients that pre-date the auto-hook.
+
+    The logic itself lives in :func:`auto_populate_from_resume` so the
+    extraction + upsert rules are identical across all three call sites.
+    """
     resume = (await db.execute(
         select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id)
     )).scalar_one_or_none()
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
 
-    text = resume.text_content or ""
-    extracted = []
-
-    # Extract email
-    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text)
-    if email_match:
-        extracted.append(("What is your email address?", email_match.group(), "personal_info"))
-
-    # Extract phone
-    phone_match = re.search(r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
-    if phone_match:
-        extracted.append(("What is your phone number?", phone_match.group(), "personal_info"))
-
-    # Extract LinkedIn
-    linkedin_match = re.search(r"linkedin\.com/in/[\w-]+", text, re.IGNORECASE)
-    if linkedin_match:
-        extracted.append(("What is your LinkedIn URL?", f"https://{linkedin_match.group()}", "personal_info"))
-
-    # Extract GitHub
-    github_match = re.search(r"github\.com/[\w-]+", text, re.IGNORECASE)
-    if github_match:
-        extracted.append(("What is your GitHub URL?", f"https://{github_match.group()}", "personal_info"))
-
-    added = 0
-    for question, answer, category in extracted:
-        question_key = normalize_question_key(question)
-        existing = (await db.execute(
-            select(AnswerBookEntry).where(
-                AnswerBookEntry.user_id == user.id,
-                AnswerBookEntry.question_key == question_key,
-                AnswerBookEntry.resume_id.is_(None),
-            )
-        )).scalar_one_or_none()
-
-        if not existing:
-            db.add(AnswerBookEntry(
-                id=uuid.uuid4(),
-                user_id=user.id,
-                resume_id=None,
-                category=category,
-                question=question,
-                question_key=question_key,
-                answer=answer,
-                source="resume_extracted",
-            ))
-            added += 1
-
+    result = await auto_populate_from_resume(db, user.id, resume)
     await db.commit()
-
-    return {
-        "extracted": len(extracted),
-        "added": added,
-        "fields": [{"question": q, "answer": a} for q, a, _ in extracted],
-    }
+    return result
 
 
 @router.get("/coverage")
