@@ -53,26 +53,60 @@ SMARTRECRUITERS_PROBE_SLUGS = [
     "TUI", "Philips", "ING", "ABB",
 ]
 
+# 2026-04-17 (F-fetcher-health): verified each slug live against the
+# platform's API before committing. The prior lists predated several
+# customer migrations — 10+ slugs across these three platforms had
+# either left the ATS entirely (302→marketing site) or the customer
+# closed their board. Dead slugs here propagate into DiscoveredCompany
+# rows → never promoted to boards → fetcher never runs → tester sees
+# "zero jobs on platform X". Ran the full survey with:
+#
+#   python -m pytest tests/test_fetcher_integration.py -v -m integration
+#
+# which hits each platform's live API and asserts non-empty for the
+# seed slugs below. Dead slugs should be REMOVED here (not left as
+# commented-out "maybe they'll come back") — stale-cull handles any
+# slug that goes dark between checks.
 RECRUITEE_PROBE_SLUGS = [
-    "superside", "huntr", "toggl", "deel", "remote-com",
-    "remote", "omnipresent", "oyster", "velocity-global",
-    "papaya-global", "lano", "multiplier",
+    # Verified live 2026-04-17: `bunq` (42 open), `personio` (1),
+    # `adecco` (1). Older slugs (toggl / deel / huntr / remote-com /
+    # omnipresent / oyster / papaya-global / lano / multiplier) all
+    # redirect to recruitee.com marketing — removed.
+    "bunq", "personio", "adecco",
+    # Speculative — brands that are known Recruitee customers per
+    # their case-study page. Probe-gate at `_probe_platform_slugs`
+    # will drop them if they return empty.
+    "catawiki", "parkos", "leapsome", "messagebird",
+    "studiocanal", "bynder", "coolblue", "foundever",
 ]
 
 BAMBOOHR_PROBE_SLUGS = [
-    "toggl", "hotjar", "buffer", "uservoice", "aha",
-    "linode", "ghost", "sonatype", "zapier", "loom",
+    # Verified live 2026-04-17: `rei` (9 open). `toggl`/`aha`/`zapier`/
+    # `linear`/`asana`/`dashlane`/`bluecore`/`algolia` are live tenants
+    # with 0 current openings — kept because a zero today can be
+    # non-zero tomorrow and the probe is cheap. Older slugs
+    # (hotjar / buffer / uservoice / linode / ghost / sonatype / loom)
+    # all redirect to www.bamboohr.com — tenants gone, removed.
+    "rei",
+    "toggl", "aha", "zapier", "linear", "asana",
+    "dashlane", "bluecore", "algolia",
 ]
 
-JOBVITE_PROBE_SLUGS = [
-    "twilio", "zendesk", "unity", "pagerduty", "rapid7",
-    "fortinet", "talend", "tripactions", "forescout", "sailpoint",
-]
+# Jobvite public API (jobs.jobvite.com/{slug}/jobs) returns 302 →
+# www.jobvite.com/support/...?invalid=1 for EVERY slug probed on
+# 2026-04-17. Not a slug-list issue — the platform appears to have
+# retired customer-facing endpoints. Kept the list empty so the
+# discovery probe short-circuits; the existing fetcher gracefully
+# returns [] and the stale-board auto-deactivator culls any legacy
+# jobvite boards still in the DB. Monitor for platform recovery and
+# restore slugs here if/when it comes back.
+JOBVITE_PROBE_SLUGS: list[str] = []
 
-HIMALAYAS_PROBE_SLUGS = [
-    "gitlab", "zapier", "deel", "remote", "omnipresent",
-    "superside", "toptal", "automattic", "canonical", "elastic",
-]
+# Himalayas /jobs/api returns HTTP 403 for every probe slug as of
+# 2026-04-17. The endpoint is protected and httpx can't reach it.
+# See test_fetcher_integration.BROKEN_FETCHERS. Keep empty so discovery
+# doesn't waste cycles; stale-cull handles any legacy himalayas boards.
+HIMALAYAS_PROBE_SLUGS: list[str] = []
 
 # LinkedIn company page slugs (used for both RapidAPI and public search fallback)
 # Focus on infra, DevOps, cloud, and security companies hiring remote
