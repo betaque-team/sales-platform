@@ -571,6 +571,55 @@ export interface AIUsage {
   };
 }
 
+// F237: AI Intelligence — per-user insights + admin product insights.
+// Both share the {title, body, severity, category, action_link?} shape
+// so the same renderer can show either; only the source endpoint and
+// admin-controls differ.
+export interface InsightItem {
+  title: string;
+  body: string;
+  severity: "info" | "tip" | "warning" | "low" | "medium" | "high";
+  category: string;
+  action_link?: string;
+}
+
+export interface UserInsightBundle {
+  generation_id: string;
+  generated_at: string;
+  insights: InsightItem[];
+  model_version: string;
+  prompt_version: string;
+}
+
+export interface UserInsightsResponse {
+  latest: UserInsightBundle | null;
+  history: UserInsightBundle[];
+}
+
+export interface ProductInsight {
+  id: string;
+  generation_id: string;
+  title: string;
+  body: string;
+  category: string;
+  severity: "low" | "medium" | "high";
+  generated_at: string;
+  actioned_at: string | null;
+  actioned_status: "actioned" | "dismissed" | "duplicate" | null;
+  actioned_note: string | null;
+  actioned_by: string | null;
+  model_version: string;
+  prompt_version: string;
+}
+
+export interface ProductInsightsResponse {
+  items: ProductInsight[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface CompanyScore {
   company_id: string;
   company_name: string;

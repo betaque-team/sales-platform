@@ -122,6 +122,17 @@ if SCAN_MODE == "aggressive":
             "schedule": crontab(minute=0, hour=3, day_of_week="*"),  # Nightly 3am UTC
             "kwargs": {"label": "nightly"},
         },
+        # F237: AI Intelligence twice-weekly run. Mon + Thu at 04:00
+        # UTC, sequenced AFTER `rescore_jobs` (3:00),
+        # `auto_target_companies` (3:15), and `rescore_active_resumes`
+        # (3:30) so per-user insights see the freshest scoring +
+        # target-company classifications. One Celery task produces
+        # both the per-user and product insights in one run; cost
+        # ~$2.60/run = ~$22/month at 50 active users.
+        "weekly_ai_insights": {
+            "task": "app.workers.tasks.ai_insights_task.run_weekly_insights",
+            "schedule": crontab(minute=0, hour=4, day_of_week="mon,thu"),
+        },
     }
 else:
     # Normal: scan twice daily, career pages every 4h, discovery weekly
@@ -184,5 +195,12 @@ else:
             "task": "app.workers.tasks.backup_task.run_backup",
             "schedule": crontab(minute=0, hour=3),  # Nightly 3am UTC
             "kwargs": {"label": "nightly"},
+        },
+        # F237: AI Intelligence — same schedule as aggressive mode.
+        # Insight cadence is independent of scan cadence; we don't
+        # want product insights computed less often in normal mode.
+        "weekly_ai_insights": {
+            "task": "app.workers.tasks.ai_insights_task.run_weekly_insights",
+            "schedule": crontab(minute=0, hour=4, day_of_week="mon,thu"),
         },
     }

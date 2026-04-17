@@ -23,6 +23,7 @@ import {
   MessageSquarePlus,
   HelpCircle,
   Brain,
+  Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { logout } from "@/lib/api";
@@ -41,6 +42,10 @@ const navigation = [
   { name: "Pipeline", to: "/pipeline", icon: GitBranch },
   { name: "Analytics", to: "/analytics", icon: BarChart3 },
   { name: "Intelligence", to: "/intelligence", icon: Brain },
+  // F237: AI Intelligence — per-user weekly insights + admin product
+  // insights queue. Sparkles icon to distinguish from the (data-driven,
+  // non-AI) Intelligence page.
+  { name: "Insights", to: "/insights", icon: Sparkles },
   { name: "Feedback", to: "/feedback", icon: MessageSquarePlus },
   { name: "Docs", to: "/docs", icon: HelpCircle },
   { name: "Settings", to: "/settings", icon: Settings },
