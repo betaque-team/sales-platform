@@ -114,7 +114,8 @@ persist_anthropic_key_from_stdin() {
   # and silently no-op'd on every deploy with the WARN message
   # `.env not found at /opt/sales-platform/platform/.env`. Fix: use
   # the same path that `set_release_tag` and the rest of this script
-  # already use (cd "$APP_DIR" && touch .env).
+  # already use (cd "$APP_DIR" && touch .env). Conflict resolved by
+  # taking HEAD — feat branch had the wrong pre-hotfix path.
   local env_file="$APP_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
     log "WARN: .env not found at $env_file — refusing to persist ANTHROPIC_API_KEY"

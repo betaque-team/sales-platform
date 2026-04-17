@@ -166,6 +166,8 @@ async def get_system_health(
     #
     # `get_settings()` factory not module-level `settings` — same
     # access pattern every other router uses (see resume.py:704).
+    # Conflict resolved by taking HEAD; feat branch had the pre-F234
+    # broken import that 500'd at runtime.
     from app.config import get_settings
     settings = get_settings()
     raw_key = (

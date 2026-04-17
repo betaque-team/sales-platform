@@ -132,9 +132,11 @@ async def health():
     # factory), not a module-level `settings`. Calling the factory is
     # the canonical access pattern across the codebase (every router
     # does `from app.config import get_settings; settings =
-    # get_settings()`). The earlier Round 63 commit imported a
+    # get_settings()`). An earlier Round 63 commit imported a
     # non-existent name and 500'd `/api/health` on every request —
     # which broke the deploy verify step + every load-balancer probe.
+    # This is the corrected version (Merge conflict resolved by taking
+    # HEAD wholesale — the feat branch had the pre-hotfix broken code).
     from app.config import get_settings
     settings = get_settings()
     raw_key = (
