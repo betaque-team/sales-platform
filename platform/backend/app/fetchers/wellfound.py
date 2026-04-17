@@ -3,6 +3,18 @@
 Wellfound does not have a public REST API like Greenhouse/Lever.
 This fetcher uses their internal GraphQL API that powers the public job pages.
 The slug is the company's Wellfound handle.
+
+STATUS 2026-04-17 — Cloudflare blocks httpx. Every POST to
+``https://wellfound.com/graphql`` returns HTTP 403 regardless of
+User-Agent + Accept headers (confirmed against 4 live Wellfound
+companies). The Cloudflare Bot Management response is a hard block,
+not a challenge we can pass with a retry.
+
+To restore coverage we'd need either (a) a Playwright/Browserbase
+headless-browser runner that handles the JS challenge, or (b) a
+Wellfound partner API key. Both are out of scope for this plain-httpx
+fetcher. The code below handles 403 cleanly by logging and returning
+``[]`` — the platform fails closed, not noisy.
 """
 
 from __future__ import annotations

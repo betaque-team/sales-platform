@@ -2,6 +2,27 @@
 
 Jobvite exposes a JSON API at: https://jobs.jobvite.com/company-slug/jobs
 with ?availableTo=External&category=&location=&page=N
+
+STATUS 2026-04-17 — platform-level break. A full survey of 14
+known-historical Jobvite customers (unity, pagerduty, sailpoint,
+forescout, tripactions, talend, twilio, zendesk, fortinet, rapid7,
+lyft, pinterest, docusign, paloaltonetworks) showed **every slug** 302s
+to ``https://www.jobvite.com/support/job-seeker-support/?invalid=1``.
+The public ``jobs.jobvite.com/{slug}/jobs`` path has been retired /
+customers migrated off. The ``careers.jobvite.com/{slug}`` alternate
+redirects to ``app.jobvite.com/admin/info/404.html`` for every slug.
+
+Consequence: this fetcher correctly returns ``[]`` for every call —
+there's no bug to fix at the code level, the upstream is gone. The
+``JOBVITE_PROBE_SLUGS`` list in ``discovery_task.py`` is now empty so
+discovery won't waste cycles trying. Legacy ``CompanyATSBoard`` rows
+with ``platform="jobvite"`` remain in the DB; the stale-board
+auto-deactivator (``scan_task._STALE_BOARD_ZERO_SCAN_THRESHOLD``)
+flips them to ``is_active=False`` after 5 clean-empty scans, so the
+cleanup is self-healing — no migration needed.
+
+If Jobvite re-exposes a public endpoint, restore the probe list and
+verify with ``tests/test_fetcher_integration.py``.
 """
 
 from __future__ import annotations
