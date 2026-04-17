@@ -30,6 +30,65 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+# v0.1.1 — 2026-04-17
+
+Version bump consolidating everything merged to `main` since v0.1.0
+(initial tag). Backend + frontend both move to `0.1.1`. No breaking
+changes, no migrations beyond those already shipped with the features
+below; safe to roll forward.
+
+**What users see:**
+
+* **Cover letters now use Claude Opus 4.7** (was Sonnet 4). Noticeably
+  more specific to the job posting and the candidate's résumé phrasing;
+  fewer generic "excited to leverage" openings. Resume customization
+  and interview prep stay on Sonnet 4 — higher volume, different
+  quality needs.
+* **Answer Book fills itself from your résumé.** Uploading or switching
+  an active résumé auto-populates email, phone, LinkedIn, GitHub into
+  the Answer Book. The "Import from Resume" button is gone — it was
+  redundant.
+* **LinkedIn is now a credential slot.** Each résumé can carry its
+  LinkedIn profile URL (and optional login) alongside the ATS creds.
+* **Submit link, review queue priority, Applied action** — three sales
+  workflow features from earlier this sprint are now live end-to-end.
+  Paste an ATS URL to import one job; review queue orders by
+  today/yesterday/older + best resume fit; `P` on the review card marks
+  a job applied with an immutable snapshot of the resume text used.
+* **Skill Gaps page reflects current demand** instead of the oldest 500
+  jobs in the DB. Missing-skills list now shifts with real hiring
+  signal.
+* **`GET /api/v1/companies/enrichment-coverage`** (admin) — visibility
+  into how many companies have been enriched, what's pending, and top
+  recent errors.
+
+**What changed under the hood (operator-facing):**
+
+* **Discovery actually adds boards now.** Beat schedule calls
+  `discover_and_add_boards` instead of `run_discovery`; previously
+  `discovered_companies` filled up but nothing got promoted to
+  `company_ats_boards`. Cap of 200 promotions per run prevents a
+  Greenhouse-sitemap flood; stale-cull backstops any dead slugs.
+* **Enrichment covers the long tail.** The batch task no longer hard-
+  filters on `is_target=True` — any company with an active ATS board
+  is eligible, with `is_target DESC` preserving priority ordering.
+  786-company corpus converges in ~16h at the default 50/hour cap.
+* **ANTHROPIC_API_KEY leak defense.** `SecretStr` at the config layer,
+  log-scrubbing filter at the root logger + Celery worker, extended
+  pre-commit regex, `.env` auto-write from GH Secrets via ci-deploy.sh
+  stdin contract.
+* **Backend CI unblocked.** Alembic migrations pass on a fresh DB
+  (dropped the FK to the un-migrated `ai_customization_logs` table);
+  new `test_smoke.py` runs 10 regression guards on SecretStr + the
+  scrubber.
+* **F228 fix.** `GET /applications` accepts `?submission_source=`
+  (the column was response-only before).
+* **Release log automation.** `docs/RELEASES.md` now gets a stub
+  entry prepended on every green deploy (see `append-release` job
+  in `.github/workflows/deploy.yml`).
+
+**Fix rollup below** (chronological, newest first).
+
 ## 2026-04-17 · b5d6f70 · sha-b5d6f70
 Merge Round 2: discovery auto-add + enrichment long-tail coverage
 

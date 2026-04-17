@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Job Aggregator Platform",
-    version="0.1.0",
+    version="0.1.1",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -170,7 +170,7 @@ async def health():
 
     return {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "ai_configured": bool(raw_key.strip()),
         "vm_metrics_available": vm_available,
         "vm_metrics_age_seconds": vm_age_s,
