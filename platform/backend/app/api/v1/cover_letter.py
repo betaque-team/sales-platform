@@ -57,6 +57,17 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
             detail="AI cover letter generation is not configured on this server. Contact an administrator.",
         )
 
+    # F236: per-user daily rate limit. Pre-fix, this endpoint had ZERO
+    # limiting — a single user could generate thousands of letters per
+    # day, blowing through the Anthropic budget. Now capped at 30/day
+    # (default, configurable via `ai_cover_letter_daily_limit_per_user`).
+    # 429 fires before the Claude call so the quota check is cheap;
+    # the Retry-After header gives clients a useful "wait until midnight
+    # UTC" value. Failed calls don't count (F170/F203 pattern).
+    from app.utils.ai_rate_limit import check_ai_quota, log_ai_call
+    from app.models.resume import AI_FEATURE_COVER_LETTER
+    await check_ai_quota(db, user, AI_FEATURE_COVER_LETTER)
+
     # Load job + description
     job = (await db.execute(select(Job).where(Job.id == body.job_id))).scalar_one_or_none()
     if not job:
@@ -97,12 +108,32 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
         tone=body.tone,
     )
 
+    # F236: log every call (success and failure) so the audit trail
+    # is complete. `success=False` rows DON'T count toward the daily
+    # quota — `count_ai_calls_today` filters them out — so an upstream
+    # 502 doesn't burn the user's budget. Token counts pulled from the
+    # `_cover_letter` worker's result block when present.
+    is_success = not bool(result.get("error"))
+    await log_ai_call(
+        db, user, AI_FEATURE_COVER_LETTER,
+        job_id=job.id,
+        input_tokens=int(result.get("input_tokens", 0) or 0),
+        output_tokens=int(result.get("output_tokens", 0) or 0),
+        success=is_success,
+    )
+
     if result.get("error"):
         # Regression finding 183: upstream Claude API errors (rate
         # limit, upstream outage, safety refusal) map to 502 Bad
         # Gateway rather than 500, so dashboards can distinguish
         # "our bug" (500) from "upstream flaked" (502).
         raise HTTPException(502, result.get("customization_notes", "Upstream AI generation failed"))
+
+    # F236: surface the post-call usage block so the frontend can update
+    # its "X of Y left today" badge without a second round-trip to
+    # /ai/usage. Same shape as the AI Tools panel reads.
+    from app.utils.ai_rate_limit import usage_snapshot
+    usage = await usage_snapshot(db, user)
 
     return {
         "cover_letter": result["cover_letter"],
@@ -111,4 +142,5 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
         "tone": result["tone"],
         "job_title": job.title,
         "company_name": company_name,
+        "usage": usage["features"][AI_FEATURE_COVER_LETTER],
     }

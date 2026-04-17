@@ -48,6 +48,7 @@ import {
   getRelevantContacts,
   generateCoverLetter,
   generateInterviewPrep,
+  getAIUsage,
 } from "@/lib/api";
 import { ApplicationQuestionsPreview } from "@/components/ApplicationQuestionsPreview";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
@@ -1206,13 +1207,59 @@ function AIToolsPanel({ jobId }: { jobId: string; jobTitle: string; companyName:
   const [coverLetterTone, setCoverLetterTone] = useState("professional");
   const [copiedCL, setCopiedCL] = useState(false);
 
+  // F236: per-feature usage badge so users see "X of Y left today"
+  // before they click the button. Pulls from the cross-cutting
+  // `/api/v1/ai/usage` endpoint and refetches on every successful
+  // mutation so the count stays in sync without a page reload.
+  // `staleTime: 0` keeps the badge truthful — caching here would let
+  // the user see "5 left" then 429 on the click because the cached
+  // value is stale.
+  const aiUsageQuery = useQuery({
+    queryKey: ["ai-usage"],
+    queryFn: getAIUsage,
+    staleTime: 0,
+  });
+
   const coverLetterMutation = useMutation<CoverLetterResult>({
     mutationFn: () => generateCoverLetter(jobId, coverLetterTone),
+    onSuccess: () => aiUsageQuery.refetch(),
+    onError: () => aiUsageQuery.refetch(),  // 429 + 502 also refresh
   });
 
   const interviewPrepMutation = useMutation<InterviewPrepResult>({
     mutationFn: () => generateInterviewPrep(jobId),
+    onSuccess: () => aiUsageQuery.refetch(),
+    onError: () => aiUsageQuery.refetch(),
   });
+
+  // F236: small reusable badge that renders "X of Y left today" inline
+  // on the feature button. Returns null when the usage hasn't loaded
+  // yet (don't flash "loading…" on the button itself; the text would
+  // jump as the query resolves).
+  const UsageBadge = ({
+    used,
+    limit,
+  }: {
+    used: number;
+    limit: number;
+  }) => {
+    const remaining = Math.max(0, limit - used);
+    const exhausted = remaining === 0;
+    return (
+      <span
+        className={`ml-2 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+          exhausted
+            ? "bg-red-100 text-red-700"
+            : remaining <= Math.max(2, Math.floor(limit * 0.2))
+              ? "bg-amber-100 text-amber-700"
+              : "bg-gray-100 text-gray-600"
+        }`}
+        title={`Used ${used} of ${limit} today. Resets midnight UTC.`}
+      >
+        {exhausted ? "0 left today" : `${remaining}/${limit} left`}
+      </span>
+    );
+  };
 
   const handleCopyCL = () => {
     if (coverLetterMutation.data?.cover_letter) {
@@ -1243,7 +1290,15 @@ function AIToolsPanel({ jobId }: { jobId: string; jobTitle: string; companyName:
           <div className="flex items-center gap-2">
             <PenTool className="h-4 w-4 text-primary-600" />
             <div>
-              <div className="text-sm font-medium text-gray-900">Cover Letter</div>
+              <div className="text-sm font-medium text-gray-900 flex items-center">
+                Cover Letter
+                {aiUsageQuery.data && (
+                  <UsageBadge
+                    used={aiUsageQuery.data.features.cover_letter.used}
+                    limit={aiUsageQuery.data.features.cover_letter.limit}
+                  />
+                )}
+              </div>
               <div className="text-xs text-gray-500">AI-tailored for this job</div>
             </div>
           </div>
@@ -1338,7 +1393,15 @@ function AIToolsPanel({ jobId }: { jobId: string; jobTitle: string; companyName:
           <div className="flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-purple-600" />
             <div>
-              <div className="text-sm font-medium text-gray-900">Interview Prep</div>
+              <div className="text-sm font-medium text-gray-900 flex items-center">
+                Interview Prep
+                {aiUsageQuery.data && (
+                  <UsageBadge
+                    used={aiUsageQuery.data.features.interview_prep.used}
+                    limit={aiUsageQuery.data.features.interview_prep.limit}
+                  />
+                )}
+              </div>
               <div className="text-xs text-gray-500">Questions, talking points, research</div>
             </div>
           </div>
