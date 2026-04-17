@@ -109,4 +109,29 @@ app.include_router(api_router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    """Public health check — auth-free, suitable for CI assertions and
+    load-balancer probes.
+
+    Regression finding 234: previously returned only `{status, version}`
+    with no signal on whether AI features were configured. Deploy.yml
+    couldn't tell from outside the VM whether the ANTHROPIC_API_KEY
+    Secret had actually reached the running container — every deploy
+    ran green even when the key never made it to .env. The
+    `ai_configured` boolean here gives the post-deploy verify job a
+    cheap auth-free assertion target: if the GitHub Secret is set but
+    this returns False, the deploy script silently dropped the key
+    (the old line-2 stdin bug fixed in ci-deploy.sh::persist_anthropic_
+    key_from_stdin).
+
+    Importantly we expose only the BOOLEAN state, never the key
+    value/prefix/length — `bool(key)` doesn't leak anything an attacker
+    couldn't already infer by hitting an AI endpoint and reading the
+    503 vs 200 response.
+    """
+    from app.config import settings
+    raw_key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "ai_configured": bool(raw_key.strip()),
+    }
