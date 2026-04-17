@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · 15cfda7 · sha-15cfda7
+Merge feat/manual-link-review-priority-applied: ship platform/scripts/ci-deploy.sh + close out F231-F234
+
+
 ## 2026-04-17 · fea6b84 · sha-fea6b84
 Merge release/v0.1.1
 
