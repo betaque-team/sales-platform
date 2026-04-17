@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Database,
@@ -18,6 +18,8 @@ import {
   Play,
   Loader2,
   Zap,
+  Brain,
+  Download,
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
@@ -31,7 +33,11 @@ import {
   triggerPlatformScanByName,
   triggerDiscoveryScan,
   getScanTaskStatus,
+  getTrainingDataStats,
+  trainingDataExportUrl,
+  backfillRoleClassify,
 } from "@/lib/api";
+import type { TrainingTaskType } from "@/lib/types";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -564,9 +570,177 @@ export function MonitoringPage() {
         </Card>
       </div>
 
+      {/* F238: training-data capture pipeline — admin-only tile */}
+      <TrainingDataTile />
+
       <div className="text-center text-xs text-gray-400">
         Last updated: {new Date(dataUpdatedAt).toLocaleString()} · Auto-refreshes every 30s
       </div>
     </div>
+  );
+}
+
+
+// ── Training-data tile (F238) ────────────────────────────────────────────
+
+/**
+ * F238: per-task counts + JSONL export buttons + the role_classify
+ * backfill trigger. Lives at the bottom of MonitoringPage so it
+ * doesn't push the operational health metrics off-screen.
+ *
+ * Cookie-auth + admin-only on the backend, so a plain anchor click
+ * downloads the file without us having to fetch into JS memory and
+ * bounce through Blob/URL.createObjectURL.
+ */
+function TrainingDataTile() {
+  const statsQuery = useQuery({
+    queryKey: ["training-data-stats"],
+    queryFn: getTrainingDataStats,
+    staleTime: 60_000,
+  });
+
+  const queryClient = useQueryClient();
+  const backfillMutation = useMutation({
+    mutationFn: () => backfillRoleClassify(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["training-data-stats"] }),
+  });
+
+  const taskLabels: Record<string, string> = {
+    resume_match: "Resume ↔ Job match",
+    role_classify: "Role classification",
+    cover_letter_quality: "Cover letter (AI)",
+    interview_prep_quality: "Interview prep (AI)",
+    customize_quality: "Resume customize (AI)",
+    search_intent: "Search intent",
+  };
+
+  return (
+    <Card>
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Brain className="h-5 w-5 text-purple-500" />
+          <h3 className="text-base font-semibold text-gray-900">
+            Training data capture
+          </h3>
+        </div>
+        <span className="text-xs text-gray-500">
+          {statsQuery.data
+            ? `${statsQuery.data.total_rows.toLocaleString()} rows total`
+            : ""}
+        </span>
+      </div>
+
+      {statsQuery.isLoading ? (
+        <div className="py-6 text-center text-sm text-gray-500">
+          Loading training-data stats…
+        </div>
+      ) : !statsQuery.data ? (
+        <div className="py-6 text-center text-sm text-gray-500">
+          Unable to load stats. Check the backend.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-left text-xs uppercase text-gray-500">
+                <th className="py-2 font-medium">Task</th>
+                <th className="py-2 font-medium text-right">Rows</th>
+                <th className="py-2 font-medium">Class balance (top 4)</th>
+                <th className="py-2 font-medium text-right">Export</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(statsQuery.data.by_task_type).map(([taskType, stats]) => {
+                const classes = Object.entries(stats.by_class)
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 4);
+                const totalForBalance = classes.reduce((s, [, c]) => s + c, 0) || 1;
+                return (
+                  <tr
+                    key={taskType}
+                    className="border-b border-gray-100 hover:bg-gray-50"
+                  >
+                    <td className="py-2 text-gray-900">
+                      {taskLabels[taskType] || taskType}
+                    </td>
+                    <td className="py-2 text-right tabular-nums text-gray-700">
+                      {stats.total.toLocaleString()}
+                    </td>
+                    <td className="py-2 text-xs text-gray-600">
+                      {classes.length === 0 ? (
+                        <span className="text-gray-400">—</span>
+                      ) : (
+                        classes.map(([cls, n]) => (
+                          <span
+                            key={cls}
+                            className="mr-2 inline-flex items-center gap-1"
+                          >
+                            <span className="font-medium text-gray-700">
+                              {cls}
+                            </span>
+                            <span className="text-gray-500">
+                              {Math.round((n / totalForBalance) * 100)}%
+                            </span>
+                          </span>
+                        ))
+                      )}
+                    </td>
+                    <td className="py-2 text-right">
+                      {stats.total > 0 ? (
+                        <a
+                          href={trainingDataExportUrl(taskType as TrainingTaskType, {
+                            limit: 50_000,
+                          })}
+                          className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                          title="Stream JSONL — opens in browser, save with Ctrl/Cmd+S"
+                        >
+                          <Download className="h-3 w-3" />
+                          JSONL
+                        </a>
+                      ) : (
+                        <span className="text-xs text-gray-400">no rows</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center justify-between gap-2 border-t border-gray-100 pt-3 text-xs text-gray-500">
+        <div>
+          {statsQuery.data?.earliest && (
+            <>
+              First row: {new Date(statsQuery.data.earliest).toLocaleString()}
+              {" · "}
+              Last row:{" "}
+              {statsQuery.data.latest
+                ? new Date(statsQuery.data.latest).toLocaleString()
+                : "—"}
+            </>
+          )}
+        </div>
+        <button
+          onClick={() => backfillMutation.mutate()}
+          disabled={backfillMutation.isPending}
+          className="rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          title="Walks existing Jobs and writes one role_classify row per job (idempotent — skips Jobs already in the table)."
+        >
+          {backfillMutation.isPending
+            ? "Backfilling…"
+            : "Backfill role_classify from existing Jobs"}
+        </button>
+      </div>
+      {backfillMutation.data && (
+        <div className="mt-2 rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-700">
+          Backfill complete. Scanned {backfillMutation.data.scanned}, wrote{" "}
+          {backfillMutation.data.written}, skipped{" "}
+          {backfillMutation.data.skipped_already_present} (already
+          present).
+        </div>
+      )}
+    </Card>
   );
 }

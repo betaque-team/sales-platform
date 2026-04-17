@@ -52,6 +52,8 @@ import type {
   AIUsage,
   UserInsightsResponse,
   ProductInsightsResponse,
+  TrainingDataStats,
+  TrainingTaskType,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -653,6 +655,34 @@ export async function actionProductInsight(
 
 export async function triggerInsightsRun(): Promise<{ task_id: string; status: string }> {
   return request("/insights/run", { method: "POST" });
+}
+
+// F238: training-data capture admin endpoints.
+export async function getTrainingDataStats(): Promise<TrainingDataStats> {
+  return request<TrainingDataStats>("/training-data/stats");
+}
+
+// Returns the URL for the admin to download — uses the cookie-auth
+// session that's already attached to the browser, so a plain anchor
+// click streams the JSONL with full credentials. Cleaner than
+// fetching the body into JS memory.
+export function trainingDataExportUrl(
+  taskType: TrainingTaskType,
+  opts?: { since?: string; limit?: number },
+): string {
+  const params = new URLSearchParams({ task_type: taskType });
+  if (opts?.since) params.set("since", opts.since);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  return `/api/v1/training-data/export?${params.toString()}`;
+}
+
+export async function backfillRoleClassify(maxJobs?: number): Promise<{
+  scanned: number;
+  written: number;
+  skipped_already_present: number;
+}> {
+  const q = maxJobs ? `?max_jobs=${maxJobs}` : "";
+  return request(`/training-data/backfill-role-classify${q}`, { method: "POST" });
 }
 
 // Company Scores

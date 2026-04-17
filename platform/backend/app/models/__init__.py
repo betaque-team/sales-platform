@@ -19,6 +19,7 @@ from app.models.feedback import Feedback
 from app.models.pipeline_stage import PipelineStage
 from app.models.audit_log import AuditLog
 from app.models.insight import UserInsight, ProductInsight
+from app.models.training_example import TrainingExample
 
 __all__ = [
     "User", "Company", "CompanyATSBoard", "Job", "JobDescription",
@@ -32,4 +33,5 @@ __all__ = [
     "PipelineStage",
     "AuditLog",
     "UserInsight", "ProductInsight",
+    "TrainingExample",
 ]
