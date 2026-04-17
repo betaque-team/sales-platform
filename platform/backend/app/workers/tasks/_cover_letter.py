@@ -154,8 +154,25 @@ Return your response in this exact format:
 ===NOTES===
 [Brief notes on customization choices and what to adjust before sending. Em-dashes are allowed in this NOTES section since it's metadata for the user, not the letter itself.]"""
 
+        # Cover letters benefit disproportionately from a stronger model:
+        # they're short (one shot, ~2k tokens out), voice-sensitive (the
+        # letter must sound like the candidate, not a template), and
+        # user-visible verbatim (unlike resume scoring or interview prep
+        # where the output feeds a downstream workflow). Opus 4.7 produces
+        # materially fewer "AI-ish" cover letters than Sonnet 4 on the
+        # same prompt — in user testing Sonnet would drift into platitudes
+        # ("I am excited to leverage my experience…") where Opus picks up
+        # the specific job-description cues and the candidate's résumé
+        # phrasing. Cost delta is ~3× per call, but cover letters are
+        # one-per-application and the same ai_daily_limit_per_user=10 cap
+        # applies — ceiling is single-digit dollars per user per month.
+        #
+        # Only cover-letter gets Opus. Resume customization (_ai_resume.py)
+        # and interview prep (_interview_prep.py) still use Sonnet 4 —
+        # they're called per-job too but at higher volume and their
+        # outputs aren't shipped verbatim to a recruiter's inbox.
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-7",
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )

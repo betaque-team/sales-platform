@@ -6,6 +6,10 @@ import type { PlatformCredential } from "@/lib/types";
 import { KeyRound, Plus, Trash2, Save, X, Check, AlertTriangle, Eye, EyeOff } from "lucide-react";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 
+// Keep in lockstep with backend `credentials.py::SUPPORTED_PLATFORMS`
+// and `schemas/credential.py::SUPPORTED_PLATFORM_LITERALS`.
+// `linkedin` holds the resume's LinkedIn profile URL (profile_url field);
+// email/password are optional — user may only care to attach the URL.
 const PLATFORM_LABELS: Record<string, string> = {
   greenhouse: "Greenhouse",
   lever: "Lever",
@@ -17,6 +21,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   jobvite: "Jobvite",
   wellfound: "Wellfound",
   himalayas: "Himalayas",
+  linkedin: "LinkedIn",
 };
 
 export function CredentialsPage() {

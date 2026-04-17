@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getAnswerBook, createAnswer, updateAnswer, deleteAnswer, importAnswersFromResume, getActiveResume, getAnswerBookCoverage } from "@/lib/api";
+import { getAnswerBook, createAnswer, updateAnswer, deleteAnswer, getActiveResume, getAnswerBookCoverage } from "@/lib/api";
 import type { AnswerCategory } from "@/lib/types";
-import { BookOpen, Plus, Trash2, Edit3, Save, X, Download } from "lucide-react";
+import { BookOpen, Plus, Trash2, Edit3, Save, X } from "lucide-react";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -69,13 +69,11 @@ export function AnswerBookPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["answer-book"] }),
   });
 
-  const importMutation = useMutation({
-    mutationFn: importAnswersFromResume,
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["answer-book"] });
-      alert(`Extracted ${data.extracted} fields, added ${data.added} new entries`);
-    },
-  });
+  // Note: answer-book auto-populates from the resume on upload + on
+  // active-resume switch (see backend `resume.py:upload_resume` /
+  // `switch_active_resume`). The manual "Import from Resume" button
+  // that used to live here was removed — the data is already there
+  // by the time the user gets to this page.
 
   const entries = data?.items ?? [];
   const categories = data?.categories ?? Object.keys(CATEGORY_LABELS);
@@ -96,16 +94,6 @@ export function AnswerBookPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {activeResume?.active_resume && (
-            <button
-              onClick={() => importMutation.mutate(activeResume.active_resume!.id)}
-              disabled={importMutation.isPending}
-              className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            >
-              <Download className="h-4 w-4" />
-              Import from Resume
-            </button>
-          )}
           <button
             onClick={() => setShowAdd(true)}
             className="flex items-center gap-1.5 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-700"

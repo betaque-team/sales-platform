@@ -520,3 +520,98 @@ jobs:
           echo "| Expected bundle | \`${{ needs.build.outputs.frontend_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Live bundle | \`${{ steps.live.outputs.live_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| URL | ${{ env.PROD_URL }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Append a stub entry to docs/RELEASES.md on every successful deploy.
+  #
+  # This runs on the default branch only (push to main + verify succeeded)
+  # and commits directly back to main with [skip ci] so it doesn't loop.
+  # The stub is short on purpose — just enough machine data (sha / tag /
+  # UTC / commit subject) to locate the change. A human is expected to
+  # edit the stub with a user-facing one-liner when the release is
+  # notable; boring fixes are fine to leave as-is.
+  #
+  # The marker `<!-- RELEASES_LOG_START -->` in RELEASES.md is where new
+  # entries insert — we prepend (newest at top) rather than append, so
+  # the file reads top-down as the release feed.
+  # ---------------------------------------------------------------------------
+  append-release:
+    name: Append release log entry
+    runs-on: ubuntu-latest
+    needs: [build, deploy, verify]
+    # Only on merges to main, only when verify passed. workflow_dispatch
+    # runs (manual deploys) still append — operator intent is the same
+    # ("this went to prod"). Skip on any upstream failure so we don't
+    # log a release that didn't actually ship.
+    if: ${{ always() && needs.verify.result == 'success' && github.ref == 'refs/heads/main' }}
+    permissions:
+      # `contents: write` lets the workflow commit + push the updated
+      # RELEASES.md back to main. Scoped to this job only; the other
+      # jobs keep the default `contents: read`.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so we can read the commit subject. Depth 2
+          # would cover the single commit but fetch-depth: 0 is
+          # future-proof against wanting multi-commit annotations.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN for the push. Branch
+          # protection on main must allow the Actions bot OR the
+          # workflow will 403 on push — document this in
+          # docs/DEPLOYMENT_PROCESS.md if protection is added.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepend stub entry to docs/RELEASES.md
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          TAG="${{ needs.build.outputs.tag }}"
+          DATE_UTC="$(date -u +%Y-%m-%d)"
+          SUBJECT="$(git log -1 --pretty=%s '${{ github.sha }}')"
+          # Escape characters that would break the markdown or the sed
+          # replacement below. `|` is our sed delimiter; `\` must be
+          # literal; newlines must not appear in SUBJECT.
+          SUBJECT_ESCAPED=$(printf '%s' "$SUBJECT" | tr '\n' ' ' | sed 's/|/\\|/g')
+
+          STUB="## ${DATE_UTC} · ${SHORT_SHA} · ${TAG}
+          ${SUBJECT_ESCAPED}
+          "
+          # Prepend BELOW the start marker and BEFORE the first existing
+          # entry. Using awk rather than sed because multi-line insertion
+          # via sed is dialect-specific (GNU vs BSD).
+          awk -v stub="$STUB" '
+            /<!-- RELEASES_LOG_START -->/ {
+              print
+              print ""
+              print stub
+              inserted = 1
+              next
+            }
+            { print }
+          ' docs/RELEASES.md > docs/RELEASES.md.tmp
+
+          mv docs/RELEASES.md.tmp docs/RELEASES.md
+
+          echo "Prepended:"
+          echo "$STUB"
+
+      - name: Commit + push
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # No-op guard: if RELEASES.md didn't actually change (e.g. the
+          # marker was removed in a prior edit), don't create an empty
+          # commit. `git diff --quiet` exits 1 on diff, 0 on clean.
+          if git diff --quiet docs/RELEASES.md; then
+            echo "No change to RELEASES.md — skipping commit."
+            exit 0
+          fi
+
+          git add docs/RELEASES.md
+          # [skip ci] prevents the Deploy workflow from re-triggering
+          # on our own push — otherwise each deploy would loop once.
+          git commit -m "docs(releases): append ${{ needs.build.outputs.tag }} [skip ci]"
+          git push origin HEAD:main
