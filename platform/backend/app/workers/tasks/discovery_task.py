@@ -643,3 +643,179 @@ def discover_and_add_boards(self):
         # covers the slow-probe case; explicit release handles the
         # normal (successful / failed / retried) path.
         release_scan_lock("discover")
+
+
+@celery_app.task(
+    name="app.workers.tasks.discovery_task.fingerprint_existing_companies",
+    bind=True,
+    max_retries=1,
+)
+def fingerprint_existing_companies(self, limit: int = 50, only_unfingerprinted: bool = True):
+    """Reverse-discovery via ATS fingerprinting.
+
+    Walks existing ``Company`` rows that have a ``website`` set, fetches
+    each company's public careers page, and runs the ATS fingerprint
+    service (``app.services.ats_fingerprint.detect_ats_from_url``) to
+    identify which ATS(es) the company uses. Any ``(platform, slug)``
+    pair we don't already have gets added as a ``DiscoveredCompany``
+    row and picked up by the existing discovery promotion path.
+
+    Why this exists:
+    The hand-curated probe lists in this module go stale every few
+    months. The ATS customer-list pages (Lever /customers, Ashby
+    /customers, etc.) are JS-rendered and don't yield slugs to plain
+    httpx OR to headless Chromium (verified 2026-04-17 — Playwright
+    hit 403 on Wellfound's DataDome guard and parsed 0 slugs from
+    Lever /customers). This task flips the problem: instead of asking
+    each ATS for its customers, we ask each of OUR customers what ATS
+    they use. Works because most company careers pages are plain
+    httpx-fetchable (no Cloudflare/DataDome on individual company
+    sites, unlike on the aggregator sites).
+
+    **Known limitation:** detection requires the ATS URL to be present
+    in the *initial* HTML (pre-JS). Two categories of careers pages
+    don't match that:
+      * Fully client-side SPAs (Stripe stripe.com/jobs, NVIDIA's careers
+        page) — initial HTML contains zero ATS strings; the embed loads
+        only after JavaScript hydrates. Can't fingerprint.
+      * Pages that inline the ATS URL deep in a multi-MB ``__NEXT_DATA__``
+        blob past our ``max_html_bytes=6_000_000`` cap. Rare but real —
+        Ramp's page has Ashby URLs at the 3.4 MB mark; anything past 6 MB
+        is invisible to us.
+
+    Expect ~30-60% detection yield depending on how modern the target
+    companies' career sites are. That's still a win on a 1000-company
+    corpus — hundreds of new boards discovered without hand-curation.
+    Companies the fingerprinter misses still get scanned via their
+    existing (ATS-side discovery) path — nothing is regressed, we just
+    don't *gain* coverage on the SPAs.
+
+    Args:
+        limit: Max companies to fingerprint per task invocation. Default
+            50 is ~12-15 minutes of wall-time at ~15s per HTTP fetch
+            (the fingerprint service tries `/careers`, `/jobs`, `/`
+            in that order per domain). Scale up via celery beat or
+            explicit admin dispatches — don't crank to 1000 in one
+            shot; the Celery worker is single-threaded per task.
+        only_unfingerprinted: When True (default), skip companies whose
+            website already produced at least one DiscoveredCompany row
+            previously — avoids re-hitting the same domains every
+            schedule tick. Set False to re-fingerprint everything
+            (e.g. after the regex patterns change).
+
+    Returns dict with ``{scanned, new, existing_dedup, errors}``.
+    """
+    from app.services.ats_fingerprint import detect_ats_from_url
+
+    session = SyncSession()
+    try:
+        run = DiscoveryRun(
+            id=uuid.uuid4(),
+            source="fingerprint_existing",
+            status="running",
+        )
+        session.add(run)
+        session.flush()
+
+        # Build the candidate set. When `only_unfingerprinted`, we
+        # LEFT JOIN DiscoveredCompany on careers_url LIKE-matches of
+        # the company.website — crude but cheap, and the false-negative
+        # rate (company had a prior discovery via a different URL
+        # shape) is acceptable because we dedup at the (platform, slug)
+        # level below anyway.
+        q = select(Company).where(Company.website != "").order_by(Company.created_at.desc())
+        if only_unfingerprinted:
+            # Anti-join: companies whose website doesn't appear in
+            # any DiscoveredCompany.careers_url. Fast enough on ~1k
+            # rows; swap to a dedicated `last_fingerprinted_at`
+            # column if the corpus grows past ~50k.
+            subq = select(DiscoveredCompany.careers_url)
+            q = q.where(~Company.website.in_(subq))
+        q = q.limit(limit)
+        companies = session.execute(q).scalars().all()
+
+        # Pre-load all (platform, slug) pairs so we can dedup without
+        # a per-fingerprint DB round-trip.
+        existing_pairs = set(
+            (p, s)
+            for p, s in session.execute(
+                select(DiscoveredCompany.platform, DiscoveredCompany.slug)
+            ).all()
+        )
+
+        scanned = 0
+        new_count = 0
+        errors = 0
+        existing_dedup = 0
+
+        for company in companies:
+            scanned += 1
+            try:
+                # The fingerprint service tries `/careers`, `/jobs`, `/`
+                # sequentially per domain — see `detect_ats_for_domains`.
+                # We call `detect_ats_from_url` three times explicitly
+                # so one company's 404 on `/careers` doesn't burn the
+                # whole 15s timeout waiting for network-idle.
+                fps: list = []
+                for suffix in ("/careers", "/jobs", ""):
+                    target = company.website.rstrip("/") + suffix
+                    fps = detect_ats_from_url(target, timeout=15)
+                    if fps:
+                        break
+            except Exception as e:
+                errors += 1
+                logger.warning(
+                    "fingerprint failed for company %s (website=%s): %s",
+                    company.name, company.website, e,
+                )
+                continue
+
+            for fp in fps:
+                key = (fp.platform, fp.slug)
+                if key in existing_pairs:
+                    existing_dedup += 1
+                    continue
+                session.add(DiscoveredCompany(
+                    id=uuid.uuid4(),
+                    discovery_run_id=run.id,
+                    # Prefer the company's known name over the ATS slug
+                    # — slugs can be abbreviated/gibberish ("abc123"
+                    # style for some tenants), while `company.name` is
+                    # already human-reviewed.
+                    name=company.name or fp.slug.replace("-", " ").title(),
+                    platform=fp.platform,
+                    slug=fp.slug,
+                    careers_url=fp.careers_url,
+                    status="new",
+                    relevance_hint=(
+                        f"fingerprinted from {company.website} "
+                        f"(company_id={company.id})"
+                    ),
+                ))
+                existing_pairs.add(key)
+                new_count += 1
+
+        run.completed_at = datetime.now(timezone.utc)
+        run.companies_found = scanned
+        run.new_companies = new_count
+        run.status = "completed"
+        session.commit()
+
+        logger.info(
+            "fingerprint_existing_companies: scanned=%d, new=%d, dedup=%d, errors=%d",
+            scanned, new_count, existing_dedup, errors,
+        )
+        return {
+            "scanned": scanned,
+            "new": new_count,
+            "existing_dedup": existing_dedup,
+            "errors": errors,
+            "run_id": str(run.id),
+        }
+
+    except Exception as e:
+        logger.exception("fingerprint_existing_companies failed: %s", e)
+        session.rollback()
+        raise self.retry(exc=e, countdown=300)
+    finally:
+        session.close()
