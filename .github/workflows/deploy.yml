@@ -29,10 +29,14 @@
 #
 # Secrets required (scoped to Environment: production — see docs/DEPLOY_SETUP.md
 # for values; do not inline them here):
-#   DEPLOY_SSH_KEY  -- ed25519 private key matching the VM's authorized_keys
-#   DEPLOY_HOST     -- VM public IP
-#   DEPLOY_USER     -- VM deploy user (no sudo, docker group only)
-#   DEPLOY_HOSTKEY  -- `ssh-keyscan -t ed25519 <host>` output (pins host key)
+#   DEPLOY_SSH_KEY     -- ed25519 private key matching the VM's authorized_keys
+#   DEPLOY_HOST        -- VM public IP
+#   DEPLOY_USER        -- VM deploy user (no sudo, docker group only)
+#   DEPLOY_HOSTKEY     -- `ssh-keyscan -t ed25519 <host>` output (pins host key)
+#   ANTHROPIC_API_KEY  -- optional. Piped to ci-deploy.sh on stdin line 2 and
+#                         written to /opt/sales-platform/platform/.env. Unset =
+#                         empty line = "leave existing .env value alone" (so a
+#                         missing Secret never wipes a manually-provisioned key).
 # =============================================================================
 name: Deploy
 
@@ -265,19 +269,33 @@ jobs:
           fi
 
       - name: Trigger deploy on VM
-        # Pipe GITHUB_TOKEN to the VM over SSH stdin so the `deploy` user can
-        # `docker login ghcr.io` for a private-package pull. Token is scoped to
-        # this run (minted by GH), expires when the job finishes, and never
-        # touches disk on the VM beyond docker's own 600-mode config.
+        # Stdin contract for the `deploy` verb on ci-deploy.sh:
+        #   Line 1: GH_TOKEN           — for `docker login ghcr.io` (private pull)
+        #   Line 2: ANTHROPIC_API_KEY  — written to /opt/sales-platform/platform/.env
+        #                                by ci-deploy.sh. Empty string = leave the
+        #                                existing .env value alone (so an accidental
+        #                                un-set of the GH Secret doesn't wipe a
+        #                                manually-provisioned key).
+        #
+        # All values are minted/scoped to this run (GH_TOKEN) or come from
+        # Environment-scoped Secrets (ANTHROPIC_API_KEY, env: production).
+        # Nothing touches disk on the VM beyond ci-deploy.sh's controlled
+        # writes (.env at 600, docker config at 600).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          printf '%s\n' "$GH_TOKEN" | \
-            ssh -i ~/.ssh/deploy_key \
-                -o BatchMode=yes \
-                ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-                "deploy ${{ needs.build.outputs.tag }} $GH_ACTOR"
+          {
+            printf '%s\n' "$GH_TOKEN"
+            # `${VAR:-}` so an unset Secret expands to empty instead of
+            # failing `set -u`. Empty line 2 is the documented "no change"
+            # signal — see the contract comment above.
+            printf '%s\n' "${ANTHROPIC_API_KEY:-}"
+          } | ssh -i ~/.ssh/deploy_key \
+                  -o BatchMode=yes \
+                  ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+                  "deploy ${{ needs.build.outputs.tag }} $GH_ACTOR"
 
       - name: Fetch status
         if: always()
