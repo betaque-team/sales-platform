@@ -25,6 +25,23 @@ class Application(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    # Feature C — apply-time snapshot. Captures what was actually used
+    # at submit-time so the Applications page can show "what we sent"
+    # even after the underlying resume is edited or re-scored. Three
+    # columns, all nullable (legacy rows won't have snapshots):
+    #   * applied_resume_text — resume body used (raw or AI-customized).
+    #   * applied_resume_score_snapshot — frozen ResumeScore components.
+    #   * ai_customization_log_id — link to the Claude run, if any.
+    applied_resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applied_resume_score_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ai_customization_log_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ai_customization_logs.id", ondelete="SET NULL"), nullable=True
+    )
+    # Provenance — mirrors Job.submission_source (Feature A) so the
+    # Applications page can show how each app was created (`review_queue`
+    # = via /reviews/apply, `manual_prepare` = via /applications/prepare).
+    submission_source: Mapped[str] = mapped_column(String(30), default="manual_prepare", nullable=False)
+
     job: Mapped["Job"] = relationship()
     resume: Mapped["Resume"] = relationship()
 
