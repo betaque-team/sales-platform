@@ -89,7 +89,16 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/monitoring')"]
+      # F234-followup: previously hit /api/v1/monitoring which is
+      # admin-auth-gated and always returned 401 → urlopen raised
+      # HTTPError → docker marked the backend "unhealthy" forever
+      # (12+ failing streaks at deploy time). The container was
+      # still serving traffic fine, but the unhealthy flag blocked
+      # `--no-deps`-less restarts of dependent services. Switched
+      # to /api/health (public, returns 200) so the healthcheck
+      # actually verifies "is the FastAPI app responsive" without
+      # tripping on auth.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -175,6 +184,13 @@ services:
       - backend
     ports:
       - "80:80"
+      # F234-followup: Cloudflare tunnel (cloudflared) is configured
+      # in the zero-trust dashboard to forward to http://localhost:8080
+      # rather than :80. Without this loopback mapping, every nginx
+      # container restart leaves cloudflared spitting "connection
+      # refused" and the public URL 502s. Loopback-only because
+      # there's no reason to expose 8080 publicly.
+      - "127.0.0.1:8080:80"
       - "443:443"
     volumes:
       - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
