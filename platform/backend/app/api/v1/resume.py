@@ -903,6 +903,24 @@ async def customize_resume_for_job(
         success=succeeded,
     )
 
+    # F238: training-data capture for customize_quality. Side-effect.
+    if succeeded:
+        try:
+            from app.utils.training_capture import capture_customize_quality
+            await capture_customize_quality(
+                db,
+                user_id=user.id,
+                resume_text=resume.text_content,
+                job_title=job.title,
+                job_description=desc_text,
+                customized_text=ai_result.get("customized_text", ""),
+                target_score=target_score,
+                job_id=job.id,
+                model_version="claude-sonnet-4-20250514",
+            )
+        except Exception:
+            pass
+
     # F236: usage snapshot uses the same canonical helper that powers
     # /api/v1/ai/usage so the customize-only `used_today/daily_limit/
     # remaining` keys stay backwards-compatible while the new per-

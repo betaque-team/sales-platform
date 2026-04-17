@@ -27,9 +27,15 @@ async def submit_review(
     user: User = Depends(require_role("admin", "reviewer")),
     db: AsyncSession = Depends(get_db),
 ):
-    # Validate job exists
-    result = await db.execute(select(Job).where(Job.id == body.job_id))
-    job = result.scalar_one_or_none()
+    # Validate job exists. F238: eager-load `description` so the
+    # training-data capture below can read text_content without a
+    # lazy-load (async sessions don't auto-resolve relationships).
+    result = await db.execute(
+        select(Job)
+        .options(joinedload(Job.description))
+        .where(Job.id == body.job_id)
+    )
+    job = result.unique().scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -110,6 +116,43 @@ async def submit_review(
     # Dispatch feedback processing
     from app.workers.tasks.feedback_task import process_review_feedback_task
     process_review_feedback_task.delay(str(review.id))
+
+    # F238: training-data capture. One row per review event with
+    # (resume_text, JD, decision) — the cleanest labeled signal we
+    # have for a future "is this resume a good match for this job"
+    # model. Side-effect-only: if the capture fails, the review
+    # write still goes through (the helper logs + swallows). PII
+    # scrubbing on resume + JD is handled by the helper.
+    try:
+        from app.utils.training_capture import capture_resume_match
+        from app.models.resume import Resume
+        # Pull the reviewer's active resume text. If they have no
+        # active resume (admin spot-checking, freshly-archived
+        # resume), skip the capture — there's no labeled-input pair
+        # to record without it.
+        if user.active_resume_id:
+            r_row = (await db.execute(
+                select(Resume).where(Resume.id == user.active_resume_id)
+            )).scalar_one_or_none()
+            if r_row and r_row.text_content:
+                jd_text = ""
+                if job.description and job.description.text_content:
+                    jd_text = job.description.text_content
+                await capture_resume_match(
+                    db,
+                    user_id=user.id,
+                    resume_text=r_row.text_content,
+                    job_title=job.title,
+                    job_description=jd_text,
+                    decision=normalized,
+                    job_id=job.id,
+                    role_cluster=job.role_cluster,
+                )
+    except Exception:
+        # Side-effect capture must NOT break the review write.
+        # The helper itself swallows + logs, but defense-in-depth
+        # against import errors / unexpected attribute misses.
+        pass
 
     out = ReviewOut.model_validate(review)
     out.reviewer_name = user.name

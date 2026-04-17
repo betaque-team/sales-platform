@@ -122,6 +122,28 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
         success=is_success,
     )
 
+    # F238: training-data capture for cover_letter_quality. One row
+    # per successful generation with (resume, JD, cover_letter, tone)
+    # → outcome="generated". A future round will add UI events
+    # ("kept" / "regenerated" / "applied") that update the label.
+    # Side-effect-only: failure here doesn't break the user's call.
+    if is_success:
+        try:
+            from app.utils.training_capture import capture_cover_letter_quality
+            await capture_cover_letter_quality(
+                db,
+                user_id=user.id,
+                resume_text=resume.text_content,
+                job_title=job.title,
+                job_description=job_description,
+                cover_letter_text=result.get("cover_letter", ""),
+                job_id=job.id,
+                tone=body.tone,
+                model_version="claude-sonnet-4-20250514",
+            )
+        except Exception:
+            pass
+
     if result.get("error"):
         # Regression finding 183: upstream Claude API errors (rate
         # limit, upstream outage, safety refusal) map to 502 Bad

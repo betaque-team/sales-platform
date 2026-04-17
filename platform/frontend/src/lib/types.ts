@@ -620,6 +620,28 @@ export interface ProductInsightsResponse {
   total_pages: number;
 }
 
+// F238: training-data capture pipeline. Stats endpoint returns
+// per-task counts + class balance. Used by the admin Monitoring tile.
+export type TrainingTaskType =
+  | "resume_match"
+  | "role_classify"
+  | "cover_letter_quality"
+  | "interview_prep_quality"
+  | "customize_quality"
+  | "search_intent";
+
+export interface TrainingTaskStats {
+  total: number;
+  by_class: Record<string, number>;
+}
+
+export interface TrainingDataStats {
+  by_task_type: Record<TrainingTaskType, TrainingTaskStats>;
+  total_rows: number;
+  earliest: string | null;
+  latest: string | null;
+}
+
 export interface CompanyScore {
   company_id: string;
   company_name: string;

@@ -110,6 +110,30 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
         success=is_success,
     )
 
+    # F238: training-data capture for interview_prep_quality. Same
+    # pattern as cover-letter (one row per successful generation,
+    # initial label "generated"). Side-effect-only.
+    if is_success:
+        try:
+            from app.utils.training_capture import capture_interview_prep_quality
+            await capture_interview_prep_quality(
+                db,
+                user_id=user.id,
+                resume_text=resume.text_content,
+                job_title=job.title,
+                job_description=job_description,
+                prep_payload={
+                    "questions": result.get("questions", []),
+                    "talking_points": result.get("talking_points", []),
+                    "company_research": result.get("company_research", []),
+                    "red_flags": result.get("red_flags", []),
+                },
+                job_id=job.id,
+                model_version="claude-sonnet-4-20250514",
+            )
+        except Exception:
+            pass
+
     if result.get("error"):
         # F183: upstream Anthropic API errors (rate limit, upstream
         # outage, safety refusal) map to 502 Bad Gateway, not 500.
