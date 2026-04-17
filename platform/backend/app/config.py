@@ -1,5 +1,6 @@
 """Application configuration from environment variables."""
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -30,7 +31,14 @@ class Settings(BaseSettings):
     rapidapi_linkedin_host: str = "jsearch.p.rapidapi.com"  # or linkedin-data-api.p.rapidapi.com
 
     # AI
-    anthropic_api_key: str = ""
+    # `SecretStr` so `repr(settings)`, `str(settings)`, and `model_dump()`
+    # render the value as `**********` instead of the raw key. Prevents
+    # accidental leaks through logged exceptions, debug endpoints that
+    # might dump settings, or stringified tracebacks. Call sites that
+    # need the raw value must use `.get_secret_value()` explicitly —
+    # the explicitness is the point: ripgrep finds every place the
+    # raw key materializes.
+    anthropic_api_key: SecretStr = SecretStr("")
     ai_daily_limit_per_user: int = 10  # max AI customizations per user per day
 
     # Security

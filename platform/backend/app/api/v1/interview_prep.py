@@ -37,7 +37,7 @@ async def generate(body: InterviewPrepRequest, user: User = Depends(get_current_
     """Generate AI-powered interview preparation for a specific job."""
     # F183: missing Anthropic key is a config state, not a server
     # error — return 503 so on-call alerting doesn't trigger.
-    if not get_settings().anthropic_api_key:
+    if not get_settings().anthropic_api_key.get_secret_value():
         raise HTTPException(
             status_code=503,
             detail="AI interview prep is not configured on this server. Contact an administrator.",

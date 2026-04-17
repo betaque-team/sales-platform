@@ -35,8 +35,15 @@ forbidden_regexes=(
   # AWS access keys
   'AKIA[0-9A-Z]{16}'
   'aws_secret_access_key\s*=\s*["'"'"']?[A-Za-z0-9/+=]{40}'
-  # Anthropic
+  # Anthropic — production keys are `sk-ant-api03-<long-body>` + admin
+  # keys use `sk-ant-admin01-`. The generic `sk-ant-` prefix alone also
+  # stays blocked (catches future prefixes we haven't seen yet).
   'sk-ant-[A-Za-z0-9_-]{20,}'
+  # Explicit ANTHROPIC_API_KEY=<value> pattern — catches the case
+  # where someone pastes a shell export or .env line into a file /
+  # commit message. Allowlist: empty values (placeholder), ${VAR}
+  # indirection, and `CHANGE_ME` / `REPLACE_ME` templates.
+  'ANTHROPIC_API_KEY\s*[:=]\s*["'"'"']?(?!\s*$|CHANGE_ME|REPLACE_ME|\$\{|\{\{|"")[A-Za-z0-9_-]{10,}'
   # OpenAI
   'sk-proj-[A-Za-z0-9_-]{20,}'
   'sk-[A-Za-z0-9]{48,}'

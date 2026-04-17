@@ -927,12 +927,12 @@ async def draft_contact_email(
         f"Would you have 15 minutes for a quick call?\n\nBest,"
     )
 
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         return {"subject": template_subject, "body": template_body, "generated_by": "template"}
 
     try:
         import anthropic
-        ai = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        ai = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
         prompt = (
             f"Write a concise, personalized cold outreach email to {contact.first_name} {contact.last_name} "
             f"({contact.title}) at {company.name}. "

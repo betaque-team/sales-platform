@@ -717,7 +717,10 @@ async def get_ai_usage(
         "used_today": used_today,
         "daily_limit": settings.ai_daily_limit_per_user,
         "remaining": max(0, settings.ai_daily_limit_per_user - used_today),
-        "has_api_key": bool(settings.anthropic_api_key),
+        # SecretStr → explicitly check the underlying value. `bool()` on a
+        # SecretStr instance is not guaranteed to reflect emptiness the
+        # same way across Pydantic versions; `.get_secret_value()` does.
+        "has_api_key": bool(settings.anthropic_api_key.get_secret_value()),
     }
 
 
@@ -771,7 +774,7 @@ async def customize_resume_for_job(
     # but that would break the inline-error UX on this page. Keep the
     # 200+error shape here; use the dependency for future endpoints
     # that don't have the same "render the error inline" UI.
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         # Count quota for the response usage block (reads only, no
         # write). Zero delta — the quota stays where it was.
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)

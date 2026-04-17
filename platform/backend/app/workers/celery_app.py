@@ -4,6 +4,17 @@ import os
 from celery import Celery
 from celery.schedules import crontab
 
+# Install the secret-scrubbing logging filter before any Celery task
+# imports its module-level loggers. Celery's worker process has its own
+# logger tree (`celery.task`, `celery.worker`) separate from the
+# FastAPI app — if we only install in main.py, worker stdout/stderr
+# would still leak. Must happen BEFORE `autodiscover_tasks` below so
+# that loggers created during task import inherit the filter. Mirrors
+# the wiring in app/main.py; see app/utils/log_scrub.py for what's
+# scrubbed.
+from app.utils.log_scrub import install_root_scrubber
+install_root_scrubber()
+
 # Aggressive mode: scan frequently during initial data collection
 # Set SCAN_MODE=normal in env to switch to twice-daily
 SCAN_MODE = os.environ.get("SCAN_MODE", "aggressive")

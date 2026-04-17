@@ -305,12 +305,12 @@ async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession =
     }
 
     # ---- AI call ----
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         return _fallback_insights(stats)
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
 
         prompt = f"""You are a job-market intelligence analyst reviewing data from a sales & job aggregation platform that tracks cloud/infra/security roles.
 
