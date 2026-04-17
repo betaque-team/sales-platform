@@ -102,6 +102,26 @@ BAMBOOHR_PROBE_SLUGS = [
 # restore slugs here if/when it comes back.
 JOBVITE_PROBE_SLUGS: list[str] = []
 
+# Workday — enterprise Fortune-500 coverage. Slug is the composite
+# ``{tenant}/{cluster}/{site}`` — see app/fetchers/workday.py docstring.
+# All 4 verified live on 2026-04-17 via POST /wday/cxs/…/jobs with
+# total job counts shown:
+#   nvidia/wd5/NVIDIAExternalCareerSite   →  2000 jobs
+#   salesforce/wd12/External_Career_Site  →  1417 jobs
+#   citi/wd5/2                            →  2000 jobs
+#   capitalone/wd12/Capital_One           →  1457 jobs
+# Discovery grows this list via `app.services.ats_fingerprint`, which
+# scrapes a company's public careers page and extracts myworkdayjobs.com
+# URLs. For now the probe covers the 4 seed tenants; a follow-up
+# task can run the fingerprinter across a curated domain list to
+# bulk-add more enterprise tenants.
+WORKDAY_PROBE_SLUGS = [
+    "nvidia/wd5/NVIDIAExternalCareerSite",
+    "salesforce/wd12/External_Career_Site",
+    "citi/wd5/2",
+    "capitalone/wd12/Capital_One",
+]
+
 # Himalayas /jobs/api returns HTTP 403 for every probe slug as of
 # 2026-04-17. The endpoint is protected and httpx can't reach it.
 # See test_fetcher_integration.BROKEN_FETCHERS. Keep empty so discovery
@@ -311,6 +331,61 @@ def _probe_linkedin_slugs(session, run: DiscoveryRun) -> int:
     return new_count
 
 
+def _probe_workday_slugs(session, run: DiscoveryRun) -> int:
+    """Register Workday slugs. Unlike the generic GET-based probe at
+    :func:`_probe_platform_slugs`, Workday requires a POST with a JSON
+    body to validate a slug is live, and the composite-slug shape
+    (``{tenant}/{cluster}/{site}``) doesn't fit the generic URL
+    template pattern. So we take the same shortcut as LinkedIn:
+    ``WORKDAY_PROBE_SLUGS`` is hand-curated (verified live at seed
+    time; see the docstring on that constant), so we just register
+    each slug as a DiscoveredCompany without re-probing every cycle.
+    The scanner's stale-board auto-deactivator will cull any entry
+    that stops producing jobs over 5 consecutive cycles.
+
+    The name shown to admins uses the tenant portion — Workday tenants
+    are typically the company's short name (``nvidia``, ``salesforce``,
+    etc.), which matches what a sales person expects to see.
+    """
+    new_count = 0
+    existing = set(
+        session.execute(
+            select(DiscoveredCompany.slug).where(DiscoveredCompany.platform == "workday")
+        ).scalars().all()
+    )
+
+    for slug in WORKDAY_PROBE_SLUGS:
+        if slug in existing:
+            continue
+        parts = slug.split("/", 2)
+        tenant = parts[0] if parts else slug
+        cluster = parts[1] if len(parts) >= 2 else ""
+        site = parts[2] if len(parts) >= 3 else ""
+        # Public URL pointing to the tenant's career site — matches what
+        # a human would land on from Google. Admins can click this from
+        # /discovery to verify the board looks real before promoting.
+        careers_url = (
+            f"https://{tenant}.{cluster}.myworkdayjobs.com/en-US/{site}"
+            if tenant and cluster and site
+            else f"https://{tenant}.myworkdayjobs.com"
+        )
+        company = DiscoveredCompany(
+            id=uuid.uuid4(),
+            discovery_run_id=run.id,
+            name=tenant.replace("-", " ").title(),
+            platform="workday",
+            slug=slug,
+            careers_url=careers_url,
+            status="new",
+        )
+        session.add(company)
+        new_count += 1
+
+    session.flush()
+    logger.info("Workday probe: %d slugs registered, %d new", len(WORKDAY_PROBE_SLUGS), new_count)
+    return new_count
+
+
 @celery_app.task(name="app.workers.tasks.discovery_task.run_discovery", bind=True, max_retries=1)
 def run_discovery(self, run_id: str | None = None):
     """Run a full discovery cycle: Greenhouse sitemap + multi-platform slug probes.
@@ -375,6 +450,12 @@ def run_discovery(self, run_id: str | None = None):
         # LinkedIn (special handler — no JSON probe, just register known slugs)
         li_new = _probe_linkedin_slugs(session, run)
         total_new += li_new
+
+        # Workday (special handler — POST-based API + composite slug shape
+        # doesn't fit the generic GET probe. Hand-curated list; stale
+        # entries culled by the scanner's auto-deactivator.)
+        wd_new = _probe_workday_slugs(session, run)
+        total_new += wd_new
 
         # Count total discovered in this run
         total_found = session.execute(
