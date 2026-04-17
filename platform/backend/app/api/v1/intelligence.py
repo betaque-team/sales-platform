@@ -134,7 +134,21 @@ async def skill_gaps(
         if resume and resume.text_content:
             resume_skills = _extract_skills_from_text(resume.text_content)
 
-    # Get job descriptions for relevant jobs
+    # Get job descriptions for relevant jobs.
+    #
+    # The 500-row cap keeps the endpoint sub-second (each description goes
+    # through `_extract_skills_from_text` — tokenize + regex over the skill
+    # vocabulary). Previously there was no ORDER BY, so Postgres returned
+    # whichever 500 rows came off disk first — effectively the oldest
+    # eligible jobs. As the relevant-jobs corpus grew past 500, the
+    # Skill Gaps page silently started reflecting historical demand,
+    # not current-market demand.
+    #
+    # `ORDER BY first_seen_at DESC` pins the sample to the 500 most
+    # recently-ingested relevant jobs. `.nulls_last()` is defensive —
+    # `first_seen_at` defaults to `datetime.now(utc)` on insert so it
+    # should never be NULL in practice, but the nulls-last clause
+    # protects against a future import path that forgets the default.
     query = (
         select(JobDescription.text_content, Job.role_cluster)
         .join(Job, JobDescription.job_id == Job.id)
@@ -142,7 +156,7 @@ async def skill_gaps(
     )
     if role_cluster:
         query = query.where(Job.role_cluster == role_cluster)
-    query = query.limit(500)
+    query = query.order_by(Job.first_seen_at.desc().nulls_last()).limit(500)
 
     result = await db.execute(query)
     rows = result.all()
