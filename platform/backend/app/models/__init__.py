@@ -20,6 +20,7 @@ from app.models.pipeline_stage import PipelineStage
 from app.models.audit_log import AuditLog
 from app.models.insight import UserInsight, ProductInsight
 from app.models.training_example import TrainingExample
+from app.models.saved_filter import SavedFilter
 
 __all__ = [
     "User", "Company", "CompanyATSBoard", "Job", "JobDescription",
@@ -34,4 +35,5 @@ __all__ = [
     "AuditLog",
     "UserInsight", "ProductInsight",
     "TrainingExample",
+    "SavedFilter",
 ]

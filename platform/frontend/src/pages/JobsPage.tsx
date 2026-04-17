@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Search, Filter, CheckSquare, X, Send, ArrowUp, ArrowDown, ArrowUpDown, Link as LinkIcon } from "lucide-react";
+import { Search, Filter, CheckSquare, X, Send, ArrowUp, ArrowDown, ArrowUpDown, Link as LinkIcon, Star, ChevronDown, ChevronUp } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -18,7 +18,7 @@ import {
   TableHead,
   TableCell,
 } from "@/components/Table";
-import { getJobs, bulkAction, getActiveResume, prepareApplication, getRoleClusters } from "@/lib/api";
+import { getJobs, bulkAction, getActiveResume, prepareApplication, getRoleClusters, listSavedFilters, createSavedFilter, deleteSavedFilter } from "@/lib/api";
 import type {
   JobFilters,
   JobStatus,
@@ -700,12 +700,22 @@ export function JobsPage() {
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              placeholder="Search jobs by title or company..."
+              placeholder='Search by title/company. Boolean: cloud AND remote, "site reliability", -manager'
               className="input pl-9"
               value={filters.search}
               onChange={(e) => updateFilter("search", e.target.value)}
+              title='Boolean syntax supported: "exact phrase", AND, OR, NOT, -exclusion, (grouping). Bare queries work as before.'
             />
           </div>
+
+          {/* F241: saved-filter presets dropdown. Lives in the same
+              Card as the rest of the filter controls so users see
+              "save current" / "load preset" inline with the filters
+              themselves. */}
+          <SavedFiltersControl
+            currentFilters={filters}
+            onApply={(f) => setFilters((prev) => ({ ...prev, ...f, page: 1 }))}
+          />
           <select
             className="select w-auto"
             value={filters.status}
@@ -1147,6 +1157,167 @@ export function JobsPage() {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────
+// F241: SavedFiltersControl
+//
+// Inline dropdown that lets the user load / save / delete named
+// filter presets. Lives next to the search bar in the JobsPage
+// filter Card. Pattern:
+//
+//   - Closed state: a single button labeled "Saved (N)" with a star
+//     icon. N is the count of presets the user has.
+//   - Open state: panel with three sections:
+//       * List of presets (click to apply)
+//       * Save current filters as: input + button
+//       * Per-row delete (trash icon) with confirm
+//
+// Uses TanStack Query for the list (so it auto-refreshes after a
+// successful save/delete), and useMutation for the writes.
+// ──────────────────────────────────────────────────────────────────────────
+
+function SavedFiltersControl({
+  currentFilters,
+  onApply,
+}: {
+  currentFilters: JobFilters;
+  onApply: (f: JobFilters) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
+  const listQuery = useQuery({
+    queryKey: ["saved-filters"],
+    queryFn: listSavedFilters,
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: () => createSavedFilter(newName.trim(), currentFilters),
+    onSuccess: () => {
+      setNewName("");
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["saved-filters"] });
+    },
+    onError: (e: any) => {
+      // Backend returns 409 with a descriptive `detail` for name
+      // conflicts; surface that inline instead of a generic toast.
+      const detail =
+        e?.body?.detail ||
+        e?.detail ||
+        e?.message ||
+        "Could not save filter. Try a different name.";
+      setError(typeof detail === "string" ? detail : "Could not save filter.");
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteSavedFilter(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["saved-filters"] }),
+  });
+
+  const presets = listQuery.data?.items ?? [];
+  const count = presets.length;
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+        title="Saved filter presets"
+      >
+        <Star className="h-4 w-4 text-amber-500" />
+        Saved {count > 0 ? `(${count})` : ""}
+        {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+      </button>
+
+      {open && (
+        <div
+          className="absolute right-0 top-full z-20 mt-1 w-72 rounded-lg border border-gray-200 bg-white shadow-lg"
+          onMouseLeave={() => setOpen(false)}
+        >
+          {/* Preset list */}
+          <div className="max-h-60 overflow-y-auto p-1">
+            {listQuery.isLoading ? (
+              <div className="px-3 py-2 text-xs text-gray-400">Loading…</div>
+            ) : presets.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-gray-400 italic">
+                No saved presets yet. Save your current filters below.
+              </div>
+            ) : (
+              presets.map((p) => (
+                <div
+                  key={p.id}
+                  className="group flex items-center justify-between rounded px-2 py-1.5 hover:bg-gray-100"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onApply(p.filters);
+                      setOpen(false);
+                    }}
+                    className="flex-1 truncate text-left text-sm text-gray-700"
+                    title="Apply this filter preset"
+                  >
+                    {p.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`Delete saved filter "${p.name}"?`)) {
+                        deleteMutation.mutate(p.id);
+                      }
+                    }}
+                    className="ml-2 rounded p-1 text-gray-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-100 hover:text-red-600"
+                    title="Delete this preset"
+                    aria-label={`Delete ${p.name}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Save current */}
+          <div className="border-t border-gray-100 p-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase text-gray-400">
+              Save current filters
+            </div>
+            <div className="flex gap-1">
+              <input
+                type="text"
+                placeholder="e.g. Infra, Remote, Series B+"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value.slice(0, 100))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newName.trim()) {
+                    saveMutation.mutate();
+                  }
+                }}
+                className="input flex-1 text-sm"
+              />
+              <button
+                type="button"
+                disabled={!newName.trim() || saveMutation.isPending}
+                onClick={() => saveMutation.mutate()}
+                className="rounded bg-primary-600 px-2 py-1 text-xs font-medium text-white hover:bg-primary-700 disabled:opacity-50"
+              >
+                {saveMutation.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+            {error && (
+              <p className="mt-1 text-[11px] text-red-600">{error}</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

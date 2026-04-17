@@ -54,6 +54,8 @@ import type {
   ProductInsightsResponse,
   TrainingDataStats,
   TrainingTaskType,
+  SavedFilter,
+  SavedFiltersResponse,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -683,6 +685,35 @@ export async function backfillRoleClassify(maxJobs?: number): Promise<{
 }> {
   const q = maxJobs ? `?max_jobs=${maxJobs}` : "";
   return request(`/training-data/backfill-role-classify${q}`, { method: "POST" });
+}
+
+// F241: saved filter presets CRUD.
+export async function listSavedFilters(): Promise<SavedFiltersResponse> {
+  return request<SavedFiltersResponse>("/saved-filters");
+}
+
+export async function createSavedFilter(
+  name: string,
+  filters: JobFilters,
+): Promise<SavedFilter> {
+  return request<SavedFilter>("/saved-filters", {
+    method: "POST",
+    body: JSON.stringify({ name, filters }),
+  });
+}
+
+export async function updateSavedFilter(
+  id: string,
+  patch: { name?: string; filters?: JobFilters },
+): Promise<SavedFilter> {
+  return request<SavedFilter>(`/saved-filters/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteSavedFilter(id: string): Promise<void> {
+  return request<void>(`/saved-filters/${id}`, { method: "DELETE" });
 }
 
 // Company Scores

@@ -292,18 +292,64 @@ async def list_jobs(
         )
 
     if effective_search and effective_search.strip():
-        # Search across title, company name, and location. Findings 84+85:
-        # strip whitespace-only input and escape LIKE metachars — a search
-        # for `"100%"` must not match every row, and a 3-space input must
-        # not wildcard-match random titles with triple spaces.
-        needle = f"%{escape_like(effective_search.strip())}%"
-        query = query.where(
-            or_(
-                Job.title.ilike(needle, escape="\\"),
-                Job.company.has(Company.name.ilike(needle, escape="\\")),
-                Job.location_raw.ilike(needle, escape="\\"),
-            )
+        # F240 (khushi.jain feedback "Search Bar Query"): boolean
+        # syntax support. The user's query is detected as boolean
+        # (presence of AND/OR/NOT operators, "quoted phrases", or
+        # leading-minus exclusions) and then parsed + compiled into
+        # a structured WHERE clause. Bare queries (no operators) fall
+        # through to the legacy single-substring branch so existing
+        # users see no change.
+        #
+        # Implicit AND between adjacent terms matches Google-style
+        # search expectations: `cloud kubernetes` = both must match.
+        # See app/utils/search_query.py for the full grammar.
+        from app.utils.search_query import (
+            SearchQueryError, compile_to_clause, is_boolean_query, parse,
+            term_clause_factory,
         )
+        search_str = effective_search.strip()
+
+        if is_boolean_query(search_str):
+            # Boolean path: each term still matches if ANY of (title,
+            # company name, location_raw) contains it (preserves the
+            # legacy per-term semantics — boolean ops compose ON TOP
+            # of those per-term ANY-of-columns matches).
+            #
+            # `Company.name` lives on a related table; we need a
+            # column-level Comparable that the parser can hand to
+            # ILIKE. The Job.company.has(Company.name.ilike(...))
+            # pattern in the legacy branch wraps the whole expression
+            # in EXISTS — clean for one term but composes badly under
+            # boolean ops (NOT EXISTS for NOT can be expensive). For
+            # the parser path, use an explicit join + Company.name
+            # column so the boolean composition stays a single SELECT.
+            from sqlalchemy.orm import contains_eager
+            query = query.join(Company, Job.company_id == Company.id)
+            term_to_clause = term_clause_factory(
+                Job.title, Company.name, Job.location_raw,
+            )
+            try:
+                ast = parse(search_str)
+            except SearchQueryError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Search syntax error: {e}",
+                )
+            query = query.where(compile_to_clause(ast, term_to_clause))
+        else:
+            # Legacy single-substring path. Findings 84+85: strip
+            # whitespace-only input and escape LIKE metachars — a
+            # search for `"100%"` must not match every row, and a
+            # 3-space input must not wildcard-match random titles
+            # with triple spaces.
+            needle = f"%{escape_like(search_str)}%"
+            query = query.where(
+                or_(
+                    Job.title.ilike(needle, escape="\\"),
+                    Job.company.has(Company.name.ilike(needle, escape="\\")),
+                    Job.location_raw.ilike(needle, escape="\\"),
+                )
+            )
 
     # Count
     count_q = select(func.count()).select_from(query.subquery())

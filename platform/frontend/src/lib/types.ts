@@ -642,6 +642,23 @@ export interface TrainingDataStats {
   latest: string | null;
 }
 
+// F241: saved filter presets — per-user, persisted to backend.
+// `filters` is a free-form JobFilters dict (the same shape JobsPage
+// keeps in `useState<JobFilters>`). Backend stores as JSONB so adding
+// a new filter axis (e.g. company_size) doesn't need a schema change.
+export interface SavedFilter {
+  id: string;
+  name: string;
+  filters: JobFilters;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SavedFiltersResponse {
+  items: SavedFilter[];
+  total: number;
+}
+
 export interface CompanyScore {
   company_id: string;
   company_name: string;
