@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · fea6b84 · sha-fea6b84
+Merge release/v0.1.1
+
+
 # v0.1.1 — 2026-04-17
 
 Version bump consolidating everything merged to `main` since v0.1.0
