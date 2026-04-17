@@ -6,7 +6,7 @@ from app.api.v1 import (
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
     alerts, cover_letter, interview_prep, intelligence, audit, ai, insights,
-    training_data,
+    training_data, saved_filters,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -41,3 +41,5 @@ api_router.include_router(ai.router)
 api_router.include_router(insights.router)
 # F238: training-data capture pipeline (admin-only export + stats + backfill).
 api_router.include_router(training_data.router)
+# F241: per-user saved filter presets.
+api_router.include_router(saved_filters.router)
