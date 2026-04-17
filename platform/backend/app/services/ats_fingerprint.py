@@ -238,7 +238,7 @@ def detect_ats_from_url(
     url: str,
     *,
     timeout: float = 15.0,
-    max_html_bytes: int = 2_000_000,
+    max_html_bytes: int = 6_000_000,
     client: Optional[httpx.Client] = None,
 ) -> list[ATSFingerprint]:
     """Fetch ``url`` and return every ATS fingerprint found in the HTML.
@@ -250,10 +250,15 @@ def detect_ats_from_url(
         (especially enterprise ones behind a CDN), so the default is
         generous. Callers running in a Celery task should keep this
         bounded to avoid hanging the worker.
-    :param max_html_bytes: Hard cap on the HTML body we parse. 2 MB is
-        far above any real careers page; anything larger is
-        almost-certainly either a redirect to a large binary (PDF,
-        product catalog) or an attempt to DoS the parser.
+    :param max_html_bytes: Hard cap on the HTML body we parse. Raised
+        from 2 MB → 6 MB on 2026-04-17 after observing that Next.js /
+        Gatsby SPAs inline multi-megabyte ``__NEXT_DATA__`` JSON
+        payloads at the bottom of the HTML, and Ramp's careers page
+        (~3.6 MB) has every Ashby URL past the 3.4 MB mark. 6 MB
+        covers the p99 real-world careers page while still capping an
+        attacker who points this at a pathological multi-hundred-MB
+        resource. Callers running against untrusted domain lists
+        should lower this.
     :param client: Optional preconfigured ``httpx.Client`` for test
         injection. The default opens a short-lived client per call.
 

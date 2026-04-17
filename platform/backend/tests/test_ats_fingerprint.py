@@ -174,3 +174,66 @@ def test_detect_ats_gracefully_returns_empty_on_404():
     """
     fps = detect_ats_from_url("https://203.0.113.1/careers")
     assert fps == []
+
+
+# Parametrized smoke-check against real company careers pages. Proves the
+# bulk-fingerprint task (``workers.tasks.discovery_task.fingerprint_
+# existing_companies``) will actually find ATS signals when pointed at
+# real Company.website values.
+#
+# Each tuple is ``(careers_url, expected_platform)``. We pick companies
+# whose ATS is well-known and stable — the test fails loudly if the
+# company migrates ATS (a real signal for the operator, not false noise).
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "careers_url,expected_platform",
+    [
+        # Palantir runs a large Lever board and the careers page links to
+        # jobs.lever.co directly in server-rendered HTML. Stable target.
+        ("https://www.palantir.com/careers", "lever"),
+        # Ramp is an Ashby customer. Its careers page is a Next.js app
+        # with a multi-MB __NEXT_DATA__ blob holding the ATS URLs past
+        # the 3 MB mark — verifies both the ashby regex AND the
+        # `max_html_bytes=6_000_000` cap (was 2 MB, missed Ramp entirely).
+        ("https://ramp.com/careers",    "ashby"),
+        # AT&T career site embeds multiple myworkdayjobs.com URLs. Proves
+        # the Workday three-group regex and composite slug assembly.
+        ("https://careers.att.jobs/",   "workday"),
+        # Deliberately NOT in this list:
+        #   * Stripe (stripe.com/jobs) — fully client-side SPA, zero
+        #     `greenhouse` strings in initial HTML.
+        #   * NVIDIA (nvidia.com/…/careers/) — same, zero `myworkdayjobs`
+        #     strings until the JS loads.
+        # Both of those companies would need Playwright to fingerprint,
+        # which we evaluated + rejected (DataDome on Wellfound, limited
+        # yield on SPAs, 200 MB Chromium dep). The bulk-fingerprint
+        # Celery task will simply not detect ATSes on pages whose
+        # initial HTML doesn't contain the ATS URLs — that's an
+        # acknowledged limitation, documented on
+        # `app.workers.tasks.discovery_task.fingerprint_existing_companies`.
+    ],
+    ids=["palantir_lever", "ramp_ashby", "att_workday"],
+)
+def test_fingerprint_against_real_company_careers_pages(careers_url, expected_platform):
+    """Live test: fingerprint each real careers page, assert the
+    expected ATS is detected.
+
+    This is the strongest possible assertion that the bulk-fingerprint
+    Celery task will work against real ``Company.website`` URLs when
+    it runs in production — if any of these fail, either the company
+    moved ATS (update the expectation) or the fingerprinter's regex
+    broke (fix the regex + add the failing HTML as a unit fixture to
+    ``HTML_FIXTURES`` above so the regression is caught without a
+    live fetch).
+    """
+    fps = detect_ats_from_url(careers_url)
+    platforms_found = {f.platform for f in fps}
+    assert expected_platform in platforms_found, (
+        f"Expected to detect {expected_platform} on {careers_url}, "
+        f"got {platforms_found} (full fingerprints: {fps})"
+    )
+    # Sanity check the companion data — every fingerprint must have a
+    # non-empty slug. A match with slug="" would crash downstream
+    # (DiscoveredCompany.slug is NOT NULL).
+    for fp in fps:
+        assert fp.slug, f"fingerprint {fp} has empty slug"
