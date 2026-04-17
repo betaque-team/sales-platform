@@ -248,6 +248,40 @@ async def trigger_reclassify_jobs():
     return {"task_id": task.id, "status": "queued"}
 
 
+@router.post("/backfill-job-descriptions", dependencies=[Depends(require_role("admin"))])
+async def trigger_backfill_job_descriptions(
+    batch_size: int = Query(500, ge=1, le=2000),
+    max_jobs: int | None = Query(None, ge=1, le=100_000),
+):
+    """One-shot backfill for ``JobDescription`` rows on historical jobs.
+
+    Regression findings 97 + 101: the scan pipeline only started
+    writing ``JobDescription`` rows in a recent round. Historical
+    Jobs have ``raw_json`` populated but no companion description
+    row, which collapsed resume scoring into 4 distinct values
+    across 600+ jobs (the scorer was reading an empty ``text_content``
+    and falling back to the cluster baseline keyword bag). The
+    online raw_json fallback in ``resume_score_task`` (F97) covers
+    this at scoring time, but every read path that joins
+    ``JobDescription`` (``/jobs/{id}/description``, the JD-text-only
+    ATS test harness) still sees empty rows.
+
+    This endpoint queues a Celery task that walks the gap once.
+    Idempotent — re-runs are safe because the WHERE clause filters
+    out anything that already has a description row. ``batch_size``
+    controls per-commit write set; ``max_jobs`` lets ops cap a
+    one-shot smoke test before running the full sweep.
+    """
+    from app.workers.tasks.maintenance_task import backfill_job_descriptions
+    task = backfill_job_descriptions.delay(batch_size=batch_size, max_jobs=max_jobs)
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "batch_size": batch_size,
+        "max_jobs": max_jobs,
+    }
+
+
 @router.get("/backups", dependencies=[Depends(require_role("admin"))])
 async def list_backups():
     """List available backups with manifest metadata."""
