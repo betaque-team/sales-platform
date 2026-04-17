@@ -66,6 +66,12 @@ HEALTHY_FETCHERS = [
     # `BoschGroup` returned 4385 jobs and `Visa` returned 832 at the
     # survey. Keeping `Visa` as the seed — stable, huge, well-known.
     ("app.fetchers.smartrecruiters.SmartRecruitersFetcher", "Visa",     5),
+    # Workday — verified live 2026-04-17. Slug is composite
+    # ``{tenant}/{cluster}/{site}`` (see app/fetchers/workday.py
+    # module docstring). NVIDIA returned 2000 jobs (Workday's
+    # cap); Salesforce/Citi/Capital One also verified.
+    ("app.fetchers.workday.WorkdayFetcher",
+     "nvidia/wd5/NVIDIAExternalCareerSite", 20),
 ]
 
 BROKEN_FETCHERS = [
