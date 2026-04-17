@@ -1,10 +1,13 @@
 """VM host metrics reader + free-tier guardrail evaluator.
 
 The actual host snapshot is produced by `/usr/local/bin/collect-host-metrics.sh`
-on the VM (cron, every 1 minute) and written to `/opt/sales-platform/host-metrics.json`.
-That path is bind-mounted read-only into the backend container as
-`/host/metrics.json` so this module can read it without any privileged mounts
-or psutil.
+on the VM (cron, every 1 minute) and written to
+`/opt/sales-platform/host-metrics/metrics.json`. The parent
+`/opt/sales-platform/host-metrics/` directory is bind-mounted read-only into
+the backend container as `/host`, so this module reads `/host/metrics.json`
+without any privileged mounts or psutil. We mount the parent dir (not the
+file) because file-bind-mounts of a missing source silently auto-create a
+phantom directory at the target — in practice that broke prod once already.
 
 If the file isn't present (e.g. local dev, CI), we return an empty-state
 payload with `available: False` so the frontend can render a "Not available
@@ -276,12 +279,27 @@ def get_vm_metrics() -> dict[str, Any]:
     snapshot = _read_host_metrics()
 
     if not snapshot:
+        # Build a more actionable reason than just "file not present" — the
+        # most common failure mode is the bind-mount not being applied
+        # (compose deployed an older yml without the /host mount), so flag
+        # that explicitly when /host doesn't even exist as a directory.
+        if not _HOST_METRICS_PATH.parent.exists():
+            reason = (
+                f"host-metrics bind-mount missing — backend has no {_HOST_METRICS_PATH.parent} "
+                f"directory at all. The deployed docker-compose.prod.yml likely predates the "
+                f"`- /opt/sales-platform/host-metrics:/host:ro` volume; rsync the latest "
+                f"compose file to the VM and `docker compose up -d backend`."
+            )
+        else:
+            reason = (
+                f"host-metrics snapshot not present at {_HOST_METRICS_PATH} "
+                f"(directory exists, file missing). Run `sudo /usr/local/bin/"
+                f"collect-host-metrics.sh` on the VM to seed it; cron will keep "
+                f"it fresh (see docs/VM_MONITORING.md)."
+            )
         return {
             "available": False,
-            "reason": (
-                f"host-metrics snapshot not present at {_HOST_METRICS_PATH}. "
-                "Install collect-host-metrics.sh on the VM (see docs/VM_MONITORING.md)."
-            ),
+            "reason": reason,
             "free_tier": FREE_TIER,
         }
 
