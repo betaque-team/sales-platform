@@ -18,7 +18,7 @@ def generate_cover_letter(
     Returns dict with cover_letter, key_points, and customization_notes.
     """
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         return {
             "cover_letter": "",
             "key_points": [],
@@ -28,7 +28,7 @@ def generate_cover_letter(
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
 
         tone_instructions = {
             "professional": "Use a polished, confident, professional tone. Be concise and results-oriented.",

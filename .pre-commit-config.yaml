@@ -3,6 +3,8 @@
 #
 # Install once per clone:
 #   bash scripts/install-hooks.sh
+# The install script must wire BOTH the pre-commit AND commit-msg stages
+# (see hook stage config on the `commit-msg-forbidden-strings` hook below).
 #
 # Runs automatically on `git commit`. To bypass for a single commit (use
 # sparingly, and only after verifying the match is a false positive):
@@ -10,7 +12,9 @@
 #
 # To run manually on all files (e.g. CI):
 #   pre-commit run --all-files
+#   pre-commit run --all-files --hook-stage commit-msg
 # =============================================================================
+default_install_hook_types: [pre-commit, commit-msg]
 repos:
   # ── Broad secret detection ──
   - repo: https://github.com/gitleaks/gitleaks
@@ -46,5 +50,17 @@ repos:
       - id: no-env-files
         name: Block .env (only .env.example permitted)
         entry: scripts/check-no-env-files.sh
+        language: script
+        pass_filenames: true
+
+      # Scan the commit MESSAGE for credential shapes too. A dev
+      # pasting a stack trace or curl command into a commit body
+      # can leak a key even when no file content contains it —
+      # and gitleaks only scans files, not messages. Same
+      # underlying regex set as check-forbidden-strings.sh.
+      - id: commit-msg-forbidden-strings
+        name: Block known-leaked secrets in commit messages
+        stages: [commit-msg]
+        entry: scripts/check-forbidden-strings.sh
         language: script
         pass_filenames: true

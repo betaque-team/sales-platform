@@ -19,7 +19,7 @@ def generate_interview_prep(
     Returns dict with questions, talking_points, and company_research.
     """
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         return {
             "questions": [],
             "talking_points": [],
@@ -30,7 +30,7 @@ def generate_interview_prep(
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
 
         prompt = f"""You are a senior technical interviewer and career coach preparing a candidate for a job interview.
 

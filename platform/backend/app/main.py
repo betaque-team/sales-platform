@@ -8,8 +8,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import get_settings
 from app.api.v1.router import api_router
+from app.utils.log_scrub import install_root_scrubber
 
 settings = get_settings()
+
+# Install the secret-scrubbing logging filter before any app logger emits
+# its first record. The filter redacts `sk-ant-…` and a handful of other
+# credential shapes from every `LogRecord` (msg, args, exc_text) so an
+# accidentally-logged raw key never reaches stdout / a file handler /
+# structured log output. Pydantic's `SecretStr` on `settings.anthropic_
+# api_key` is the primary defense; this is belt-and-suspenders for the
+# path where a third-party SDK exception or a future bug materialises
+# the raw value. Idempotent — re-running at import is a no-op.
+install_root_scrubber()
 
 
 @asynccontextmanager

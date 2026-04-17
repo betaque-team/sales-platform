@@ -71,7 +71,7 @@ def customize_resume(
     on this exact shape — keep it stable.
     """
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key.get_secret_value():
         return {
             "customized_text": "",
             "changes_made": [],
@@ -81,7 +81,7 @@ def customize_resume(
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
 
         # Per-call nonce: makes delimiter forging statistically impossible
         # even if the full prompt template leaks publicly. 8 bytes =

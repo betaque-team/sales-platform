@@ -51,7 +51,7 @@ async def generate(body: CoverLetterRequest, user: User = Depends(get_current_us
     # waking on-call every time a new environment was stood up without
     # the key. 503 is the semantically correct response and it doesn't
     # trip the error budget / alerting threshold for 5xx.
-    if not get_settings().anthropic_api_key:
+    if not get_settings().anthropic_api_key.get_secret_value():
         raise HTTPException(
             status_code=503,
             detail="AI cover letter generation is not configured on this server. Contact an administrator.",
