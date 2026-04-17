@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · eaf6191 · sha-eaf6191
+Merge fix/refresh-fetcher-probe-slugs: fetcher survey + live-API tests
+
+
 ## 2026-04-17 · 15cfda7 · sha-15cfda7
 Merge feat/manual-link-review-priority-applied: ship platform/scripts/ci-deploy.sh + close out F231-F234
 
