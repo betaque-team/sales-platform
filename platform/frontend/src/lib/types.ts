@@ -71,6 +71,13 @@ export interface Job {
   // tier it drives). `null` means no resume has scored this job yet.
   max_resume_score?: number | null;
   first_seen_at?: string;
+  // F97/F101: true when the backend has a populated JobDescription
+  // row for this job (text_content or html_content). When false, the
+  // UI should render a "limited data" badge — resume scoring against
+  // an empty description falls back to cluster-baseline keywords and
+  // produces low-resolution per-job scores. Optional because list
+  // endpoints don't currently return it; only `/jobs/{id}` does.
+  has_description?: boolean;
   resume_fit?: {
     overall_score: number;
     keyword_score: number;
