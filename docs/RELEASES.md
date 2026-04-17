@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-17 · b5d6f70 · sha-b5d6f70
+Merge Round 2: discovery auto-add + enrichment long-tail coverage
+
+
 ## 2026-04-17 · 9a3bdd1 · sha-9a3bdd1
 Merge Round 1 QoL: Opus 4.7 cover letter + answer-book auto + LinkedIn cred + releases
 
