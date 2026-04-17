@@ -142,8 +142,36 @@ async def health():
         if settings.anthropic_api_key
         else ""
     )
+
+    # VM host-metrics availability — auth-free signal so deploy.yml's
+    # post-deploy verify can catch a broken `/host` bind-mount or a
+    # stalled cron the same way it catches a missing ANTHROPIC_API_KEY.
+    # The 2026-04-17 outage was invisible for days because nothing
+    # outside the admin-only /monitoring/vm endpoint reported on this
+    # pipeline; surfacing the boolean here lets CI fail loudly instead.
+    #
+    # Wrapped in try/except so a transient failure (e.g. /host briefly
+    # unmounted during a rolling restart) can never 500 the
+    # load-balancer probe. False is the safe default — "available" is
+    # only ever True when host_stats actually parses a real snapshot.
+    vm_available = False
+    vm_age_s: int | None = None
+    try:
+        from app.services.host_stats import get_vm_metrics
+        m = get_vm_metrics()
+        vm_available = bool(m.get("available"))
+        vm_age_s = m.get("snapshot_age_seconds")
+    except Exception:
+        # Don't import logging at module top just for this branch — health
+        # is hot-path and we want the import cost paid only when get_vm_metrics
+        # explodes (rare, deploy-time only). Silent except so the public
+        # health endpoint stays {status: ok} no matter what.
+        pass
+
     return {
         "status": "ok",
         "version": "0.1.0",
         "ai_configured": bool(raw_key.strip()),
+        "vm_metrics_available": vm_available,
+        "vm_metrics_age_seconds": vm_age_s,
     }
