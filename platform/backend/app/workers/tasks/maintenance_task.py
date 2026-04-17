@@ -1,6 +1,7 @@
 """Maintenance tasks -- job expiration, re-scoring, and data quality."""
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update, func
@@ -12,10 +13,11 @@ from app.workers.tasks._role_matching import (
     match_role_with_config, classify_geography, load_cluster_config_sync,
 )
 from app.models.company import Company
-from app.models.job import Job
+from app.models.job import Job, JobDescription
 from app.models.scoring_signal import ScoringSignal
 from app.models.discovery import DiscoveryRun
 from app.workers.tasks._feedback import get_feedback_adjustment
+from app.utils.job_description import extract_description
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,117 @@ def reclassify_and_rescore():
 
     except Exception as e:
         logger.exception("reclassify_and_rescore failed: %s", e)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@celery_app.task(name="app.workers.tasks.maintenance_task.backfill_job_descriptions")
+def backfill_job_descriptions(batch_size: int = 500, max_jobs: int | None = None):
+    """Populate JobDescription rows for historical jobs that never had one.
+
+    Regression finding 101: the scan pipeline only started writing
+    ``JobDescription`` rows in a recent round, so historical Job rows
+    have ``raw_json`` populated but no companion description row. The
+    resume scorer's online raw_json fallback (F97) covers this at
+    scoring time, but every read path that joins JobDescription
+    (``/jobs/{id}/description``, the JD-text-only ATS test harness)
+    sees empty rows. This task walks the gap once: for every Job
+    whose ``raw_json`` is non-null and whose ``id`` doesn't appear in
+    ``job_descriptions``, parse the raw_json via the same
+    ``extract_description`` helper the scan pipeline uses and merge
+    a JobDescription row.
+
+    Idempotent — re-runs are safe because the WHERE clause filters
+    out anything that already has a row. Batched to keep a single
+    transaction's write set bounded (``batch_size`` jobs per
+    commit). ``max_jobs`` lets ops cap a one-shot run for a smoke
+    test before unleashing the full sweep.
+
+    Returns ``{"backfilled": int, "skipped_no_text": int, "scanned": int}``
+    so admins can see what landed and what couldn't be backfilled
+    (raw_json present but extractor returned empty — usually means
+    the platform mapping in ``extract_description`` doesn't cover
+    that row's shape, which is a separate finding).
+    """
+    logger.info("Starting backfill_job_descriptions (batch_size=%d max_jobs=%s)",
+                batch_size, max_jobs)
+    session = SyncSession()
+    try:
+        # IDs that already have a description — exclude them from the
+        # scan. One IN-list lookup per batch is cheap; doing it inside
+        # the per-job loop would N+1 across the whole table.
+        existing_subq = select(JobDescription.job_id).subquery()
+
+        scanned = 0
+        backfilled = 0
+        skipped_no_text = 0
+
+        while True:
+            if max_jobs is not None and scanned >= max_jobs:
+                break
+            # Limit to the batch size, ordered by oldest first so
+            # repeated invocations make consistent forward progress.
+            limit = batch_size
+            if max_jobs is not None:
+                limit = min(limit, max_jobs - scanned)
+            jobs = session.execute(
+                select(Job)
+                .where(
+                    Job.raw_json.isnot(None),
+                    Job.id.notin_(select(existing_subq.c.job_id)),
+                )
+                .order_by(Job.first_seen_at.asc())
+                .limit(limit)
+            ).scalars().all()
+            if not jobs:
+                break
+
+            now = datetime.now(timezone.utc)
+            for job in jobs:
+                scanned += 1
+                html_content, text_content = extract_description(
+                    job.platform or "", job.raw_json or {}
+                )
+                if not text_content and not html_content:
+                    # Extractor couldn't parse this row — log and skip.
+                    # The scoring fallback handles this case at scoring
+                    # time, but persisting an empty row would mask the
+                    # gap from monitoring (F101 explicitly wants a
+                    # `has_description` signal).
+                    skipped_no_text += 1
+                    continue
+                word_count = len(text_content.split()) if text_content else 0
+                session.add(
+                    JobDescription(
+                        id=uuid.uuid4(),
+                        job_id=job.id,
+                        html_content=html_content,
+                        text_content=text_content,
+                        word_count=word_count,
+                        fetched_at=now,
+                    )
+                )
+                backfilled += 1
+
+            session.commit()
+            logger.info(
+                "backfill_job_descriptions: batch done — scanned=%d backfilled=%d skipped=%d",
+                scanned, backfilled, skipped_no_text,
+            )
+
+        logger.info(
+            "backfill_job_descriptions complete: scanned=%d backfilled=%d skipped_no_text=%d",
+            scanned, backfilled, skipped_no_text,
+        )
+        return {
+            "scanned": scanned,
+            "backfilled": backfilled,
+            "skipped_no_text": skipped_no_text,
+        }
+    except Exception as e:
+        logger.exception("backfill_job_descriptions failed: %s", e)
         session.rollback()
         raise
     finally:

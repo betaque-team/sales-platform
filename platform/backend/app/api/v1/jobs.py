@@ -432,6 +432,22 @@ async def get_job(job_id: UUID, user: User = Depends(get_current_user), db: Asyn
 
     d = data.model_dump(mode="json")
 
+    # Regression finding 97/101: surface whether this job has a
+    # populated `JobDescription` row so the UI can render a "limited
+    # data" badge when it doesn't. Pre-fix the resume scorer collapsed
+    # to the cluster-baseline keyword bag for empty rows, producing
+    # 4 distinct scores across 600+ jobs with no UI signal that the
+    # underlying data was missing. The backfill task
+    # (`maintenance_task.backfill_job_descriptions`) closes the gap
+    # for historical rows; this field gives the UI a live signal so
+    # users can interpret a low score as "JD is sparse" rather than
+    # "this job is a poor match".
+    has_description = bool(
+        job.description
+        and (job.description.text_content or job.description.html_content)
+    )
+    d["has_description"] = has_description
+
     # Enrich with resume score if active resume exists
     if user.active_resume_id:
         # The resume_scores table has no uniqueness constraint on
