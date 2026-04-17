@@ -88,7 +88,20 @@ export function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () =>
         <span className="text-lg font-bold text-white">Sales Platform</span>
       </div>
 
-      <nav className="flex-1 space-y-1 px-3 py-4">
+      {/*
+        F239 (khushi.jain feedback "Panel — left side not scrollable"):
+        the nav was `flex-1` but had no `overflow-y-auto`, so once the
+        nav-item count exceeded the viewport (12 main + 2 admin + 1
+        super_admin entries — more after F237 added "Insights"),
+        items got clipped at the bottom and the user-profile footer
+        was pushed off-screen on shorter viewports. Two-token fix:
+          - `overflow-y-auto` so the nav scrolls when content
+            exceeds available height
+          - `min-h-0` to override flex's default `min-height: auto`
+            which otherwise prevents flex-1 children from shrinking
+            below their content size (and breaks overflow)
+      */}
+      <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 px-3 py-4">
         {navigation.map((item) => {
           // Custom active check for items with query params
           const isActive = item.to.includes("?")
