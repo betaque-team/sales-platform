@@ -27,6 +27,7 @@ historical jobs.
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID
 
 
 # revision identifiers, used by Alembic.
@@ -46,11 +47,15 @@ def upgrade() -> None:
             server_default="scan",
         ),
     )
+    # `postgresql.UUID(as_uuid=True)` matches the convention every other
+    # migration in this repo follows (b2c3d4e5f6a7, e5f6a7b8c9d0,
+    # f6a7b8c9d0e1, etc.). `sa.UUID()` works on PG 2.0+ but diverges
+    # from the shared style and can surprise autogenerate comparisons.
     op.add_column(
         "jobs",
         sa.Column(
             "submitted_by_user_id",
-            sa.UUID(),
+            UUID(as_uuid=True),
             nullable=True,
         ),
     )

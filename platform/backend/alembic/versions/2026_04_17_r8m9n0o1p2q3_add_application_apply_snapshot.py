@@ -23,11 +23,14 @@ future edits to the underlying resume:
   role_match, format}`` score components at submit-time. Frozen so the
   Applications detail view can show "scored 82 when submitted" even
   after the resume is edited and re-scored.
-- ``ai_customization_log_id`` (FK nullable) — links to
-  ``ai_customization_logs`` so audit trails can reconstruct which
-  Claude run produced the snapshot. ``ON DELETE SET NULL`` — purging
-  AI logs (e.g. on retention rotation) must not cascade-delete the
-  Application row it references.
+- ``ai_customization_log_id`` (plain UUID, nullable) — soft reference
+  to ``ai_customization_logs.id`` so audit trails can reconstruct which
+  Claude run produced the snapshot. Intentionally NOT a DB-level FK:
+  the ``ai_customization_logs`` table has no create-migration in this
+  repo (the model is declared but the table is provisioned outside
+  alembic), so a DB-level FK would fail ``alembic upgrade head`` on
+  a fresh CI database. If a future migration lands that creates the
+  table, a follow-up can add the FK back.
 
 Plus ``submission_source`` (TEXT enum, default ``'manual_prepare'``)
 mirroring the column we added to ``jobs`` in ``q7l8m9n0o1p2``. Values:
@@ -42,6 +45,7 @@ handler, so that's the correct backfill.
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID
 
 
 # revision identifiers, used by Alembic.
@@ -64,17 +68,16 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
+    # Soft reference only — see the docstring. A DB-level FK would
+    # break `alembic upgrade head` on a fresh CI database because
+    # `ai_customization_logs` has no create-migration in this repo.
     op.add_column(
         "applications",
-        sa.Column("ai_customization_log_id", sa.UUID(), nullable=True),
-    )
-    op.create_foreign_key(
-        "fk_applications_ai_customization_log",
-        "applications",
-        "ai_customization_logs",
-        ["ai_customization_log_id"],
-        ["id"],
-        ondelete="SET NULL",
+        sa.Column(
+            "ai_customization_log_id",
+            UUID(as_uuid=True),
+            nullable=True,
+        ),
     )
     op.add_column(
         "applications",
@@ -95,11 +98,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_applications_submission_source", table_name="applications")
     op.drop_column("applications", "submission_source")
-    op.drop_constraint(
-        "fk_applications_ai_customization_log",
-        "applications",
-        type_="foreignkey",
-    )
     op.drop_column("applications", "ai_customization_log_id")
     op.drop_column("applications", "applied_resume_score_snapshot")
     op.drop_column("applications", "applied_resume_text")

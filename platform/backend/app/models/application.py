@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey, JSON, Text, UniqueConstraint
+from sqlalchemy import String, DateTime, ForeignKey, JSON, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -34,9 +34,13 @@ class Application(Base):
     #   * ai_customization_log_id — link to the Claude run, if any.
     applied_resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     applied_resume_score_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    ai_customization_log_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("ai_customization_logs.id", ondelete="SET NULL"), nullable=True
-    )
+    # Soft reference to ai_customization_logs.id — intentionally NOT a
+    # DB-level ForeignKey. The `ai_customization_logs` table has no
+    # create-migration in this repo (declared in the model / env.py but
+    # provisioned outside alembic), so a FK here would break CI's
+    # `alembic upgrade head` on a fresh database. The app-level code
+    # still validates the reference at write time in reviews.apply.
+    ai_customization_log_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     # Provenance — mirrors Job.submission_source (Feature A) so the
     # Applications page can show how each app was created (`review_queue`
     # = via /reviews/apply, `manual_prepare` = via /applications/prepare).
