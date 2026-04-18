@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-18 · c4a2a29 · sha-c4a2a29
+Merge chore/schedule-fingerprint-beat: auto-run the fingerprint task daily
+
+
 ## 2026-04-18 · 39224a2 · sha-39224a2
 Merge feat/company-careers-url-phase-a: store per-company careers URL for future fallback
 
