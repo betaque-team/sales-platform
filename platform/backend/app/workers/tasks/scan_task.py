@@ -246,6 +246,61 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
             ).limit(1)
         ).scalar_one_or_none()
 
+    # Cross-platform soft-match dedup (Tier-1 quality PR, 2026-04-17).
+    # F88 above catches EXACT title matches (e.g. "Senior SRE" reposted
+    # on Lever with a new external_id), but during ATS migrations a
+    # company can list the SAME logical role with slightly different
+    # wording: "Senior SRE" on Greenhouse vs "Sr. Site Reliability
+    # Engineer" on Lever. Both normalize to the same cluster role via
+    # `match_role_with_config`, so if we match on `title_normalized`
+    # we collapse those into one Job row.
+    #
+    # Guards:
+    #   * Only triggers when `title_normalized` is non-empty — otherwise
+    #     EVERY unclassified job would collide into one row (role
+    #     matcher returns `""` for titles that don't map to any
+    #     cluster). That'd be catastrophic; the guard is load-bearing.
+    #   * Skips jobs older than 90 days — a company re-posting a role
+    #     they'd closed months ago is a legitimately new listing, not
+    #     a dup. Limits the match to still-active-ish rows.
+    #   * Only applies if neither `external_id` nor exact-title match
+    #     found anything above — keeps this as the "last resort" match
+    #     ahead of a fresh insert.
+    # Track if this lookup was a cross-platform collapse, so the update
+    # branch below can record the sighting in _also_seen_on AFTER it
+    # reassigns `existing.raw_json = raw_job.get("raw_json", {})`. If
+    # we wrote _also_seen_on here, the reassignment would clobber it.
+    cross_platform_sighting: str | None = None
+    carried_forward_also_seen: list[str] = []
+    if not existing and title_normalized:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        existing = session.execute(
+            select(Job).where(
+                Job.company_id == company.id,
+                Job.title_normalized == title_normalized,
+                # Only collapse against still-active-ish rows. A closed
+                # role being re-posted is a new listing.
+                Job.status.in_(("new", "under_review", "accepted")),
+                Job.first_seen_at >= cutoff,
+            )
+            .order_by(Job.first_seen_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing and existing.platform != board.platform:
+            # Cross-platform hit. Capture the sighting key + preserve
+            # any prior _also_seen_on entries from the existing row so
+            # the update branch's raw_json reassignment doesn't drop
+            # them. Actual write happens post-reassignment.
+            cross_platform_sighting = f"{board.platform}:{external_id}"
+            carried_forward_also_seen = list(
+                (existing.raw_json or {}).get("_also_seen_on", [])
+            )
+            logger.info(
+                "Cross-platform dedup: role %r already exists on %s (job_id=%s) — "
+                "collapsing new listing from %s into existing row",
+                title_normalized, existing.platform, existing.id, board.platform,
+            )
+
     # Geography classification
     geography_bucket = classify_geography(location_raw, remote_scope)
 
@@ -265,6 +320,21 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
         existing.geography_bucket = geography_bucket
         existing.last_seen_at = now
         existing.raw_json = raw_job.get("raw_json", {})
+
+        # If we arrived here via the cross-platform soft-match dedup
+        # branch above, record the new sighting inside the freshly
+        # reassigned raw_json. Doing it here (not in the lookup block)
+        # means the `raw_job.get("raw_json", {})` overwrite above
+        # doesn't clobber the marker. `carried_forward_also_seen`
+        # preserves prior sightings from the existing row so a role
+        # that's been seen on 3+ platforms accumulates them over time.
+        if cross_platform_sighting:
+            also_seen = list(carried_forward_also_seen)
+            if cross_platform_sighting not in also_seen:
+                also_seen.append(cross_platform_sighting)
+            raw_merged = dict(existing.raw_json or {})
+            raw_merged["_also_seen_on"] = also_seen
+            existing.raw_json = raw_merged
 
         # Recalculate relevance score
         existing.relevance_score = compute_relevance_score(
