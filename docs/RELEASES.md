@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-18 · 39224a2 · sha-39224a2
+Merge feat/company-careers-url-phase-a: store per-company careers URL for future fallback
+
+
 ## 2026-04-17 · 93f27e8 · sha-93f27e8
 Merge feat/bulk-fingerprint-companies: reverse-discovery via Company.website scraping
 
