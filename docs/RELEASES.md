@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-18 · 19a842e · sha-19a842e
+Merge test/phase-a-careers-url-coverage: 4 regression tests for Phase A
+
+
 ## 2026-04-18 · c4a2a29 · sha-c4a2a29
 Merge chore/schedule-fingerprint-beat: auto-run the fingerprint task daily
 
