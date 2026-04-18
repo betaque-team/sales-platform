@@ -149,6 +149,14 @@ class CompanyOut(BaseModel):
     enriched_at: datetime | None = None
     funded_at: datetime | None = None
     funding_news_url: str = ""
+    # Phase A — ATS-lockdown fallback foundation. The URL on the
+    # company's OWN site that lists their jobs (distinct from
+    # `website`, which is the homepage). Populated by the ATS
+    # fingerprint Celery task. NULL until fingerprinted — admins
+    # can use this field to see which companies we'd have a
+    # fallback path to, if the aggregator ATS ever locks down.
+    careers_url: str | None = None
+    careers_url_fetched_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     ats_boards: list[ATSBoardOut] = []

@@ -750,6 +750,11 @@ def fingerprint_existing_companies(self, limit: int = 50, only_unfingerprinted: 
 
         for company in companies:
             scanned += 1
+            # The URL that actually produced the fingerprints — we save
+            # this back to Company.careers_url so future fallback work
+            # (Phase C) has a concrete target without re-running the
+            # fingerprinter.
+            matched_url: str | None = None
             try:
                 # The fingerprint service tries `/careers`, `/jobs`, `/`
                 # sequentially per domain — see `detect_ats_for_domains`.
@@ -761,6 +766,7 @@ def fingerprint_existing_companies(self, limit: int = 50, only_unfingerprinted: 
                     target = company.website.rstrip("/") + suffix
                     fps = detect_ats_from_url(target, timeout=15)
                     if fps:
+                        matched_url = target
                         break
             except Exception as e:
                 errors += 1
@@ -769,6 +775,18 @@ def fingerprint_existing_companies(self, limit: int = 50, only_unfingerprinted: 
                     company.name, company.website, e,
                 )
                 continue
+
+            # Persist the careers URL that worked, even if no NEW ATS
+            # pair was discovered this run (e.g. the company uses an
+            # ATS we already knew about). Cheapest way to keep this
+            # field fresh over time — the next fingerprint pass refreshes.
+            # Only update if we actually found an ATS there — a careers
+            # page with 0 ATS markers is of ambiguous value and we'd
+            # rather leave the column NULL than store a misleading URL.
+            if matched_url:
+                company.careers_url = matched_url
+                company.careers_url_fetched_at = datetime.now(timezone.utc)
+                session.add(company)
 
             for fp in fps:
                 key = (fp.platform, fp.slug)
