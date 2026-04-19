@@ -16,7 +16,7 @@ from app.workers.tasks._role_matching import match_role, match_role_with_config,
 from app.models.company import Company, CompanyATSBoard
 from app.models.job import Job, JobDescription
 from app.models.scan import ScanLog
-from app.utils.company_name import looks_like_junk_company_name
+from app.utils.company_name import looks_like_junk_company_name, looks_synthetic_company_name
 from app.utils.job_description import extract_description
 from app.utils.scan_lock import release_scan_lock
 
@@ -214,6 +214,40 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
     ]
     if any(_title_lower == g for g in garbage_signals):
         return "skipped"
+
+    # F243 (Khushi Jain, "Data Fetch", 2026-04-17): self-heal synthetic
+    # company names from the ATS payload. Admin-added boards seed
+    # Company.name from a free-text form field (see POST /api/v1/platforms
+    # /boards), and submit-link flows use the slug verbatim. If an admin
+    # typed "FormativeGroup" for slug "formativgroup", the row stayed
+    # stuck on that spelling even after scans successfully pulled the
+    # canonical "FormativGroup" from Greenhouse's v1 JSON — nothing ever
+    # wrote the ATS-provided name back into Company.name.
+    #
+    # When the current Company.name looks synthetic (matches the slug
+    # verbatim, matches `slug.replace("-", " ").title()`, or collapses
+    # to the same lowercase-alphanumerics as the slug), prefer the raw
+    # `company_name` from the ATS payload. Admin-curated names like
+    # "Stripe, Inc." or "Alphabet" (for the google slug) do NOT collapse
+    # to the slug's alphanumerics, so they're preserved.
+    #
+    # Runs per-job rather than per-board because Greenhouse is the only
+    # fetcher that consistently populates `raw_json.company_name`, and
+    # it does so on every job. Once the first job in a scan writes the
+    # canonical name, `looks_synthetic_company_name` returns False for
+    # subsequent jobs in the same session/transaction (the updated name
+    # no longer looks synthetic), so the guard is self-limiting.
+    raw_company_name = ((raw_job.get("raw_json") or {}).get("company_name") or "").strip()
+    if (
+        raw_company_name
+        and raw_company_name != company.name
+        and looks_synthetic_company_name(company.name, company.slug)
+    ):
+        logger.info(
+            "F243 self-heal: company name %r -> %r (slug=%r, platform=%s, board_id=%s)",
+            company.name, raw_company_name, company.slug, board.platform, board.id,
+        )
+        company.name = raw_company_name
 
     location_raw = raw_job.get("location_raw", "") or ""
     remote_scope = raw_job.get("remote_scope", "") or ""
