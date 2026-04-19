@@ -344,6 +344,16 @@ export function ResumeScorePage() {
       queryClient.invalidateQueries({ queryKey: ["resumes"] });
       queryClient.invalidateQueries({ queryKey: ["active-resume"] });
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      // F242: same fix as ResumeSwitcher.invalidateAll. When the user
+      // switches persona directly from this page (star icon per resume
+      // row), the Intelligence tabs also need to forget their cached
+      // per-resume answers or `/intelligence` will render stale
+      // coverage/on_resume flags until a hard refresh. Prefix-key
+      // invalidation clears every `["skill-gaps", <cluster>]` variant.
+      queryClient.invalidateQueries({ queryKey: ["skill-gaps"] });
+      queryClient.invalidateQueries({ queryKey: ["salary-insights"] });
+      queryClient.invalidateQueries({ queryKey: ["timing-intelligence"] });
+      queryClient.invalidateQueries({ queryKey: ["networking-suggestions"] });
     },
   });
 

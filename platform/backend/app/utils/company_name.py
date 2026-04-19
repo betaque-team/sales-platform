@@ -56,6 +56,77 @@ _KNOWN_SCRATCH_NAMES = frozenset({"1name"})
 _PURELY_NUMERIC_RE = re.compile(r"^[\d\s]+$")
 
 
+def looks_synthetic_company_name(name: str | None, slug: str | None) -> bool:
+    """Return True if ``name`` was almost certainly auto-derived from
+    ``slug`` rather than typed by a human who knew the company's real
+    spelling.
+
+    Feedback ticket 2026-04-17 (Khushi Jain, "Data Fetch"): the
+    platform stored ``FormativeGroup`` as the display name for slug
+    ``formativgroup`` on Greenhouse — Greenhouse's own API returns
+    ``FormativGroup`` (one 'a-tiv', not 'a-tive') so something between
+    the scanner and the display was silently inserting an extra 'e'.
+    Tracing backwards, the culprit was a discovery path that seeded
+    ``name = slug.replace("-", " ").title()`` and a submit-link path
+    that used ``name = slug`` verbatim — both produce a "synthetic"
+    Company.name that carries no more information than the slug. When
+    a scan later pulls a fresh ``company_name`` field from the ATS
+    (Greenhouse's v1 JSON, for example), we should prefer the ATS
+    value over our synthetic guess, because the ATS knows the real
+    capitalization of the brand.
+
+    But we must NOT override names that an admin curated manually —
+    e.g. the admin legitimately renamed ``stripe`` to ``Stripe, Inc.``,
+    or there's a parent-company grouping like ``Alphabet`` for the
+    ``google`` slug. Those names carry admin intent; blindly revert-
+    ing to the ATS-provided value would erase that work.
+
+    The heuristic:
+
+    - If name matches slug verbatim (``name == slug``) — pure
+      placeholder from submit-link.
+    - If name matches ``slug.replace("-", " ").title()`` — the
+      discovery task's default.
+    - If collapsing both to lowercase-alphanumerics makes them equal
+      (``"".join(ch for ch in name.lower() if ch.isalnum()) ==
+      "".join(ch for ch in slug.lower() if ch.isalnum())``) — catches
+      the FormativeGroup → formativegroup case where the admin typed
+      a camelCase name that round-tripped to the same slug. The
+      admin typed a *close-to-slug* name without knowing the real
+      spelling; the ATS knows better.
+
+    We explicitly do NOT treat simple casing or punctuation changes
+    as synthetic — ``Alphabet`` vs ``alphabet`` is synthetic (same
+    alphanumerics), but ``Alphabet, Inc.`` vs ``alphabet`` is NOT
+    (extra ", Inc." tokens carry human intent).
+    """
+    if not name or not slug:
+        return False
+    stripped = name.strip()
+    if not stripped:
+        return False
+
+    # (a) Exact slug passthrough.
+    if stripped == slug:
+        return True
+
+    # (b) Discovery-task default: slug-to-title.
+    if stripped == slug.replace("-", " ").title():
+        return True
+
+    # (c) Alphanumeric collapse: same characters + casing/spacing
+    # variations only. This catches FormativeGroup/formativegroup but
+    # deliberately rejects "Stripe, Inc." vs "stripe" (comma + tokens
+    # survive the collapse).
+    def _alnum_only(s: str) -> str:
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+
+    if _alnum_only(stripped) == _alnum_only(slug):
+        return True
+
+    return False
+
+
 def looks_like_junk_company_name(name: str | None) -> bool:
     """Return True if `name` should be rejected as a Company row.
 
