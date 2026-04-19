@@ -106,8 +106,18 @@ export function IntelligencePage() {
         </div>
       )}
 
-      {tab === "skills" && <SkillGapTab roleCluster={roleFilter} />}
-      {tab === "salary" && <SalaryTab roleCluster={roleFilter} />}
+      {tab === "skills" && (
+        <SkillGapTab
+          roleCluster={roleFilter}
+          clusterDisplay={clusterDisplay(roleFilter, activeClusters)}
+        />
+      )}
+      {tab === "salary" && (
+        <SalaryTab
+          roleCluster={roleFilter}
+          clusterDisplay={clusterDisplay(roleFilter, activeClusters)}
+        />
+      )}
       {tab === "timing" && <TimingTab />}
       {tab === "networking" && <NetworkingTab />}
     </div>
@@ -116,7 +126,30 @@ export function IntelligencePage() {
 
 // ── Skill Gap Tab ─��─────────────────────────────────────────────────────────
 
-function SkillGapTab({ roleCluster }: { roleCluster: string }) {
+// F244: resolve the display label for the currently-selected cluster.
+// Passed through to the tab bodies so the filter-state banner can show
+// "infra (Infrastructure / DevOps / SRE)" instead of the bare machine
+// name. When no cluster is selected we fall back to "All relevant
+// clusters" — matches the backend's implicit behaviour of summing
+// demand across every Job with relevance_score > 0.
+function clusterDisplay(
+  name: string,
+  clusters: { name: string; display_name: string | null }[],
+): string {
+  if (!name) return "All relevant clusters";
+  const match = clusters.find((c) => c.name === name);
+  const display = match?.display_name?.trim();
+  if (display && display !== name) return `${name} (${display})`;
+  return name;
+}
+
+function SkillGapTab({
+  roleCluster,
+  clusterDisplay,
+}: {
+  roleCluster: string;
+  clusterDisplay: string;
+}) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["skill-gaps", roleCluster],
     queryFn: () => getSkillGaps(roleCluster || undefined),
@@ -131,6 +164,30 @@ function SkillGapTab({ roleCluster }: { roleCluster: string }) {
 
   return (
     <div className="space-y-4">
+      {/* F244: Sarthak filed a ticket on 2026-04-19 that Skill Gaps
+          "is running on all jobs instead of selected role.cluster".
+          The backend DOES filter correctly when `role_cluster` is
+          passed — we verified end-to-end with live API calls showing
+          distinct top-skills per cluster — but the UI gave no visible
+          cue that the filter was active, so cross-cluster skills
+          (e.g. `python`, `gdpr`, `compliance` appear in both infra
+          AND security jobs) read as "filter isn't working." This
+          banner states the exact filter in play and makes the
+          Jobs-Analyzed denominator concrete. */}
+      <div
+        className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-800"
+        role="status"
+        aria-live="polite"
+      >
+        <Brain className="h-4 w-4 flex-shrink-0" />
+        <span>
+          Analyzing <span className="font-semibold">{formatCount(summary.jobs_analyzed)}</span>
+          {" "}job{summary.jobs_analyzed === 1 ? "" : "s"} in
+          {" "}<span className="font-semibold">{clusterDisplay}</span>
+          {roleCluster ? "." : "; select a role cluster above to narrow the view."}
+        </span>
+      </div>
+
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <StatCard label="Jobs Analyzed" value={summary.jobs_analyzed} />
@@ -230,7 +287,13 @@ function SkillGapTab({ roleCluster }: { roleCluster: string }) {
 
 // ── Salary Tab ──────────────────────────────────────────────────────────────
 
-function SalaryTab({ roleCluster }: { roleCluster: string }) {
+function SalaryTab({
+  roleCluster,
+  clusterDisplay,
+}: {
+  roleCluster: string;
+  clusterDisplay: string;
+}) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["salary-insights", roleCluster],
     queryFn: () => getSalaryInsights(roleCluster || undefined),
@@ -245,6 +308,23 @@ function SalaryTab({ roleCluster }: { roleCluster: string }) {
 
   return (
     <div className="space-y-4">
+      {/* F244 sibling: same filter-state banner as SkillGapTab. The
+          Salary tab shares the role-cluster dropdown so the same
+          "is this actually filtered?" confusion applies here. */}
+      <div
+        className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-800"
+        role="status"
+        aria-live="polite"
+      >
+        <DollarSign className="h-4 w-4 flex-shrink-0" />
+        <span>
+          Salary stats across <span className="font-semibold">{formatCount(data.total_with_salary)}</span>
+          {" "}job{data.total_with_salary === 1 ? "" : "s"} with listed pay in
+          {" "}<span className="font-semibold">{clusterDisplay}</span>
+          {roleCluster ? "." : "; select a role cluster above to narrow the view."}
+        </span>
+      </div>
+
       {/* Overall stats */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <StatCard label="Jobs w/ Salary" value={data.total_with_salary} />
