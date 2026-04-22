@@ -390,7 +390,17 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     doc_type: DocType = Form(...),
-    doc_label: str = Form(default=""),
+    # F241(a): cap ``doc_label`` to match the ``String(200)`` backing
+    # column. Pre-fix, the Form binding accepted any-length string; a
+    # 201+ char label crashed on the SQLAlchemy assignment and escaped
+    # as a bare HTTP 500 ("Internal Server Error" plain-text body,
+    # same shape as F239's pre-fix crash). FastAPI forwards
+    # ``max_length`` to the Pydantic validator, so overflow now 422s
+    # at parse time with ``string_too_long`` — actionable for the
+    # admin, no DB round-trip. No sibling ``Form(default=…)`` exists
+    # under ``app/api/v1/`` (verified by grep during the F241 sweep),
+    # so this is a spot fix rather than a pattern-wide refactor.
+    doc_label: str = Form(default="", max_length=200),
     replace_existing: bool = Form(
         default=False,
         description=(

@@ -426,3 +426,70 @@ def test_doc_type_enum_matches_model_column_width():
     assert set(doc_types) == expected, (
         f"DocType drift: expected {expected}, got {set(doc_types)}"
     )
+
+
+def test_upload_doc_label_form_field_capped_to_column_width():
+    """F241(a) regression — ``doc_label`` Form field must declare
+    ``max_length=200`` so an overflow 422s at parse time instead of
+    propagating as a 500 from the ``String(200)`` DB column.
+
+    Pre-fix boundary (tester-verified, commit c97ff38):
+        doc_label × 100 → 201
+        doc_label × 200 → 201 (at the column cap)
+        doc_label × 201 → **500**  ← the bug: unhandled DB error
+        doc_label × 300/500        → 500
+
+    FastAPI wires ``Form(max_length=…)`` into the Pydantic validator
+    for the endpoint's request model, so this test asserts the
+    constraint is present at the signature level rather than relying
+    on a live HTTP round-trip (no DB fixture in the unit-test pass).
+
+    Independent markers:
+      (1) the default-value Form metadata carries a ``max_length``
+          attribute equal to 200,
+      (2) the declared value matches the ``String(200)`` DB column
+          width — drifts between the two would re-open the bug.
+    """
+    import inspect
+
+    from app.api.v1.profiles import upload_document
+    from app.models.profile import ProfileDocument
+
+    sig = inspect.signature(upload_document)
+    param = sig.parameters.get("doc_label")
+    assert param is not None, (
+        "upload_document() no longer declares a `doc_label` parameter — "
+        "if the field was renamed, update this test AND add the same "
+        "max_length guard to the replacement."
+    )
+
+    # FastAPI's ``Form(...)`` returns a ``fastapi.params.Form`` FieldInfo
+    # subclass. ``max_length`` is stored on the instance in Pydantic V2,
+    # either as the attribute directly or on the ``metadata`` list.
+    field_info = param.default
+    declared = getattr(field_info, "max_length", None)
+    if declared is None:
+        # Pydantic V2 sometimes tucks it into the metadata list as a
+        # ``MaxLen(200)`` constraint. Walk the metadata for a match.
+        for item in getattr(field_info, "metadata", []) or []:
+            if getattr(item, "max_length", None) is not None:
+                declared = item.max_length
+                break
+
+    assert declared == 200, (
+        f"doc_label Form field must declare max_length=200 to match the "
+        f"ProfileDocument.doc_label String(200) column — got {declared!r}. "
+        "Without this cap, a 201+ char label crashes the SQLAlchemy "
+        "assignment and escapes as HTTP 500 (F241(a))."
+    )
+
+    # Cross-check against the ORM column width so a future DB migration
+    # that widens the column also flags here — either move the cap up
+    # in the same commit, or consciously leave the stricter API limit.
+    col = ProfileDocument.__table__.c.doc_label
+    col_width = getattr(col.type, "length", None)
+    assert col_width == declared, (
+        f"doc_label column width ({col_width}) drifted from the Form "
+        f"max_length ({declared}). Keep them in sync or the bug pattern "
+        "re-opens on the wider side."
+    )
