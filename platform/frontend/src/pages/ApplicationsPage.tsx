@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApplications, getApplicationStats, updateApplication, deleteApplication, getApplication } from "@/lib/api";
-import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut, FileText } from "lucide-react";
+import { getApplications, getApplicationStats, updateApplication, deleteApplication, getApplication, getApplicationSubmission, promoteAnswer } from "@/lib/api";
+import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut, FileText, Bot, BookmarkPlus, Check } from "lucide-react";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
-import type { ApplicationDetail } from "@/lib/types";
+import type { ApplicationDetail, SubmissionDetail } from "@/lib/types";
 
 const STATUS_TABS: { label: string; value: string }[] = [
   { label: "All", value: "" },
@@ -40,15 +40,24 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 export function ApplicationsPage() {
   const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState("");
-  // F228 — provenance filter. "" = all, "review_queue" | "manual_prepare"
-  // = narrow to that source. Matches the backend Literal values from
-  // applications.py:list_applications.
-  const [sourceFilter, setSourceFilter] = useState<"" | "review_queue" | "manual_prepare">("");
+  // F228 — provenance filter. "" = all, "review_queue" | "manual_prepare" |
+  // "routine" = narrow to that source. Matches the backend Literal values
+  // from applications.py:list_applications. "routine" (v6) was added once
+  // the Claude Routine Apply feature started writing rows with a distinct
+  // submission_source — it gets its own dedicated detail modal because
+  // the snapshot shape is Q/A + cover letter + screenshots, not a
+  // resume-text + score tile like the review_queue path.
+  const [sourceFilter, setSourceFilter] = useState<"" | "review_queue" | "manual_prepare" | "routine">("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   // Feature C — id of the application whose apply-time snapshot is
   // currently displayed in the modal. null = modal closed.
   const [snapshotOpenFor, setSnapshotOpenFor] = useState<string | null>(null);
+  // v6 — id of the application whose routine-submission detail is open.
+  // Separate state from snapshotOpenFor because the two modals render
+  // completely different payload shapes (SubmissionDetail vs
+  // ApplicationDetail.applied_resume_*).
+  const [routineOpenFor, setRoutineOpenFor] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   // F222: destructure full query objects for banner-backed error surfacing.
@@ -149,7 +158,7 @@ export function ApplicationsPage() {
         <select
           value={sourceFilter}
           onChange={(e) => {
-            setSourceFilter(e.target.value as "" | "review_queue" | "manual_prepare");
+            setSourceFilter(e.target.value as "" | "review_queue" | "manual_prepare" | "routine");
             setPage(1);
           }}
           className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm"
@@ -158,6 +167,7 @@ export function ApplicationsPage() {
           <option value="">All sources</option>
           <option value="review_queue">Review queue</option>
           <option value="manual_prepare">Manual</option>
+          <option value="routine">Claude Routine</option>
         </select>
         <input
           type="text"
@@ -218,12 +228,14 @@ export function ApplicationsPage() {
                   </td>
                   <td className="px-4 py-3 text-gray-600">{app.resume_label || "—"}</td>
                   <td className="px-4 py-3">
-                    {/* Feature C — provenance badge. `review_queue` =
-                        created via the Applied button in the Review
-                        Queue (carries an apply-time resume snapshot);
-                        `manual_prepare` = classic /applications/prepare
-                        flow. Legacy rows with no submission_source
-                        render as `manual_prepare` by DB default. */}
+                    {/* Feature C + v6 — provenance badge. Three shapes:
+                        `review_queue`  = Applied button in Review Queue
+                                          (carries resume-text snapshot)
+                        `routine`       = Claude Routine Apply submission
+                                          (carries Q/A + cover letter)
+                        `manual_prepare`= classic /applications/prepare
+                        Legacy rows without submission_source render as
+                        Manual (DB default). */}
                     {app.submission_source === "review_queue" ? (
                       <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-200">
                         Review queue
@@ -232,6 +244,11 @@ export function ApplicationsPage() {
                             · {app.applied_resume_score_overall}
                           </span>
                         )}
+                      </span>
+                    ) : app.submission_source === "routine" ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200">
+                        <Bot className="h-3 w-3" />
+                        Routine
                       </span>
                     ) : (
                       <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
@@ -281,15 +298,29 @@ export function ApplicationsPage() {
                           <ExternalLink className="h-4 w-4" />
                         </a>
                       )}
-                      {/* Feature C — "What we sent" modal trigger. Only
-                          shown for rows that have a snapshot (review_queue
-                          origin), since manual_prepare rows don't carry
-                          the resume text + score snapshot. */}
+                      {/* Feature C — "What we sent" modal trigger. Shown
+                          for rows that carry a submit-time snapshot. Two
+                          modal shapes:
+                            review_queue → ApplySnapshotModal (resume body
+                                            + score tiles)
+                            routine      → RoutineSubmissionModal (Q/A +
+                                            cover letter + screenshots)
+                          manual_prepare rows never carry a snapshot so
+                          no button is rendered for them. */}
                       {app.submission_source === "review_queue" && (
                         <button
                           onClick={() => setSnapshotOpenFor(app.id)}
                           className="rounded p-1 text-gray-400 hover:bg-primary-50 hover:text-primary-600"
                           title="What we sent"
+                        >
+                          <FileText className="h-4 w-4" />
+                        </button>
+                      )}
+                      {app.submission_source === "routine" && (
+                        <button
+                          onClick={() => setRoutineOpenFor(app.id)}
+                          className="rounded p-1 text-gray-400 hover:bg-emerald-50 hover:text-emerald-600"
+                          title="Routine submission detail"
                         >
                           <FileText className="h-4 w-4" />
                         </button>
@@ -344,6 +375,18 @@ export function ApplicationsPage() {
         <ApplySnapshotModal
           applicationId={snapshotOpenFor}
           onClose={() => setSnapshotOpenFor(null)}
+        />
+      )}
+
+      {/* v6 Claude Routine — dedicated detail modal for routine rows.
+          Separate component because the payload shape (Q/A list, cover
+          letter, screenshots, detected_issues) is fundamentally unlike
+          the review_queue resume snapshot, and conflating them would
+          make the UI code a pile of optional-chained ternaries. */}
+      {routineOpenFor && (
+        <RoutineSubmissionModal
+          applicationId={routineOpenFor}
+          onClose={() => setRoutineOpenFor(null)}
         />
       )}
     </div>
@@ -460,6 +503,287 @@ function ScoreTile({ label, value }: { label: string; value: number }) {
     <div className="rounded-md bg-gray-50 px-3 py-2 text-center ring-1 ring-gray-200">
       <div className="text-lg font-semibold text-gray-900">{value}</div>
       <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
+    </div>
+  );
+}
+
+
+/**
+ * v6 Claude Routine Apply — submission-detail modal.
+ *
+ * Fetches the full SubmissionDetail payload for a routine-submitted
+ * application and renders:
+ *   - Q/A answers, with a "Save to Answer Book" button for each
+ *     generated answer (user-supplied manual-required answers are
+ *     already canonical, so no promote button there)
+ *   - cover letter text (always regenerated per-submit)
+ *   - confirmation text captured from the thank-you page
+ *   - screenshot keys (download links — the bytes live on object
+ *     storage keyed by these)
+ *   - detected_issues list (humanizer warnings that didn't block)
+ *   - profile_snapshot (resume + contact fields frozen at submit)
+ */
+function RoutineSubmissionModal({
+  applicationId,
+  onClose,
+}: {
+  applicationId: string;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const detailQ = useQuery<SubmissionDetail>({
+    queryKey: ["application-submission", applicationId],
+    queryFn: () => getApplicationSubmission(applicationId),
+  });
+  // Track which answers have been promoted in this modal session so the
+  // button flips to a success state without refetching the whole payload.
+  // Keyed by question text (the primary key the promote endpoint uses).
+  const [promoted, setPromoted] = useState<Record<string, boolean>>({});
+
+  const promoteMutation = useMutation({
+    mutationFn: ({ question, answer }: { question: string; answer: string }) =>
+      promoteAnswer(applicationId, { question, answer }),
+    onSuccess: (_data, vars) => {
+      setPromoted((prev) => ({ ...prev, [vars.question]: true }));
+      queryClient.invalidateQueries({ queryKey: ["answer-book"] });
+    },
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-100">
+              <Bot className="h-4 w-4 text-emerald-700" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">
+                Routine submission detail
+              </h2>
+              <p className="mt-0.5 text-xs text-gray-500">
+                Everything Claude sent on your behalf — answers, cover
+                letter, and screenshots.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            aria-label="Close"
+          >
+            <XCircle className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {detailQ.isLoading && (
+            <p className="text-sm text-gray-500">Loading submission…</p>
+          )}
+          {detailQ.isError && (
+            <p className="text-sm text-red-600">
+              Could not load submission detail.
+            </p>
+          )}
+          {detailQ.data && (() => {
+            const d = detailQ.data;
+            return (
+              <>
+                {/* Detected-issues banner — humanizer warnings that
+                    passed non-blocking. Show only when non-empty so it
+                    doesn't take space on clean runs. */}
+                {d.detected_issues && d.detected_issues.length > 0 && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+                      Humanizer warnings ({d.detected_issues.length})
+                    </p>
+                    <ul className="mt-1 list-disc pl-5 text-xs text-amber-700">
+                      {d.detected_issues.map((issue, i) => (
+                        <li key={i}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Q/A answers — the heart of this modal. Generated
+                    answers get a promote button; manual-required ones
+                    come from the Answer Book so no promote needed.
+                    The backend ships answers_json as a loose
+                    Record<string, unknown>[] so the types stay flexible;
+                    we narrow at runtime here and render only rows with
+                    a string question+answer. */}
+                {d.answers_json && d.answers_json.length > 0 && (() => {
+                  const narrowed = d.answers_json
+                    .map((qa) => {
+                      const question =
+                        typeof qa.question === "string" ? qa.question : null;
+                      const answer =
+                        typeof qa.answer === "string" ? qa.answer : null;
+                      const source =
+                        typeof qa.source === "string" ? qa.source : "unknown";
+                      if (!question || !answer) return null;
+                      return { question, answer, source };
+                    })
+                    .filter(
+                      (
+                        x,
+                      ): x is { question: string; answer: string; source: string } =>
+                        x !== null,
+                    );
+                  if (narrowed.length === 0) return null;
+                  return (
+                    <div>
+                      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                        Application answers ({narrowed.length})
+                      </p>
+                      <ul className="space-y-3">
+                        {narrowed.map((qa, i) => {
+                          const isPromoted =
+                            promoted[qa.question] ||
+                            qa.source === "answer_book";
+                          const canPromote = qa.source === "generated";
+                          return (
+                            <li
+                              key={i}
+                              className="rounded-md border border-gray-200 p-3"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="flex-1 text-sm font-medium text-gray-900">
+                                  {qa.question}
+                                </p>
+                                <span
+                                  className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                                    qa.source === "answer_book"
+                                      ? "bg-indigo-50 text-indigo-700"
+                                      : qa.source === "generated"
+                                        ? "bg-emerald-50 text-emerald-700"
+                                        : "bg-gray-100 text-gray-600"
+                                  }`}
+                                >
+                                  {qa.source}
+                                </span>
+                              </div>
+                              <p className="mt-1.5 whitespace-pre-wrap text-sm text-gray-700">
+                                {qa.answer}
+                              </p>
+                              {canPromote && (
+                                <div className="mt-2 flex justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      promoteMutation.mutate({
+                                        question: qa.question,
+                                        answer: qa.answer,
+                                      })
+                                    }
+                                    disabled={
+                                      isPromoted || promoteMutation.isPending
+                                    }
+                                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                                      isPromoted
+                                        ? "bg-emerald-50 text-emerald-700"
+                                        : "bg-primary-50 text-primary-700 hover:bg-primary-100"
+                                    } disabled:cursor-not-allowed`}
+                                  >
+                                    {isPromoted ? (
+                                      <>
+                                        <Check className="h-3 w-3" />
+                                        Saved
+                                      </>
+                                    ) : (
+                                      <>
+                                        <BookmarkPlus className="h-3 w-3" />
+                                        Save to Answer Book
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+
+                {/* Cover letter — always regenerated per-submit so the
+                    text is authoritative for this application only. */}
+                {d.cover_letter_text && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Cover letter sent
+                    </p>
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-gray-50 p-3 text-xs text-gray-700 ring-1 ring-gray-200">
+                      {d.cover_letter_text}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Confirmation text captured from the ATS thank-you
+                    page — the strongest "it actually went through"
+                    signal we have short of an email. */}
+                {d.confirmation_text && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Confirmation captured
+                    </p>
+                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-emerald-50 p-3 text-xs text-emerald-800 ring-1 ring-emerald-200">
+                      {d.confirmation_text}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Screenshot keys — just link to the object-store
+                    paths. Rendering the images inline would mean an
+                    extra signed-URL round trip; keys are enough for
+                    the "verify it happened" use case. */}
+                {d.screenshot_keys && d.screenshot_keys.length > 0 && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Screenshots ({d.screenshot_keys.length})
+                    </p>
+                    <ul className="space-y-1 text-xs">
+                      {d.screenshot_keys.map((key, i) => (
+                        <li
+                          key={i}
+                          className="truncate rounded bg-gray-50 px-2 py-1 font-mono text-gray-600"
+                        >
+                          {key}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Profile snapshot — name + email + resume used at
+                    submit time. Frozen so later profile edits don't
+                    retroactively rewrite history. */}
+                {d.profile_snapshot && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Profile snapshot at submit
+                    </p>
+                    <div className="rounded-md bg-gray-50 p-3 text-xs text-gray-700 ring-1 ring-gray-200">
+                      <pre className="whitespace-pre-wrap">
+                        {JSON.stringify(d.profile_snapshot, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      </div>
     </div>
   );
 }

@@ -5149,4 +5149,252 @@ Expected lift on the "relevant jobs ≥ 50" count within 1 week: **+100 to +300*
 
 ---
 
+**End of section 28.**
+
+---
+
+## 29. Round 5B — Claude Routine Apply (v6) (2026-04-22)
+
+**Context:** The v6 Claude Routine Apply feature just landed on `feat/claude-routine-apply` (backend commit `a0b5046`, frontend in the follow-on commit). This is an **operator-panel-only** feature in this deploy — the MCP-Chrome client itself is out of scope; these endpoints are the control-plane it'll poll. Test plan is **forward-looking**; log any bugs via the normal workflow (next finding number continues from Track B — `#243+`).
+
+**What shipped in this deploy:**
+
+| # | Surface | Files to read first |
+|---|---|---|
+| T5B-01 | Required answer-book setup page | `app/services/answer_book_seed.py`, `frontend/src/pages/RequiredSetupPage.tsx` |
+| T5B-02 | Routine operator panel | `app/api/v1/routine.py`, `frontend/src/pages/RoutinePage.tsx` |
+| T5B-03 | Pre-flight gate (kill-switch + coverage + daily cap) | `app/api/v1/routine.py:POST /runs` |
+| T5B-04 | Humanizer pipeline | `app/services/humanizer.py`, `tests/test_humanizer.py` |
+| T5B-05 | Submission detail modal + promote-answer | `frontend/src/pages/ApplicationsPage.tsx:RoutineSubmissionModal`, `app/api/v1/applications.py:POST /{id}/promote-answer` |
+| T5B-06 | Claude Routine sidebar + routing | `frontend/src/components/Sidebar.tsx`, `frontend/src/App.tsx` |
+
+Each section below has: **what to verify · expected signals · things to look for (potential bugs)**. Commands assume `docker compose exec backend …` on the prod VM unless noted.
+
+---
+
+### T5B-01. Required answer-book setup
+
+**What it does.** Seeds 16 canonical Answer Book entries (`source="manual_required"`, `is_locked=True`) covering salary minima, notice period, work auth, EEO. The routine refuses to run until every row has an answer. Entry list is pinned in `app/services/answer_book_seed.py:REQUIRED_ENTRIES`; unit test `tests/test_answer_book_seed.py` asserts the 16-row invariant.
+
+#### What to verify
+
+1. **First visit seeds the 16 rows.** Log in with a brand-new account and navigate to `/answer-book/required-setup`. Expected: progress bar shows `0/16 filled`, a "Seed required entries" button is visible, and clicking it populates the grouped list. Re-clicking must be a no-op (seed endpoint is idempotent — confirm DB row count doesn't double).
+
+2. **Required rows are locked against delete.**
+   ```bash
+   docker compose exec backend python -c "
+   from app.workers.tasks._db import SyncSession
+   from app.models.answer_book import AnswerBookEntry
+   from sqlalchemy import select
+   s = SyncSession()
+   # Any manual_required row
+   row = s.execute(select(AnswerBookEntry).where(AnswerBookEntry.source=='manual_required').limit(1)).scalar_one()
+   print('id:', row.id, 'locked:', row.is_locked)
+   "
+   ```
+   Then attempt `DELETE /api/v1/answer-book/{id}` on that id via the browser devtools network tab — expected 400 with a "locked row" message. Same for `PUT` that tries to change `question` or `category` (only `answer` should be patchable).
+
+3. **Coverage endpoint reports accurately.**
+   ```bash
+   curl -b cookies.txt 'https://salesplatform.reventlabs.com/api/v1/answer-book/required-coverage' | jq
+   ```
+   Expected shape: `{total_required: 16, total_filled: N, complete: bool, missing: [...]}`. `missing` only lists unfilled rows; filled rows aren't echoed.
+
+4. **Progress bar + "Setup incomplete" banner on /routine.** Leave at least one row empty, navigate to `/routine`. Expected: the Pre-flight card's "Answer book" cell shows "Setup incomplete" in amber with a "Finish setup →" link. Fill all 16 rows and reload — cell flips to green "Ready".
+
+#### Things to look for (potential bugs)
+
+- **Seed endpoint idempotency.** Re-seeding should return `{created: 0, already_present: 16}` on the second call — not 16/0. A non-idempotent seeder would double the row count and confuse every downstream coverage check.
+- **Lock bypass via PUT**. Locked rows must reject `PUT` payloads that set `question`, `category`, `question_key`, `is_locked`, or `source` — only `answer` is mutable. Try sending `{answer: "x", category: "preferences"}` on a locked row; expected 400.
+- **Progress bar off-by-one**. With exactly 15/16 filled, the bar should show ~93.75% width, not 100%. With 16/16, the emerald "All required answers filled" banner appears.
+- **Manual category in seed entry**. Every entry must use a category the answer_book router accepts (`preferences`, `work_auth`, `personal_info`). A typo silently breaks the "filter by category" pills on the Answer Book list page. Covered by `test_answer_book_seed.py::test_required_entries_use_valid_categories`.
+
+---
+
+### T5B-02. Routine operator panel
+
+**What it does.** `/routine` is the operator-facing control surface: pre-flight status, top-10 jobs the routine would target next, kill-switch, and recent runs. The page polls `GET /routine/top-to-apply` every 30s so the daily-cap counter reflects in-flight submissions.
+
+#### What to verify
+
+1. **Page gates on auth.** Log out, hit `/routine` directly → redirected to `/login`. Confirmed structurally by `tests/test_routine_router.py::test_every_route_requires_authentication`, but spot-check with the UI.
+
+2. **Top-to-apply respects the filter stack.** With at least one job on a relevant role cluster, in a supported geography bucket, on any non-LinkedIn platform:
+   ```bash
+   curl -b cookies.txt 'https://salesplatform.reventlabs.com/api/v1/routine/top-to-apply?limit=10' | jq
+   ```
+   Expected: `answer_book_ready` (bool), `daily_cap_remaining` (0-10), `jobs: [...]`. Jobs should be ordered by `relevance_score DESC` and exclude every LinkedIn row. If a LinkedIn job appears, the `EXCLUDED_PLATFORMS` filter regressed.
+
+3. **30-day company cooldown.** Create a prepared application for ANY job at company X (e.g. via the existing Review Queue accept flow), then check the top-to-apply list. Expected: every job at company X is suppressed for 30 days. Remove the application (or wait 30 days); company re-enters.
+
+4. **Daily cap counter.**
+   ```sql
+   -- simulate 10 submissions in last 24h for the caller
+   INSERT INTO application_submissions (id, application_id, submitted_at, ...) ...
+   ```
+   Or just observe after 10 real routine runs. Pre-flight card "Daily cap" cell should show `0 / 10` and the Top-to-apply section should still render (list doesn't gate on cap; pre-flight on `POST /runs` does — see T5B-03).
+
+5. **Kill-switch toggle.** Click "Disable routine" with an optional reason. Expected: button flips to green "Re-enable", pre-flight card shows "Routine disabled" with the reason. Under the hood:
+   ```bash
+   curl -b cookies.txt 'https://salesplatform.reventlabs.com/api/v1/routine/kill-switch' | jq
+   ```
+   Returns `{disabled: true, disabled_at: "...", reason: "..."}`. Re-enable clears `reason` to null.
+
+#### Things to look for (potential bugs)
+
+- **LinkedIn slipping through.** Hard-coded in `EXCLUDED_PLATFORMS = frozenset({"linkedin"})`. If a lookalike platform name (`linkedin_easy_apply`, `LinkedIn`) appears, the filter may not match — it's a case-sensitive membership check. Verify with `SELECT DISTINCT platform FROM jobs WHERE platform ILIKE '%linkedin%'`.
+- **Top-to-apply includes archived/expired jobs.** The filter excludes `status IN ('expired','archived')`. If one shows up, the status enum has drifted; check `app/models/job.py::JOB_STATUSES`.
+- **Polling drift.** The page refetches every 30s. If you leave the tab open for 10 min and the "Daily cap" counter never changes even after a real submit, the TanStack query isn't invalidating on the mutation — known class of bug.
+- **Kill-switch reason over-trimmed.** The text input accepts up to ~200 chars. A reason at exactly the column limit should round-trip cleanly; truncation would be a silent DB ColumnTooLong error.
+- **Race: two browser tabs toggling kill-switch.** Last-write-wins is acceptable but both tabs should eventually converge via the 30s poll.
+
+---
+
+### T5B-03. Pre-flight gate on `POST /routine/runs`
+
+**What it does.** The single choke-point that decides whether a run is allowed to start. Live-mode runs must pass three gates:
+1. Kill-switch off.
+2. Required-coverage 100%.
+3. Daily cap not hit (only in live mode; dry-runs bypass).
+
+Dry-run mode (`mode="dry_run"`) skips gate 3 so operators can test-drive the routine's decision logic without burning a cap slot.
+
+#### What to verify
+
+1. **Happy path — live-mode run accepted.** With kill-switch off, 16/16 coverage, cap remaining ≥ 1:
+   ```bash
+   curl -X POST -b cookies.txt \
+     -H 'content-type: application/json' \
+     -d '{"mode":"live"}' \
+     'https://salesplatform.reventlabs.com/api/v1/routine/runs'
+   ```
+   Expected: 200 with `{id: "...", status: "in_progress", ...}`.
+
+2. **Gate 1 — kill-switch on rejects live runs.** Disable the switch (UI or `POST /kill-switch`), retry the run. Expected 403 with detail `"Routine is disabled"` (or similar). Re-enable; the retry succeeds.
+
+3. **Gate 2 — coverage < 100% rejects live runs.** Clear one required answer (`UPDATE answer_book_entries SET answer='' WHERE question_key='eeo_gender' AND user_id=<you>`), retry. Expected 403 with detail that names the coverage gap (not the specific missing fields — just "setup incomplete").
+
+4. **Gate 3 — daily cap hit rejects live runs.** Stuff the last 24h with 10 completed submissions (see T5B-02 step 4), retry live. Expected 403 with detail "daily cap hit".
+
+5. **Dry-run bypasses gate 3.** With cap at 0/10 remaining, `POST /runs` with `{"mode":"dry_run"}` — expected 200. Confirms operators can test-drive even when saturated.
+
+6. **Dry-run does NOT bypass gates 1 and 2.** With kill-switch on OR coverage incomplete, dry-run must still 403. If a dry-run works when the kill-switch is on, the gating is broken.
+
+#### Things to look for (potential bugs)
+
+- **Gate ordering**. Rejection should ideally mention ALL failing gates, not just the first — but the MVP returns on first failure. If the detail message misstates which gate failed (e.g. says "coverage incomplete" when the real issue was kill-switch), gate ordering regressed.
+- **Audit log on gate rejection.** Every pre-flight failure should emit an `audit.log_action` entry — verify `SELECT * FROM audit_log WHERE action LIKE '%routine%' ORDER BY created_at DESC LIMIT 10;` shows the rejection.
+- **Coverage gate uses stale cache.** If the user fills the last required row and immediately POSTs `/runs`, the gate should recompute coverage — no caching layer that would 403 on a stale read.
+- **Day-boundary edge in cap math.** Cap uses a 24h rolling window (`submitted_at >= NOW() - INTERVAL '24 hours'`), NOT calendar day. Submitting at 23:59:00 and 00:01:00 next day both count against the window; this is intentional.
+
+---
+
+### T5B-04. Humanizer pipeline
+
+**What it does.** Strips AI fingerprints from generated answers + cover letters via an 8-pass pipeline in `app/services/humanizer.py`. Every pass is a pure function; unit coverage is comprehensive in `tests/test_humanizer.py` (26 tests). This section exercises the live `POST /routine/humanize` helper which the MCP client calls to de-fingerprint text pre-submit.
+
+#### What to verify
+
+1. **Endpoint shape.**
+   ```bash
+   curl -X POST -b cookies.txt \
+     -H 'content-type: application/json' \
+     -d '{"text":"As a senior engineer, I leverage cutting-edge tools to delve into the landscape of cloud infra."}' \
+     'https://salesplatform.reventlabs.com/api/v1/routine/humanize' | jq
+   ```
+   Expected response shape: `{text, passes_applied[], burstiness_sigma, banned_phrase_hits[], style_match_examples_used}`. `passes_applied` should list all 8 pass names in order.
+
+2. **LLM tells are stripped.** The example input above should come back with: no "As a senior", no "leverage", no "cutting-edge", no "delve", no "landscape of", no em-dashes. `banned_phrase_hits` should list the stripped phrases lowercased.
+
+3. **En-dash in salary ranges preserved.** POST `"Comp is 140k–180k."` — en-dash (`–`, U+2013) must come through untouched. If this fails, numeric ranges in cover letters are getting mangled.
+
+4. **Style-match pass is a no-op today.** Even with a user's humanization_corpus fully populated, `style_match_examples_used: 0` is expected — Phase 4 will turn this on. Locked in by `tests/test_humanizer.py::test_style_match_v6_stub_is_text_noop_even_with_sufficient_corpus`.
+
+5. **Determinism.** Re-POSTing the same input should return byte-identical output. Reproducibility is load-bearing for the "pass 8 occasional imperfection" invariant.
+
+#### Things to look for (potential bugs)
+
+- **Humanizer drops legitimate content.** If the output is noticeably shorter than input on plain prose (no banned phrases present), a regex is over-matching. Try POSTing a real cover letter written by a human — output should be near-identical.
+- **Endpoint leaks other users' corpus.** The humanizer loads corpus scoped to the CALLER. Verify `SELECT user_id FROM humanization_corpus WHERE ...` — the endpoint must filter on `get_current_user`. A cross-user leak here is a security finding (P0).
+- **Pipeline order changed.** The 8 passes MUST run in the documented order; burstiness after banned-phrase strip (so stripping doesn't artificially raise sigma), imperfection last (so we're imperfecting the final output, not an intermediate). Confirm via `passes_applied` in the response.
+
+---
+
+### T5B-05. Submission detail modal + promote-answer
+
+**What it does.** Routine submissions are rendered in a dedicated modal on `/applications` (click the FileText icon on a "Routine" badged row). The modal shows Q/A answers with source tags (`answer_book` / `generated` / other), cover letter text, confirmation text from the ATS thank-you page, screenshot keys, and a profile snapshot. Each `generated` row has a "Save to Answer Book" button that promotes the draft into a reusable AB entry.
+
+#### What to verify
+
+1. **Routine badge renders.** After any routine submission, the `/applications` list should show a green "Routine" badge with the Bot icon on that row. Filter dropdown "Claude Routine" option narrows to just those rows.
+
+2. **Modal loads.**
+   ```bash
+   curl -b cookies.txt 'https://salesplatform.reventlabs.com/api/v1/applications/{id}/submission' | jq
+   ```
+   Expected payload matches the `SubmissionDetail` TS interface. `answers_json` is `Record<string, unknown>[]` at the type level; each row should have `{question, answer, source}` at minimum plus optional `source_ref_id`, `edit_distance`, `draft_text`.
+
+3. **Promote button flow.**
+   - Click "Save to Answer Book" on a `generated` answer.
+   - Button flips to "Saved ✓".
+   - Reload `/answer-book` — the promoted row appears as a new entry with `source="promoted"` (not `manual_required`, so it's editable).
+   - Click the button a second time on the same page-load — nothing happens (state is local). Reloading and clicking again: expected `{answer_book_entry_id: "...", already_existed: true}` — promote is idempotent.
+
+4. **Detected-issues banner.** If the humanizer surfaced warnings without blocking (e.g. "burstiness_sigma below target"), the amber banner lists them. A clean run shows no banner.
+
+5. **Screenshot keys list.** Just object-store paths — renders as mono-font rows. Clicking should NOT attempt to load the image (that's Phase 4); the v6 UI just surfaces the keys for eventual download.
+
+#### Things to look for (potential bugs)
+
+- **Mixed answer source display**. An `answer_book` answer should NOT have a promote button (it's already canonical). Only `generated` rows should surface the button. If `answer_book` rows get a button, promoting would create a duplicate of the source entry.
+- **Answers shape drift**. The frontend narrows `answers_json` at runtime (it's typed loose on purpose). If the backend ships a row without `question` or `answer`, the UI just skips it — but `SubmissionDetail.answers_json.length` should match the rendered count minus skipped rows. Spot-check on a real submission.
+- **Profile snapshot contains PII**. Values that look like PII (email/phone/zip) should already be stubbed to `{type, len}` by the backend. If a raw SSN appears, the scrubber regressed (P0 security finding).
+- **Promote on duplicate question overwrites**. The promote endpoint upserts by `(user_id, question_key)`. If a user has an EXISTING `manual_required` row for the same question_key, promoting a routine-generated answer must NOT overwrite it — the locked row wins. Verify by promoting against `eeo_gender` (a locked key); expected 400 or no-op.
+
+---
+
+### T5B-06. Sidebar + routing
+
+**What it does.** The sidebar gains a "Claude Routine" link (Bot icon) between "Applications" and "Pipeline". Two new routes: `/routine` (operator panel) and `/answer-book/required-setup` (nested under Answer Book for mental context).
+
+#### What to verify
+
+1. **Sidebar entry appears for every role.** `viewer`, `reviewer`, `admin`, `super_admin` should all see the Claude Routine link. The routine endpoints only work for the authenticated caller, so there's no role gate on the link.
+2. **`/answer-book/required-setup` nests visually under Answer Book.** The sidebar's Answer Book link keeps its active styling when the user is on the required-setup page (matches the `/answer-book/*` path pattern). If the active state flips off, the URL-matching logic regressed.
+3. **Deep-link works.** Pasting `/routine` into the URL bar while logged out redirects to `/login`; after login, lands on `/routine`. Same for `/answer-book/required-setup`.
+4. **Sidebar scrolls on short viewports.** With the Claude Routine entry, the sidebar now has 20 main items + admin + super_admin sections. At 700px viewport height, the nav must still scroll (F239 fix) — confirm by shrinking the browser.
+
+#### Things to look for (potential bugs)
+
+- **Duplicate NavLink on subroute.** Bouncing between `/routine` and `/answer-book/required-setup` shouldn't visually duplicate active-state on two different entries at once.
+- **404 for super_admin on `/routine`.** If super_admin hits a 404 on any route here, the App.tsx routing is gating on role somewhere it shouldn't (routine is role-agnostic).
+
+---
+
+### Cross-feature integration checks
+
+1. **Backend unit-test suite is green.**
+   ```bash
+   docker compose exec backend python -m pytest tests/ -q
+   ```
+   Expected: all passing (122 tests locally; CI may run a superset). Explicit v6 tests to spot in the run: `test_humanizer.py`, `test_answer_book_seed.py`, `test_routine_router.py` — 40 new tests total.
+
+2. **Frontend type-check.**
+   ```bash
+   cd frontend && npx tsc --noEmit
+   ```
+   Expected: clean exit 0.
+
+3. **Migration applied cleanly.**
+   ```bash
+   docker compose exec backend alembic current
+   ```
+   Should be at the v6 head. New tables: `routine_runs`, `application_submissions`, `humanization_corpus`, `routine_kill_switches`. New columns on `answer_book_entries`: `is_locked`, `question_key`, `source`.
+
+4. **No regression in existing Applications list.** Pre-v6 rows (`submission_source` either `review_queue` or `manual_prepare`) must render exactly as before — Routine badge only appears for the new source. Existing `ApplySnapshotModal` (FileText button on review_queue rows) must still open the resume-text snapshot modal, not the new routine modal.
+
+5. **Kill-switch survives restart.** Disable it, `docker compose restart backend`, re-check — still disabled. Then `GET /routine/top-to-apply` should show the disabled flag. Verifies the state is DB-persisted, not in-process.
+
+---
+
 **End of report.**

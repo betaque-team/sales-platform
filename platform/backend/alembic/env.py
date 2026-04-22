@@ -24,6 +24,14 @@ from app.models.company_contact import CompanyContact, JobContactRelevance  # no
 from app.models.company_office import CompanyOffice  # noqa: F401
 from app.models.profile import Profile, ProfileDocument  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
+# v6 Claude Routine Apply — new tables need to be in Base.metadata
+# so `alembic upgrade head` on a fresh DB creates them. The migration
+# file (2026_04_22_y5t6u7v8w9x0_claude_routine_apply.py) does the
+# actual DDL; these imports just register the ORM mappings.
+from app.models.routine_run import RoutineRun  # noqa: F401
+from app.models.application_submission import ApplicationSubmission  # noqa: F401
+from app.models.humanization_corpus import HumanizationCorpus  # noqa: F401
+from app.models.routine_kill_switch import RoutineKillSwitch  # noqa: F401
 from app.database import Base
 
 config = context.config

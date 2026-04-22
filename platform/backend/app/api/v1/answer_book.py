@@ -25,6 +25,12 @@ from app.models.resume import Resume
 from app.models.user import User
 from app.api.deps import get_current_user
 from app.schemas.answer_book import AnswerCreate, AnswerUpdate
+from app.schemas.routine import (
+    RequiredCoverageEntry,
+    RequiredCoverageResponse,
+    SeedRequiredResponse,
+)
+from app.services.answer_book_seed import REQUIRED_ENTRIES, REQUIRED_QUESTION_KEYS
 
 router = APIRouter(prefix="/answer-book", tags=["answer-book"])
 
@@ -302,6 +308,19 @@ async def create_answer(
 
     question_key = normalize_question_key(question)
 
+    # Reject attempts to create routine-reserved keys via the generic
+    # POST path. These must be seeded through /answer-book/seed-required
+    # so the is_locked=True flag is set correctly; letting a caller
+    # create an unlocked row with one of these keys would break the
+    # lock contract.
+    if question_key in REQUIRED_QUESTION_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail="This question is reserved for routine setup. "
+                   "Use POST /answer-book/seed-required to create, "
+                   "then PATCH the answer via /answer-book/{id}.",
+        )
+
     # Check for duplicate
     dup_query = select(AnswerBookEntry).where(
         AnswerBookEntry.user_id == user.id,
@@ -366,6 +385,26 @@ async def update_answer(
     # distinguish an explicit `null` (which we still treat as no-op for
     # these non-nullable DB columns) from omission.
     fields = body.model_fields_set
+
+    # Lock enforcement: routine-reserved entries (is_locked=True) allow
+    # the ANSWER field to be updated — that's the point of the /required-
+    # setup flow — but the question text and category are frozen. This
+    # is a hard 400 rather than a silent skip so a caller who typo's
+    # the entry_id can't accidentally mutate the seeded question.
+    if entry.is_locked:
+        if "question" in fields and body.question is not None and body.question != entry.question:
+            raise HTTPException(
+                status_code=400,
+                detail="This entry is locked (routine setup). "
+                       "Only the answer may be updated.",
+            )
+        if "category" in fields and body.category is not None and body.category != entry.category:
+            raise HTTPException(
+                status_code=400,
+                detail="This entry is locked (routine setup). "
+                       "Only the answer may be updated.",
+            )
+
     if "answer" in fields and body.answer is not None:
         entry.answer = body.answer
     if "question" in fields and body.question is not None:
@@ -395,6 +434,17 @@ async def archive_answer(
     )).scalar_one_or_none()
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
+
+    # Locked (routine-reserved) entries can't be archived — they're
+    # permanent slots. If the user wants to clear their answer they
+    # can PATCH it to empty string, and the pre-flight coverage check
+    # will flag the entry as unfilled again.
+    if entry.is_locked:
+        raise HTTPException(
+            status_code=400,
+            detail="This entry is locked (routine setup) and cannot be deleted. "
+                   "PATCH the answer to clear it instead.",
+        )
 
     entry.source = "archived"
     await db.commit()
@@ -488,3 +538,139 @@ async def get_coverage(
             for e in top_used
         ],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Claude Routine Apply — required-setup endpoints
+# ═══════════════════════════════════════════════════════════════════
+
+@router.post("/seed-required", response_model=SeedRequiredResponse)
+async def seed_required(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create the 16 routine-required answer-book entries for this user.
+
+    Idempotent: entries that already exist for ``(user_id,
+    question_key)`` are skipped (counted in ``already_present``).
+    Safe to re-call at any time — the UI /required-setup page calls
+    this on first mount.
+
+    Every row is created with ``source="manual_required"``,
+    ``is_locked=True``, and ``answer=""``. The user fills in answers
+    via PATCH /answer-book/{id} on the same page. See
+    ``services/answer_book_seed.py`` for the canonical list.
+    """
+    created = 0
+    already_present = 0
+
+    for category, question_key, question in REQUIRED_ENTRIES:
+        # Uniqueness key matches the DB constraint (user_id, resume_id
+        # IS NULL, question_key). We always seed as shared entries
+        # (resume_id=None) because the routine reads them regardless
+        # of which resume is active.
+        existing = (await db.execute(
+            select(AnswerBookEntry).where(
+                AnswerBookEntry.user_id == user.id,
+                AnswerBookEntry.resume_id.is_(None),
+                AnswerBookEntry.question_key == question_key,
+            )
+        )).scalar_one_or_none()
+
+        if existing:
+            # If an older unlocked row exists with this key (e.g. from
+            # resume-extracted auto-population before this feature
+            # shipped), upgrade it in place to locked+manual_required.
+            # The user's previously-typed answer is preserved.
+            if not existing.is_locked or existing.source != "manual_required":
+                existing.is_locked = True
+                existing.source = "manual_required"
+                existing.category = category
+                existing.question = question
+                db.add(existing)
+            already_present += 1
+            continue
+
+        db.add(AnswerBookEntry(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            resume_id=None,
+            category=category,
+            question=question,
+            question_key=question_key,
+            answer="",
+            source="manual_required",
+            is_locked=True,
+        ))
+        created += 1
+
+    await db.commit()
+
+    return SeedRequiredResponse(
+        created=created,
+        already_present=already_present,
+        total=len(REQUIRED_ENTRIES),
+    )
+
+
+@router.get("/required-coverage", response_model=RequiredCoverageResponse)
+async def required_coverage(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Report which routine-required entries are filled.
+
+    The routine's pre-flight gate: if ``complete=False``, it refuses
+    to run any application until every entry has a non-empty answer.
+    The UI /required-setup page shows this as a progress bar +
+    list of unfilled entries.
+
+    Returns rows ordered by the canonical seed order so the UI
+    renders them in a predictable sequence (comp, work-auth, EEO).
+    """
+    result = await db.execute(
+        select(AnswerBookEntry).where(
+            AnswerBookEntry.user_id == user.id,
+            AnswerBookEntry.is_locked == True,  # noqa: E712  SQLAlchemy equality
+            AnswerBookEntry.source == "manual_required",
+        )
+    )
+    entries = {e.question_key: e for e in result.scalars().all()}
+
+    # Walk REQUIRED_ENTRIES in canonical order so the UI renders a
+    # stable list — independent of DB insert order. Entries that
+    # haven't been seeded yet are reported as missing with a stub
+    # row (id=uuid.uuid4 placeholder) so the UI can still render the
+    # question text; the user clicks "Seed required entries" and
+    # re-fetches.
+    items: list[RequiredCoverageEntry] = []
+    for category, question_key, question in REQUIRED_ENTRIES:
+        entry = entries.get(question_key)
+        if entry is None:
+            items.append(RequiredCoverageEntry(
+                id=uuid.uuid4(),  # placeholder — will be real after seed
+                category=category,
+                question=question,
+                question_key=question_key,
+                answer="",
+                filled=False,
+            ))
+        else:
+            filled = bool(entry.answer and entry.answer.strip())
+            items.append(RequiredCoverageEntry(
+                id=entry.id,
+                category=entry.category,
+                question=entry.question,
+                question_key=entry.question_key,
+                answer=entry.answer,
+                filled=filled,
+            ))
+
+    total_filled = sum(1 for it in items if it.filled)
+    missing = [it for it in items if not it.filled]
+    return RequiredCoverageResponse(
+        complete=(total_filled == len(REQUIRED_ENTRIES)),
+        total_required=len(REQUIRED_ENTRIES),
+        total_filled=total_filled,
+        missing=missing,
+    )

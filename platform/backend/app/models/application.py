@@ -16,7 +16,14 @@ class Application(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     resume_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="prepared")  # prepared, submitted, applied, interview, offer, rejected, withdrawn
-    apply_method: Mapped[str] = mapped_column(String(50), default="manual_copy")  # api_submit, manual_copy, career_page
+    # apply_method values:
+    #   api_submit | manual_copy | career_page : existing pre-routine lanes
+    #   claude_routine                         : submitted by the MCP-Chrome
+    #                                            routine (v6 "Claude Routine
+    #                                            Apply" feature). Keeps the
+    #                                            Applications page filterable
+    #                                            by "how did we get here".
+    apply_method: Mapped[str] = mapped_column(String(50), default="manual_copy")
     prepared_answers: Mapped[dict] = mapped_column(JSON, default=list)  # Snapshot of Q&A
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -42,9 +49,19 @@ class Application(Base):
     # still validates the reference at write time in reviews.apply.
     ai_customization_log_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     # Provenance — mirrors Job.submission_source (Feature A) so the
-    # Applications page can show how each app was created (`review_queue`
-    # = via /reviews/apply, `manual_prepare` = via /applications/prepare).
+    # Applications page can show how each app was created. Values:
+    #   manual_prepare : via POST /applications/prepare
+    #   review_queue   : via POST /reviews/apply
+    #   routine        : via the Claude Routine Apply flow (v6 —
+    #                    POST /applications/{id}/confirm-submitted).
     submission_source: Mapped[str] = mapped_column(String(30), default="manual_prepare", nullable=False)
+    # Links the application to its originating routine run when
+    # submission_source="routine". Nullable + ON DELETE SET NULL so
+    # cleaning up a run doesn't cascade-delete the applications.
+    routine_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("routine_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     job: Mapped["Job"] = relationship()
     resume: Mapped["Resume"] = relationship()
