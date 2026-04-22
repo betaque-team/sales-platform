@@ -140,6 +140,12 @@ REMOTE_COMPANIES = [
     # (no per-month re-seeding needed) and a Redis descendants-count
     # marker short-circuits repeat scans when the thread hasn't grown.
     {"name": "HN Who's Hiring", "platform": "hackernews", "slug": "__all__"},
+
+    # YC Work at a Startup — two-stage fetcher joining yc-oss batch
+    # dumps (company metadata) with workatastartup.com/jobs/search
+    # (postings). Single synthetic board; per-job Company rows
+    # created from `companySlug`.
+    {"name": "YC Work at a Startup", "platform": "yc_waas", "slug": "__all__"},
 ]
 
 

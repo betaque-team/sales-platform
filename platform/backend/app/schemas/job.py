@@ -67,6 +67,10 @@ PlatformFilter = Literal[
     # app/fetchers/hackernews.py). Filterable from the UI dropdown
     # so admins can segment "came from HN" vs "came from Greenhouse".
     "hackernews",
+    # YC Work at a Startup (workatastartup.com) — two-stage
+    # aggregator joining yc-oss batch dumps with WaaS job search.
+    # See app/fetchers/yc_waas.py.
+    "yc_waas",
 ]
 
 

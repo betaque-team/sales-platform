@@ -478,10 +478,14 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
         stats["jobs_found"] = len(raw_jobs)
 
         # Aggregator platforms fetch jobs from many companies — resolve per-job
-        # "hackernews" joins the aggregator set: one synthetic board
-        # (slug=`__all__`) where each comment in the monthly thread
-        # belongs to a different hirer. See app/fetchers/hackernews.py.
-        _AGGREGATOR_PLATFORMS = {"himalayas", "weworkremotely", "remoteok", "remotive", "hackernews"}
+        # "hackernews" and "yc_waas" also register as aggregators:
+        # each uses a single synthetic board (slug=`__all__`) where
+        # individual jobs belong to different hirers. See the
+        # fetcher modules for wire-level details.
+        _AGGREGATOR_PLATFORMS = {
+            "himalayas", "weworkremotely", "remoteok", "remotive",
+            "hackernews", "yc_waas",
+        }
         is_aggregator = board.platform in _AGGREGATOR_PLATFORMS and board.slug == "__all__"
 
         for raw_job in raw_jobs:

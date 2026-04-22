@@ -34,6 +34,12 @@ SOURCE_TIERS = {
     # population that RemoteOK / WWR index. Tier 2 matches wellfound
     # / linkedin which have a similar quality profile.
     "hackernews": 2,
+    # YC Work at a Startup — tier 2 also. YC cohorts are already
+    # vetted for technical bar and tend to be the "who will be
+    # hiring aggressively in 6 months" pool (small teams, post-
+    # funding, growth mode). Higher quality signal per posting
+    # than a generic remote aggregator.
+    "yc_waas": 2,
 }
 
 
