@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-22 · bbe5028 · sha-bbe5028
+fix(humanizer): style_match_pass corpus-size gate compared wrong length
+
+
 ## 2026-04-22 · 85fd7a4 · sha-85fd7a4
 Merge feat/claude-routine-apply: Claude Routine Apply (v6)
 
