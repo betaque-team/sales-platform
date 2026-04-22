@@ -339,10 +339,17 @@ def style_match_pass(
     """
     if corpus_examples is None:
         return text, 0
-    usable = corpus_examples[:STYLE_MATCH_MAX_EXAMPLES]
-    if len(usable) < STYLE_MATCH_MIN_CORPUS_SIZE:
+    # Bug fix: the gate must check RAW corpus size, not the capped
+    # slice. Previously we did `corpus_examples[:5]` then compared
+    # `len(usable) < 10`, which is always True — so `used` was
+    # permanently 0 even for users with a fully-populated corpus.
+    # That made the `style_match_examples_used` telemetry useless
+    # and masked the "corpus wiring works" signal that tests need
+    # to assert before Phase 4 flips this pass on.
+    if len(corpus_examples) < STYLE_MATCH_MIN_CORPUS_SIZE:
         # Not enough signal yet — the first N applies build the corpus.
         return text, 0
+    usable = corpus_examples[:STYLE_MATCH_MAX_EXAMPLES]
     # Stub: no rewrite. Phase 4 will inject Anthropic here.
     return text, len(usable)
 
