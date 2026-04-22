@@ -158,6 +158,17 @@ if SCAN_MODE == "aggressive":
             "task": "app.workers.tasks.ai_insights_task.run_weekly_insights",
             "schedule": crontab(minute=0, hour=4, day_of_week="mon,thu"),
         },
+        # Funding-event auto-probe: fingerprints careers pages of
+        # companies whose `funded_at` landed in the last 30 days.
+        # New funding → new hiring within 60 days (leading
+        # indicator); probing now puts us ahead of the public ATS
+        # board appearing. 04:30 UTC on Mon + Thu — staggered 30
+        # min after weekly_ai_insights so they don't pile up on
+        # the same minute. See funding_followup_task.py.
+        "funding_followup_probe": {
+            "task": "app.workers.tasks.funding_followup_task.auto_probe_recent_funding",
+            "schedule": crontab(minute=30, hour=4, day_of_week="mon,thu"),
+        },
     }
 else:
     # Normal: scan twice daily, career pages every 4h, discovery weekly
@@ -251,5 +262,16 @@ else:
         "weekly_ai_insights": {
             "task": "app.workers.tasks.ai_insights_task.run_weekly_insights",
             "schedule": crontab(minute=0, hour=4, day_of_week="mon,thu"),
+        },
+        # Funding-event auto-probe: fingerprints careers pages of
+        # companies whose `funded_at` landed in the last 30 days.
+        # New funding → new hiring within 60 days (leading
+        # indicator); probing now puts us ahead of the public ATS
+        # board appearing. 04:30 UTC on Mon + Thu — staggered 30
+        # min after weekly_ai_insights so they don't pile up on
+        # the same minute. See funding_followup_task.py.
+        "funding_followup_probe": {
+            "task": "app.workers.tasks.funding_followup_task.auto_probe_recent_funding",
+            "schedule": crontab(minute=30, hour=4, day_of_week="mon,thu"),
         },
     }
