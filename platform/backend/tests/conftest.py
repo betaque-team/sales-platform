@@ -25,4 +25,11 @@ keeps working for manual smoke runs against prod / staging.
 # Paths are resolved relative to this conftest.py's directory, so
 # `"test_api.py"` matches `tests/test_api.py`. Glob form so a future
 # `tests/test_*_live.py` can join the ignore list with one line.
-collect_ignore_glob = ["test_api.py"]
+collect_ignore_glob = [
+    "test_api.py",
+    # Same pattern: `test_profile_vault_live.py` is a script-mode
+    # integration harness, takes args via argparse, not via pytest
+    # fixtures. Gets invoked manually against a live backend:
+    #   python tests/test_profile_vault_live.py --url http://localhost:8000/api/v1
+    "test_profile_vault_live.py",
+]
