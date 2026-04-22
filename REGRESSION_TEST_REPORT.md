@@ -4897,4 +4897,256 @@ sub.company_id;` seeds the column.
 
 ---
 
+## 28. Round 5A — Track B: new fetchers + signal-driven discovery (2026-04-22)
+
+**Context:** Three Track B features just shipped in this deploy. These sections are **forward-looking test plans** — not findings. Tester, please exercise each and log any bugs found via the normal workflow (next finding number is **#243**).
+
+**What shipped in this deploy:**
+
+| # | Feature | Files to read first |
+|---|---|---|
+| T5-01 | HackerNews "Who is hiring?" monthly fetcher | `app/fetchers/hackernews.py` |
+| T5-02 | YC Work at a Startup fetcher | `app/fetchers/yc_waas.py` |
+| T5-03 | Funding-event auto-probe task | `app/workers/tasks/funding_followup_task.py` |
+
+Each test section below has: **what to verify · expected signals · things to look for (potential bugs)**. Commands assume `docker compose exec backend …` on the prod VM unless noted.
+
+---
+
+### T5-01. HackerNews "Who is hiring?" monthly fetcher
+
+**What it does.** Scrapes HN's `whoishiring` user's monthly "Who is hiring?" thread (~500-800 postings/month) and emits one `Job` row per parseable comment. Each comment → distinct `Company` row via the aggregator branch in `scan_task._AGGREGATOR_PLATFORMS`. Registered with `platform="hackernews"`, tier-2 source score, single synthetic board seeded as `"HN Who's Hiring"` with slug `__all__`.
+
+**Rate-limit guard:** the fetcher short-circuits via a Redis key `hn:whoishiring:{thread_id}:descendants` when the thread's comment count hasn't changed since last run. Without this, a naïve fetch would hit HN Firebase ~500× every 30 min.
+
+#### What to verify
+
+1. **Seed ran on deploy.** Confirm the synthetic board exists:
+   ```sql
+   SELECT c.name, b.platform, b.slug, b.is_active
+     FROM company_ats_boards b
+     JOIN companies c ON c.id = b.company_id
+    WHERE b.platform = 'hackernews';
+   ```
+   Expected: 1 row, `slug='__all__'`, `is_active=true`, company `"HN Who's Hiring"`.
+
+2. **First scan pulls comments.** Force a scan and tail the worker log:
+   ```bash
+   docker compose exec backend python -c "
+   from app.workers.tasks.scan_task import scan_single_board
+   from app.workers.tasks._db import SyncSession
+   from app.models.company import CompanyATSBoard
+   from sqlalchemy import select
+   s = SyncSession()
+   b = s.execute(select(CompanyATSBoard).where(CompanyATSBoard.platform=='hackernews')).scalar_one()
+   print(scan_single_board(str(b.id)))
+   "
+   docker compose logs celery-worker | grep -E 'HN whoishiring' | tail -20
+   ```
+   Expected log lines (on first scan of the month):
+   - `HN whoishiring: fetching N comments from thread ID (title='Ask HN: Who is hiring? (<Month>)')`
+   - `HN whoishiring: thread ID → M jobs (skipped K unparseable of N)`
+   - Parse yield (`M / N`) should be **≥ 50%**. If it drops below 50% on a real thread, the parser is almost certainly broken and an HN format change occurred.
+
+3. **Rate-limit cache hit on second scan.** Re-run the same scan within 5 minutes:
+   ```bash
+   docker compose logs --since 5m celery-worker | grep 'HN whoishiring' | tail
+   ```
+   Expected: one line `HN whoishiring: thread ID unchanged (descendants=N) — skip`. Total new jobs = 0. Verifies the Redis cache is being read.
+
+4. **Jobs surface in the UI.** Navigate to `/jobs?platform=hackernews` (admin). Expected: paginated list of rows with distinct company names (NOT "HN Who's Hiring" for every row). Click any row; the "Apply" link should go to the company's actual careers page (NOT to `news.ycombinator.com`).
+
+5. **`raw_json` provenance fields populated.** Pick any HN job:
+   ```sql
+   SELECT raw_json->'hn_thread_id', raw_json->'hn_permalink',
+          raw_json->'parsed_header'->>'company',
+          external_id
+     FROM jobs
+    WHERE platform = 'hackernews' LIMIT 5;
+   ```
+   Expected: all four columns populated; `external_id` starts with `hn-`; `hn_permalink` is a valid `news.ycombinator.com/item?id=…` URL.
+
+6. **Company attribution per comment.** Confirm a single HN scan creates multiple Company rows:
+   ```sql
+   SELECT COUNT(DISTINCT company_id) FROM jobs WHERE platform='hackernews';
+   ```
+   Should be > 100 on the first-of-month run.
+
+#### Things to look for (potential bugs)
+
+- **Parser yield < 30%**: HN format drift. Check `tests/test_hackernews_fetcher.py` fixtures against real thread comments — the header convention may have shifted. File under "P1 — HN fetcher degraded."
+- **Duplicate HN jobs after re-scan**: `(platform, external_id)` dedup should prevent this. If duplicates appear, it means `external_id` isn't deterministic on re-parse — would be a regression.
+- **Jobs attributed to wrong company**: the parser's YC-batch-suffix strip (`re.sub(r"\s*\((?:yc|YC)\s+[wsWS]?\d+\)\s*$", "", ...)`) could over-match and accidentally eat real parts of the company name. Check cos like `"Foo (YC S21) Systems"` (ambiguous) vs `"Foo (YC S21)"` (clean).
+- **Infinite-loop risk on malformed thread**: there's a `_MAX_KIDS_PER_RUN = 1000` cap in the fetcher, but confirm it actually fires if HN returns a thread with an unusually large `descendants`.
+- **Redis connectivity regressions**: if Redis goes down, the fetcher falls back to "no cache → always fetch" (by design, correct but wasteful). Verify that a deliberate Redis kill doesn't crash the scan — log `HN fetcher could not init Redis` + continues.
+
+---
+
+### T5-02. YC Work at a Startup fetcher
+
+**What it does.** Two-stage aggregator. Stage 1 fetches per-batch JSON dumps from `yc-oss.github.io` (10 batches, `isHiring: true` filter). Stage 2 iterates a 12-keyword list against `workatastartup.com/jobs/search`, dedupes by `job.id`, joins on `companySlug` back to the stage-1 company data. Emits ~200-350 unique jobs per run. Platform `yc_waas`, tier-2, single synthetic board `"YC Work at a Startup"` slug `__all__`.
+
+**Why two stages:** `yc-oss` has rich company metadata (batch, industry, team_size, stage, tags) but no jobs. WaaS `/jobs/search` has the jobs but only 13 fields. Joining gives us 30 fields per posting.
+
+#### What to verify
+
+1. **Seed ran on deploy.**
+   ```sql
+   SELECT c.name, b.platform, b.slug FROM company_ats_boards b
+     JOIN companies c ON c.id = b.company_id
+    WHERE b.platform = 'yc_waas';
+   ```
+   Expected: 1 row, company `"YC Work at a Startup"`, slug `__all__`.
+
+2. **First scan covers both stages.** Trigger a scan as in T5-01 (substituting `platform='yc_waas'`). Expected log lines:
+   - `YC WaaS: collected N hiring companies across 10 batches` — N should be **≥ 500** cumulative.
+   - `YC WaaS: M unique jobs across 12 keywords (dedup by id)` — M should be **≥ 150**.
+   - `YC WaaS: K jobs after normalization` — K ≤ M; any drop is jobs without title/company.
+
+3. **Company metadata joined into `raw_json`.**
+   ```sql
+   SELECT raw_json->>'yc_company_batch' AS batch,
+          raw_json->>'yc_company_industry' AS industry,
+          raw_json->>'yc_company_team_size' AS team_size,
+          raw_json->>'yc_company_stage' AS stage,
+          raw_json->'yc_company_tags'
+     FROM jobs
+    WHERE platform='yc_waas'
+      AND raw_json->>'yc_company_batch' IS NOT NULL
+    LIMIT 5;
+   ```
+   Expected: `batch` like `"W24"`, `"S25"`; `team_size` is integer-shaped; `tags` is a JSON array. **≥ 70%** of YC rows should have a non-null batch — if fewer, the join is broken.
+
+4. **Orphan fallback.** Jobs whose `companySlug` isn't in the indexed batches should still insert, just without the batch metadata:
+   ```sql
+   SELECT COUNT(*) FROM jobs
+    WHERE platform='yc_waas' AND raw_json->>'yc_company_batch' IS NULL;
+   ```
+   Should be **small but non-zero** (<10% of total). Zero = all orphans were dropped (wrong behavior). Large fraction = indexed batches insufficient coverage.
+
+5. **Apply URLs are absolute.** Every `yc_waas` row's `url` must start with `https://`:
+   ```sql
+   SELECT COUNT(*) FROM jobs
+    WHERE platform='yc_waas' AND (url NOT LIKE 'https://%' OR url = '');
+   ```
+   Expected: **0**. Non-zero = a bug in `_normalize`'s URL resolution.
+
+6. **UI filter.** `/jobs?platform=yc_waas` paginates normally. Open a row; apply link goes to WaaS or the company's own site.
+
+#### Things to look for (potential bugs)
+
+- **Dedup false-positives**: WaaS `job.id` should be stable. If two distinct jobs ever collide on id (unlikely but possible), we'd drop one. Spot-check: `SELECT COUNT(*), COUNT(DISTINCT raw_json->>'yc_job_id') FROM jobs WHERE platform='yc_waas';` — those two counts should be equal.
+- **Keyword list blind spots**: if a common role ("designer", "recruiter") isn't in `_SEARCH_KEYWORDS` in `yc_waas.py`, we silently miss those jobs. Low priority but note if the mix looks strange.
+- **yc-oss file shape drift**: we tolerate 404 per-file but crash on unexpected-shape JSON responses via the `isinstance(batch_data, list)` check. If yc-oss changes their dump structure, log line `unexpected shape (not a list)` fires — monitor it.
+- **WaaS `batch` filter ignored**: confirmed in pre-build research. The fetcher does NOT rely on it — but if company count drops > 30% between scans, check whether WaaS changed behavior.
+
+---
+
+### T5-03. Funding-event auto-probe task
+
+**What it does.** Consumes the funding-date signal that `services/enrichment/crunchbase_provider.py` populates on `Company.funded_at`. Twice-weekly Celery task fingerprints recently-funded cos' careers pages (via `app.services.ats_fingerprint.detect_ats_from_url`), files any new `(platform, slug)` pairs as `DiscoveredCompany` rows, and marks the companies as `is_target=True`.
+
+**Beat schedule:** Mon + Thu at **04:30 UTC** (staggered 30 min after `weekly_ai_insights` at 04:00 so they don't collide).
+
+**Thesis:** a Series A/B/C announcement leads hiring by 60 days. Probing now puts us ahead of the ATS board publicly appearing.
+
+#### What to verify
+
+1. **Celery task registered + beat entry scheduled.**
+   ```bash
+   docker compose exec celery-worker celery -A app.workers.celery_app inspect registered | grep funding_followup
+   docker compose exec celery-worker celery -A app.workers.celery_app inspect scheduled | grep funding_followup
+   ```
+   Expected: both return a line containing `auto_probe_recent_funding`.
+
+2. **Manual trigger returns a structured result.**
+   ```bash
+   docker compose exec backend python -c "
+   from app.workers.tasks.funding_followup_task import auto_probe_recent_funding
+   print(auto_probe_recent_funding.apply().get())
+   "
+   ```
+   Expected JSON-shaped dict: `{candidates, scanned, new_boards, already_probed, errors, run_id, window_days, cooldown_days}`. Defaults: `window_days=30`, `cooldown_days=7`.
+
+3. **`is_target=True` side effect.**
+   ```sql
+   SELECT COUNT(*) FROM companies
+    WHERE funded_at >= NOW() - INTERVAL '30 days'
+      AND is_target = true;
+   ```
+   Should **equal the `scanned` field** from the task result.
+
+4. **DiscoveryRun row created.**
+   ```sql
+   SELECT id, source, status, companies_found, new_companies, completed_at
+     FROM discovery_runs
+    WHERE source = 'funding_followup'
+    ORDER BY completed_at DESC LIMIT 3;
+   ```
+   Expected: `status='completed'`, `completed_at` within the last few minutes.
+
+5. **New DiscoveredCompany rows carry origin stamp.**
+   ```sql
+   SELECT name, platform, slug, status, relevance_hint
+     FROM discovered_companies
+    WHERE relevance_hint LIKE 'post-funding fingerprint%'
+    ORDER BY id DESC LIMIT 5;
+   ```
+   `relevance_hint` includes the originating `company_id` and `funded_at`. Verifies audit trail.
+
+6. **Cooldown respected on second run.** Re-run the task within 7 days. `already_probed` should equal the first run's `scanned`; `scanned` should be 0 (or nearly 0 if new funding events landed between runs).
+
+7. **Downstream promotion.** The next beat tick of `discover_and_add_boards` (daily 00:00 UTC) promotes `status='new'` DiscoveredCompany rows to live `CompanyATSBoard`s. Within 48h of a funding probe:
+   ```sql
+   SELECT platform, COUNT(*) FROM company_ats_boards
+    WHERE created_at >= NOW() - INTERVAL '48 hours'
+    GROUP BY platform ORDER BY 2 DESC;
+   ```
+   Some counts should be attributable to the funding-probe path (cross-ref via DiscoveredCompany.relevance_hint).
+
+#### Things to look for (potential bugs)
+
+- **`funded_at` empty**: probe is a no-op with `candidates=0`. Not a bug in THIS task but means Crunchbase enrichment upstream isn't populating — check the `enrich_target_companies` beat job.
+- **Cooldown boundary bug.** We chose `>=` for cooldown comparison intentionally (co probed EXACTLY at cutoff is still in cooldown). Tested at unit level (`test_pick_candidates_exact_boundary_condition`) but worth confirming live.
+- **Slow-host DoS.** A co with a `/careers` page that responds in 15s (our timeout) can slow a run by ~15s per candidate. With `limit=100` and 3 retries per co (`/careers` → `/jobs` → `/`), worst case is ~75 min per run. If task duration > 30 min on average, consider parallelizing or cutting `limit`.
+- **`careers_url_fetched_at` bumped on errors** — this is **intentional** (prevents retry-storm on a broken host) but could mask a persistent misconfiguration. Spot-check: any co with `careers_url_fetched_at` but NULL `careers_url` had a probe with no ATS found — expected, not a bug.
+- **Race with `fingerprint_existing_companies`**. We dedup via a pre-loaded `existing_pairs` set in the same transaction, not a DB unique constraint. If the daily fingerprint task (00:30) and funding probe (04:30 Mon/Thu) ever run close together AND both independently detect the same `(platform, slug)` for a co, they could race. Staggered enough that it shouldn't happen, but sanity-check: `SELECT platform, slug, COUNT(*) FROM discovered_companies GROUP BY 1,2 HAVING COUNT(*) > 1;` — should return zero rows.
+
+---
+
+### Cross-feature integration checks
+
+After a few full scan cycles (give it **~2-4 hours** post-deploy):
+
+```sql
+-- Jobs table breakdown by platform — expect new entries for hackernews + yc_waas
+SELECT platform, COUNT(*) AS n, MAX(scraped_at) AS last_seen
+  FROM jobs GROUP BY platform ORDER BY 2 DESC;
+
+-- Relevant jobs pool growth — pre-Track-B baseline was ~1,667
+SELECT COUNT(*) FROM jobs WHERE relevance_score >= 50;
+
+-- New Company rows attributable to aggregator-resolution
+SELECT created_at::date, COUNT(*)
+  FROM companies
+ WHERE created_at >= NOW() - INTERVAL '2 days'
+ GROUP BY 1 ORDER BY 1 DESC;
+```
+
+Expected lift on the "relevant jobs ≥ 50" count within 1 week: **+100 to +300**, dominated by HN month-start bursts and YC's current-batch postings.
+
+#### `/platforms` page sanity
+
+- Navigate to `/platforms` (admin). Expected: two new platform entries with board counts — `hackernews (1 board)` and `yc_waas (1 board)`. If either is missing, the seeder didn't run — check the deploy hook.
+- Click into each. Board health should show "last scanned within 30 min", `jobs_found > 0` after the first cycle.
+
+#### Scoring / relevance sanity
+
+- HN + YC jobs flow through the SAME scoring pipeline as every other platform (`_scoring.py`). New source scores:
+  - `hackernews: 2` (same tier as `wellfound`, `linkedin`)
+  - `yc_waas: 2` (same tier)
+- Any unexpected shift in platform-distribution of `relevance_score` post-deploy would flag a scoring-pipeline bug — these tiers were chosen to preserve relative ordering, not disrupt it.
+
+---
+
 **End of report.**
