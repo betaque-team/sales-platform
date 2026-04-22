@@ -40,6 +40,18 @@ class Company(Base):
     funded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     funding_news_url: Mapped[str] = mapped_column(String(1000), default="")
 
+    # Careers page — Phase A of the ATS-lockdown fallback thread. The
+    # URL where this company lists their jobs on THEIR own site (as
+    # opposed to the ATS aggregator-side URL). Populated by the ATS
+    # fingerprint Celery task as a side-effect of the HTTP fetch it
+    # already does. Value is NULL until the fingerprint task runs over
+    # this company; NULL-tolerant so old rows don't need a backfill.
+    # Sized to 1000 chars to match Job.url + DiscoveredCompany.careers_url.
+    careers_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    careers_url_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

@@ -1,6 +1,6 @@
 [project]
 name = "job-platform"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.115",
@@ -31,3 +31,22 @@ packages = ["app"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "httpx"]
+
+# Register the `integration` marker used by tests/test_fetcher_integration.py
+# so `pytest` doesn't warn with "Unknown mark" on every run. The marker is
+# NOT selected by default — tests/test_smoke.py (CI default) skip it, and
+# integration tests run explicitly via `pytest -m integration`.
+[tool.pytest.ini_options]
+# Default pytest invocation (`pytest tests/` from ci.yml) excludes the
+# integration suite — they hit live upstream APIs and would flake CI on
+# any transient provider outage or rate-limit. Run them explicitly with:
+#     pytest -m integration
+# or
+#     pytest --override-ini="addopts="
+# `-m "not integration"` is the filter; it matches tests WITHOUT the
+# `integration` mark. The default smoke suite (test_smoke.py) stays in
+# scope since it has no marker.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: live-API tests that hit upstream ATS endpoints (opt-in, skipped by default)",
+]

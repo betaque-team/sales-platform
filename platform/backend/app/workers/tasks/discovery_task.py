@@ -53,26 +53,80 @@ SMARTRECRUITERS_PROBE_SLUGS = [
     "TUI", "Philips", "ING", "ABB",
 ]
 
+# 2026-04-17 (F-fetcher-health): verified each slug live against the
+# platform's API before committing. The prior lists predated several
+# customer migrations — 10+ slugs across these three platforms had
+# either left the ATS entirely (302→marketing site) or the customer
+# closed their board. Dead slugs here propagate into DiscoveredCompany
+# rows → never promoted to boards → fetcher never runs → tester sees
+# "zero jobs on platform X". Ran the full survey with:
+#
+#   python -m pytest tests/test_fetcher_integration.py -v -m integration
+#
+# which hits each platform's live API and asserts non-empty for the
+# seed slugs below. Dead slugs should be REMOVED here (not left as
+# commented-out "maybe they'll come back") — stale-cull handles any
+# slug that goes dark between checks.
 RECRUITEE_PROBE_SLUGS = [
-    "superside", "huntr", "toggl", "deel", "remote-com",
-    "remote", "omnipresent", "oyster", "velocity-global",
-    "papaya-global", "lano", "multiplier",
+    # Verified live 2026-04-17: `bunq` (42 open), `personio` (1),
+    # `adecco` (1). Older slugs (toggl / deel / huntr / remote-com /
+    # omnipresent / oyster / papaya-global / lano / multiplier) all
+    # redirect to recruitee.com marketing — removed.
+    "bunq", "personio", "adecco",
+    # Speculative — brands that are known Recruitee customers per
+    # their case-study page. Probe-gate at `_probe_platform_slugs`
+    # will drop them if they return empty.
+    "catawiki", "parkos", "leapsome", "messagebird",
+    "studiocanal", "bynder", "coolblue", "foundever",
 ]
 
 BAMBOOHR_PROBE_SLUGS = [
-    "toggl", "hotjar", "buffer", "uservoice", "aha",
-    "linode", "ghost", "sonatype", "zapier", "loom",
+    # Verified live 2026-04-17: `rei` (9 open). `toggl`/`aha`/`zapier`/
+    # `linear`/`asana`/`dashlane`/`bluecore`/`algolia` are live tenants
+    # with 0 current openings — kept because a zero today can be
+    # non-zero tomorrow and the probe is cheap. Older slugs
+    # (hotjar / buffer / uservoice / linode / ghost / sonatype / loom)
+    # all redirect to www.bamboohr.com — tenants gone, removed.
+    "rei",
+    "toggl", "aha", "zapier", "linear", "asana",
+    "dashlane", "bluecore", "algolia",
 ]
 
-JOBVITE_PROBE_SLUGS = [
-    "twilio", "zendesk", "unity", "pagerduty", "rapid7",
-    "fortinet", "talend", "tripactions", "forescout", "sailpoint",
+# Jobvite public API (jobs.jobvite.com/{slug}/jobs) returns 302 →
+# www.jobvite.com/support/...?invalid=1 for EVERY slug probed on
+# 2026-04-17. Not a slug-list issue — the platform appears to have
+# retired customer-facing endpoints. Kept the list empty so the
+# discovery probe short-circuits; the existing fetcher gracefully
+# returns [] and the stale-board auto-deactivator culls any legacy
+# jobvite boards still in the DB. Monitor for platform recovery and
+# restore slugs here if/when it comes back.
+JOBVITE_PROBE_SLUGS: list[str] = []
+
+# Workday — enterprise Fortune-500 coverage. Slug is the composite
+# ``{tenant}/{cluster}/{site}`` — see app/fetchers/workday.py docstring.
+# All 4 verified live on 2026-04-17 via POST /wday/cxs/…/jobs with
+# total job counts shown:
+#   nvidia/wd5/NVIDIAExternalCareerSite   →  2000 jobs
+#   salesforce/wd12/External_Career_Site  →  1417 jobs
+#   citi/wd5/2                            →  2000 jobs
+#   capitalone/wd12/Capital_One           →  1457 jobs
+# Discovery grows this list via `app.services.ats_fingerprint`, which
+# scrapes a company's public careers page and extracts myworkdayjobs.com
+# URLs. For now the probe covers the 4 seed tenants; a follow-up
+# task can run the fingerprinter across a curated domain list to
+# bulk-add more enterprise tenants.
+WORKDAY_PROBE_SLUGS = [
+    "nvidia/wd5/NVIDIAExternalCareerSite",
+    "salesforce/wd12/External_Career_Site",
+    "citi/wd5/2",
+    "capitalone/wd12/Capital_One",
 ]
 
-HIMALAYAS_PROBE_SLUGS = [
-    "gitlab", "zapier", "deel", "remote", "omnipresent",
-    "superside", "toptal", "automattic", "canonical", "elastic",
-]
+# Himalayas /jobs/api returns HTTP 403 for every probe slug as of
+# 2026-04-17. The endpoint is protected and httpx can't reach it.
+# See test_fetcher_integration.BROKEN_FETCHERS. Keep empty so discovery
+# doesn't waste cycles; stale-cull handles any legacy himalayas boards.
+HIMALAYAS_PROBE_SLUGS: list[str] = []
 
 # LinkedIn company page slugs (used for both RapidAPI and public search fallback)
 # Focus on infra, DevOps, cloud, and security companies hiring remote
@@ -277,6 +331,61 @@ def _probe_linkedin_slugs(session, run: DiscoveryRun) -> int:
     return new_count
 
 
+def _probe_workday_slugs(session, run: DiscoveryRun) -> int:
+    """Register Workday slugs. Unlike the generic GET-based probe at
+    :func:`_probe_platform_slugs`, Workday requires a POST with a JSON
+    body to validate a slug is live, and the composite-slug shape
+    (``{tenant}/{cluster}/{site}``) doesn't fit the generic URL
+    template pattern. So we take the same shortcut as LinkedIn:
+    ``WORKDAY_PROBE_SLUGS`` is hand-curated (verified live at seed
+    time; see the docstring on that constant), so we just register
+    each slug as a DiscoveredCompany without re-probing every cycle.
+    The scanner's stale-board auto-deactivator will cull any entry
+    that stops producing jobs over 5 consecutive cycles.
+
+    The name shown to admins uses the tenant portion — Workday tenants
+    are typically the company's short name (``nvidia``, ``salesforce``,
+    etc.), which matches what a sales person expects to see.
+    """
+    new_count = 0
+    existing = set(
+        session.execute(
+            select(DiscoveredCompany.slug).where(DiscoveredCompany.platform == "workday")
+        ).scalars().all()
+    )
+
+    for slug in WORKDAY_PROBE_SLUGS:
+        if slug in existing:
+            continue
+        parts = slug.split("/", 2)
+        tenant = parts[0] if parts else slug
+        cluster = parts[1] if len(parts) >= 2 else ""
+        site = parts[2] if len(parts) >= 3 else ""
+        # Public URL pointing to the tenant's career site — matches what
+        # a human would land on from Google. Admins can click this from
+        # /discovery to verify the board looks real before promoting.
+        careers_url = (
+            f"https://{tenant}.{cluster}.myworkdayjobs.com/en-US/{site}"
+            if tenant and cluster and site
+            else f"https://{tenant}.myworkdayjobs.com"
+        )
+        company = DiscoveredCompany(
+            id=uuid.uuid4(),
+            discovery_run_id=run.id,
+            name=tenant.replace("-", " ").title(),
+            platform="workday",
+            slug=slug,
+            careers_url=careers_url,
+            status="new",
+        )
+        session.add(company)
+        new_count += 1
+
+    session.flush()
+    logger.info("Workday probe: %d slugs registered, %d new", len(WORKDAY_PROBE_SLUGS), new_count)
+    return new_count
+
+
 @celery_app.task(name="app.workers.tasks.discovery_task.run_discovery", bind=True, max_retries=1)
 def run_discovery(self, run_id: str | None = None):
     """Run a full discovery cycle: Greenhouse sitemap + multi-platform slug probes.
@@ -341,6 +450,12 @@ def run_discovery(self, run_id: str | None = None):
         # LinkedIn (special handler — no JSON probe, just register known slugs)
         li_new = _probe_linkedin_slugs(session, run)
         total_new += li_new
+
+        # Workday (special handler — POST-based API + composite slug shape
+        # doesn't fit the generic GET probe. Hand-curated list; stale
+        # entries culled by the scanner's auto-deactivator.)
+        wd_new = _probe_workday_slugs(session, run)
+        total_new += wd_new
 
         # Count total discovered in this run
         total_found = session.execute(
@@ -410,12 +525,51 @@ def discover_and_add_boards(self):
 
         session.commit()
 
-        # Now auto-add newly discovered companies as boards
+        # Now auto-add newly discovered companies as boards.
+        #
+        # Cap per run — `_crawl_greenhouse_sitemap` registers every slug
+        # in the public sitemap (3k+ entries) without probing whether
+        # each board has jobs, so an uncapped promotion would flood
+        # `company_ats_boards` with 3k rows on first run. The
+        # stale-board auto-deactivator (scan_task._STALE_BOARD_ZERO_
+        # SCAN_THRESHOLD = 5 consecutive empty scans) eventually culls
+        # dead slugs, but each empty scan burns ~30s of worker time
+        # against the real scan budget. Bounding at
+        # `settings.discovery_promote_batch_size` per run spreads the
+        # backlog across beat ticks and keeps the first scan cycle
+        # after a discovery sane.
+        #
+        # Platform ordering: Ashby, Lever, Greenhouse come off the
+        # queue first because their APIs are the most stable and have
+        # the highest conversion to live jobs in our existing corpus.
+        # BambooHR + Wellfound + Himalayas last because those produce
+        # the most stale-cull churn. `ORDER BY CASE platform…` lets us
+        # express this inline without a separate priority column.
+        from sqlalchemy import case
+        from app.config import get_settings
+        settings = get_settings()
+        platform_priority = case(
+            (DiscoveredCompany.platform == "ashby", 0),
+            (DiscoveredCompany.platform == "lever", 1),
+            (DiscoveredCompany.platform == "greenhouse", 2),
+            (DiscoveredCompany.platform == "smartrecruiters", 3),
+            (DiscoveredCompany.platform == "workable", 4),
+            (DiscoveredCompany.platform == "recruitee", 5),
+            (DiscoveredCompany.platform == "jobvite", 6),
+            (DiscoveredCompany.platform == "bamboohr", 7),
+            (DiscoveredCompany.platform == "wellfound", 8),
+            (DiscoveredCompany.platform == "himalayas", 9),
+            (DiscoveredCompany.platform == "linkedin", 10),
+            else_=99,
+        )
         new_discoveries = session.execute(
-            select(DiscoveredCompany).where(
+            select(DiscoveredCompany)
+            .where(
                 DiscoveredCompany.discovery_run_id == run.id,
                 DiscoveredCompany.status == "new",
             )
+            .order_by(platform_priority, DiscoveredCompany.created_at.asc())
+            .limit(settings.discovery_promote_batch_size)
         ).scalars().all()
 
         boards_added = 0
@@ -489,3 +643,197 @@ def discover_and_add_boards(self):
         # covers the slow-probe case; explicit release handles the
         # normal (successful / failed / retried) path.
         release_scan_lock("discover")
+
+
+@celery_app.task(
+    name="app.workers.tasks.discovery_task.fingerprint_existing_companies",
+    bind=True,
+    max_retries=1,
+)
+def fingerprint_existing_companies(self, limit: int = 50, only_unfingerprinted: bool = True):
+    """Reverse-discovery via ATS fingerprinting.
+
+    Walks existing ``Company`` rows that have a ``website`` set, fetches
+    each company's public careers page, and runs the ATS fingerprint
+    service (``app.services.ats_fingerprint.detect_ats_from_url``) to
+    identify which ATS(es) the company uses. Any ``(platform, slug)``
+    pair we don't already have gets added as a ``DiscoveredCompany``
+    row and picked up by the existing discovery promotion path.
+
+    Why this exists:
+    The hand-curated probe lists in this module go stale every few
+    months. The ATS customer-list pages (Lever /customers, Ashby
+    /customers, etc.) are JS-rendered and don't yield slugs to plain
+    httpx OR to headless Chromium (verified 2026-04-17 — Playwright
+    hit 403 on Wellfound's DataDome guard and parsed 0 slugs from
+    Lever /customers). This task flips the problem: instead of asking
+    each ATS for its customers, we ask each of OUR customers what ATS
+    they use. Works because most company careers pages are plain
+    httpx-fetchable (no Cloudflare/DataDome on individual company
+    sites, unlike on the aggregator sites).
+
+    **Known limitation:** detection requires the ATS URL to be present
+    in the *initial* HTML (pre-JS). Two categories of careers pages
+    don't match that:
+      * Fully client-side SPAs (Stripe stripe.com/jobs, NVIDIA's careers
+        page) — initial HTML contains zero ATS strings; the embed loads
+        only after JavaScript hydrates. Can't fingerprint.
+      * Pages that inline the ATS URL deep in a multi-MB ``__NEXT_DATA__``
+        blob past our ``max_html_bytes=6_000_000`` cap. Rare but real —
+        Ramp's page has Ashby URLs at the 3.4 MB mark; anything past 6 MB
+        is invisible to us.
+
+    Expect ~30-60% detection yield depending on how modern the target
+    companies' career sites are. That's still a win on a 1000-company
+    corpus — hundreds of new boards discovered without hand-curation.
+    Companies the fingerprinter misses still get scanned via their
+    existing (ATS-side discovery) path — nothing is regressed, we just
+    don't *gain* coverage on the SPAs.
+
+    Args:
+        limit: Max companies to fingerprint per task invocation. Default
+            50 is ~12-15 minutes of wall-time at ~15s per HTTP fetch
+            (the fingerprint service tries `/careers`, `/jobs`, `/`
+            in that order per domain). Scale up via celery beat or
+            explicit admin dispatches — don't crank to 1000 in one
+            shot; the Celery worker is single-threaded per task.
+        only_unfingerprinted: When True (default), skip companies whose
+            website already produced at least one DiscoveredCompany row
+            previously — avoids re-hitting the same domains every
+            schedule tick. Set False to re-fingerprint everything
+            (e.g. after the regex patterns change).
+
+    Returns dict with ``{scanned, new, existing_dedup, errors}``.
+    """
+    from app.services.ats_fingerprint import detect_ats_from_url
+
+    session = SyncSession()
+    try:
+        run = DiscoveryRun(
+            id=uuid.uuid4(),
+            source="fingerprint_existing",
+            status="running",
+        )
+        session.add(run)
+        session.flush()
+
+        # Build the candidate set. When `only_unfingerprinted`, we
+        # LEFT JOIN DiscoveredCompany on careers_url LIKE-matches of
+        # the company.website — crude but cheap, and the false-negative
+        # rate (company had a prior discovery via a different URL
+        # shape) is acceptable because we dedup at the (platform, slug)
+        # level below anyway.
+        q = select(Company).where(Company.website != "").order_by(Company.created_at.desc())
+        if only_unfingerprinted:
+            # Anti-join: companies whose website doesn't appear in
+            # any DiscoveredCompany.careers_url. Fast enough on ~1k
+            # rows; swap to a dedicated `last_fingerprinted_at`
+            # column if the corpus grows past ~50k.
+            subq = select(DiscoveredCompany.careers_url)
+            q = q.where(~Company.website.in_(subq))
+        q = q.limit(limit)
+        companies = session.execute(q).scalars().all()
+
+        # Pre-load all (platform, slug) pairs so we can dedup without
+        # a per-fingerprint DB round-trip.
+        existing_pairs = set(
+            (p, s)
+            for p, s in session.execute(
+                select(DiscoveredCompany.platform, DiscoveredCompany.slug)
+            ).all()
+        )
+
+        scanned = 0
+        new_count = 0
+        errors = 0
+        existing_dedup = 0
+
+        for company in companies:
+            scanned += 1
+            # The URL that actually produced the fingerprints — we save
+            # this back to Company.careers_url so future fallback work
+            # (Phase C) has a concrete target without re-running the
+            # fingerprinter.
+            matched_url: str | None = None
+            try:
+                # The fingerprint service tries `/careers`, `/jobs`, `/`
+                # sequentially per domain — see `detect_ats_for_domains`.
+                # We call `detect_ats_from_url` three times explicitly
+                # so one company's 404 on `/careers` doesn't burn the
+                # whole 15s timeout waiting for network-idle.
+                fps: list = []
+                for suffix in ("/careers", "/jobs", ""):
+                    target = company.website.rstrip("/") + suffix
+                    fps = detect_ats_from_url(target, timeout=15)
+                    if fps:
+                        matched_url = target
+                        break
+            except Exception as e:
+                errors += 1
+                logger.warning(
+                    "fingerprint failed for company %s (website=%s): %s",
+                    company.name, company.website, e,
+                )
+                continue
+
+            # Persist the careers URL that worked, even if no NEW ATS
+            # pair was discovered this run (e.g. the company uses an
+            # ATS we already knew about). Cheapest way to keep this
+            # field fresh over time — the next fingerprint pass refreshes.
+            # Only update if we actually found an ATS there — a careers
+            # page with 0 ATS markers is of ambiguous value and we'd
+            # rather leave the column NULL than store a misleading URL.
+            if matched_url:
+                company.careers_url = matched_url
+                company.careers_url_fetched_at = datetime.now(timezone.utc)
+                session.add(company)
+
+            for fp in fps:
+                key = (fp.platform, fp.slug)
+                if key in existing_pairs:
+                    existing_dedup += 1
+                    continue
+                session.add(DiscoveredCompany(
+                    id=uuid.uuid4(),
+                    discovery_run_id=run.id,
+                    # Prefer the company's known name over the ATS slug
+                    # — slugs can be abbreviated/gibberish ("abc123"
+                    # style for some tenants), while `company.name` is
+                    # already human-reviewed.
+                    name=company.name or fp.slug.replace("-", " ").title(),
+                    platform=fp.platform,
+                    slug=fp.slug,
+                    careers_url=fp.careers_url,
+                    status="new",
+                    relevance_hint=(
+                        f"fingerprinted from {company.website} "
+                        f"(company_id={company.id})"
+                    ),
+                ))
+                existing_pairs.add(key)
+                new_count += 1
+
+        run.completed_at = datetime.now(timezone.utc)
+        run.companies_found = scanned
+        run.new_companies = new_count
+        run.status = "completed"
+        session.commit()
+
+        logger.info(
+            "fingerprint_existing_companies: scanned=%d, new=%d, dedup=%d, errors=%d",
+            scanned, new_count, existing_dedup, errors,
+        )
+        return {
+            "scanned": scanned,
+            "new": new_count,
+            "existing_dedup": existing_dedup,
+            "errors": errors,
+            "run_id": str(run.id),
+        }
+
+    except Exception as e:
+        logger.exception("fingerprint_existing_companies failed: %s", e)
+        session.rollback()
+        raise self.retry(exc=e, countdown=300)
+    finally:
+        session.close()

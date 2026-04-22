@@ -31,9 +31,12 @@ from app.utils.crypto import encrypt_credential
 router = APIRouter(prefix="/credentials", tags=["credentials"])
 
 # Keep in lockstep with `schemas/credential.SUPPORTED_PLATFORM_LITERALS`.
+# `linkedin` is here for profile-URL attachment, not ATS integration —
+# see the long-form comment on the Literal in schemas/credential.py.
 SUPPORTED_PLATFORMS = [
     "greenhouse", "lever", "ashby", "workable", "smartrecruiters",
     "recruitee", "bamboohr", "jobvite", "wellfound", "himalayas",
+    "linkedin",
 ]
 
 

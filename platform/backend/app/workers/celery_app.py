@@ -63,9 +63,34 @@ if SCAN_MODE == "aggressive":
             "task": "app.workers.tasks.career_page_task.check_career_pages",
             "schedule": crontab(minute=0, hour="*/1"),  # Every hour
         },
+        # Discovery scheduler fix: historically we ran `run_discovery`
+        # here, which only populated the `discovered_companies` table —
+        # never promoted discoveries into `company_ats_boards`, so no
+        # new platforms ever got scanned without an admin manually
+        # clicking "bulk import" on /discovery. Switching to the
+        # auto-add variant makes discovery end-to-end: every run the
+        # beat fires, up to `settings.discovery_promote_batch_size`
+        # newly-discovered slugs go live as active boards and the
+        # next scan cycle picks them up. The stale-board cull
+        # (scan_task._STALE_BOARD_ZERO_SCAN_THRESHOLD) backstops any
+        # dead slugs that slip in from the Greenhouse sitemap.
         "run_discovery": {
-            "task": "app.workers.tasks.discovery_task.run_discovery",
+            "task": "app.workers.tasks.discovery_task.discover_and_add_boards",
             "schedule": crontab(minute=0, hour=0),  # Daily at midnight
+        },
+        # Phase-A fallback groundwork: fingerprint company websites to
+        # populate `Company.careers_url` for future ATS-lockdown fallback.
+        # Runs at 00:30 UTC daily — 30 min after the ATS-side discovery
+        # at 00:00 to avoid two HTTP-heavy tasks hammering the VM at the
+        # same time. `only_unfingerprinted=True` (the default) means this
+        # is cheap once the corpus converges: the anti-join returns empty
+        # when every Company.website has been fingerprinted at least once.
+        # Initial-ramp math: 200/run × daily = full ~786-company corpus
+        # in ~4 days. After that, only new Company rows get touched.
+        "fingerprint_existing_companies": {
+            "task": "app.workers.tasks.discovery_task.fingerprint_existing_companies",
+            "schedule": crontab(minute=30, hour=0),
+            "kwargs": {"limit": 200, "only_unfingerprinted": True},
         },
         "expire_stale_jobs": {
             "task": "app.workers.tasks.maintenance_task.expire_stale_jobs",
@@ -145,9 +170,33 @@ else:
             "task": "app.workers.tasks.career_page_task.check_career_pages",
             "schedule": crontab(minute=0, hour="*/4"),
         },
+        # Discovery scheduler fix: historically we ran `run_discovery`
+        # here, which only populated the `discovered_companies` table —
+        # never promoted discoveries into `company_ats_boards`, so no
+        # new platforms ever got scanned without an admin manually
+        # clicking "bulk import" on /discovery. Switching to the
+        # auto-add variant makes discovery end-to-end: every run the
+        # beat fires, up to `settings.discovery_promote_batch_size`
+        # newly-discovered slugs go live as active boards and the
+        # next scan cycle picks them up. The stale-board cull
+        # (scan_task._STALE_BOARD_ZERO_SCAN_THRESHOLD) backstops any
+        # dead slugs that slip in from the Greenhouse sitemap.
         "run_discovery": {
-            "task": "app.workers.tasks.discovery_task.run_discovery",
+            "task": "app.workers.tasks.discovery_task.discover_and_add_boards",
             "schedule": crontab(minute=0, hour=0, day_of_week="sunday"),
+        },
+        # Phase-A fallback groundwork: fingerprint company websites to
+        # populate `Company.careers_url`. In normal mode the full
+        # platform scans run twice daily rather than every 30 min, so
+        # it's safe to run fingerprinting at a weekly cadence here —
+        # new companies trickle in slowly, and re-fingerprinting
+        # existing ones doesn't help much without a Company.website
+        # change. Sunday 01:00 UTC, an hour after the Sunday discovery
+        # at 00:00, stays out of the scan window.
+        "fingerprint_existing_companies": {
+            "task": "app.workers.tasks.discovery_task.fingerprint_existing_companies",
+            "schedule": crontab(minute=0, hour=1, day_of_week="sunday"),
+            "kwargs": {"limit": 500, "only_unfingerprinted": True},
         },
         "expire_stale_jobs": {
             "task": "app.workers.tasks.maintenance_task.expire_stale_jobs",

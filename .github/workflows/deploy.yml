@@ -251,6 +251,8 @@ jobs:
       url: https://salesplatform.reventlabs.com
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Set up SSH key
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -267,6 +269,55 @@ jobs:
             # in GH Secrets (output of `ssh-keyscan -t ed25519 <host>`) to pin.
             ssh-keyscan -t ed25519 -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
           fi
+
+      # 2026-04-17: ship infra files (compose YAML, helper scripts, nginx
+      # config) to the VM so changes to those files actually take effect.
+      # Until this step existed, the deploy pipeline only updated container
+      # *images* — every infra-only change in git silently failed on the
+      # VM until somebody noticed days later (the host-metrics bind-mount
+      # added on Apr 15 didn't reach prod until Apr 17 because of this).
+      #
+      # The tarball is extracted by ci-deploy.sh::sync_infra_tarball, which
+      # validates every entry against an allowlist before unpacking. The
+      # SCP target /tmp/sales-platform-infra.tgz is consumed and deleted
+      # by that function on success.
+      #
+      # The forced-command SSH config restricts the deploy user to running
+      # ci-deploy.sh — but `scp` is a separate channel, so we need to use
+      # `cat > /tmp/...` redirected through the same forced command. We
+      # work around this by sending the tarball over stdin to a `cat`
+      # invocation that the forced-command pass-through accepts: ci-deploy.sh
+      # treats unknown verbs as errors, but we can pipe directly to a
+      # `tee` via `ssh ... "tee /tmp/..."`. Simpler though: SCP works
+      # against the same SSH key as long as the authorized_keys entry
+      # also allows it (no command="" override is needed for SCP if the
+      # key was added without forced-command — TODO: confirm with VM
+      # config). For now use `cat` over the existing SSH channel which
+      # always works regardless of forced-command.
+      - name: Build + ship infra tarball to VM
+        run: |
+          # Build a deterministic tarball from the repo's platform/ subdir.
+          # Only the files ci-deploy.sh's allow-list accepts:
+          #   - docker-compose.prod.yml, docker-compose.tunnel.yml
+          #   - infra/scripts/** (collect-host-metrics.sh, keepalive.sh, etc.)
+          #   - infra/nginx/** (server config, conf.d/*)
+          tar czf /tmp/sales-platform-infra.tgz \
+            -C platform \
+            docker-compose.prod.yml \
+            docker-compose.tunnel.yml \
+            infra/scripts \
+            infra/nginx
+          ls -lh /tmp/sales-platform-infra.tgz
+
+          # Ship to /tmp on the VM. The deploy user owns /tmp entries it
+          # creates here, and ci-deploy.sh::sync_infra_tarball deletes
+          # the file after a successful extraction. Use `cat > $path`
+          # over SSH instead of scp, since the forced-command authorized_keys
+          # entry blocks scp's separate subsystem channel.
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "stage-infra" < /tmp/sales-platform-infra.tgz
 
       - name: Trigger deploy on VM
         # Stdin contract for the `deploy` verb on ci-deploy.sh:
@@ -431,6 +482,34 @@ jobs:
           fi
           echo "::warning::Could not parse ai_configured from /api/health response — soft-passing. Body excerpt: ${BODY:0:200}"
 
+      # 2026-04-17: same shape as the F234 ai_configured assertion above,
+      # but for the VM metrics pipeline. Pre-fix, the only signal that
+      # /host got bind-mount-broken was an admin opening the /monitoring
+      # page and noticing the panel had been dark for two days. Now any
+      # regression to the docker-compose mount, the collector script,
+      # the cron, or host_stats.py fails the deploy on the next push.
+      #
+      # Soft-passes if the snapshot file is just briefly stale (collector
+      # cron is */2 min, so the first read after a backend restart can
+      # legitimately see a >120 s old snapshot — verify_vm_metrics_pipeline
+      # already retries 3× server-side). Hard-fails only if the
+      # `vm_metrics_available` boolean stays false in the public health
+      # endpoint AFTER the deploy job's retry loop ran.
+      - name: Verify VM metrics pipeline reached prod
+        run: |
+          BODY="$(curl -sL --max-time 10 "${{ env.PROD_URL }}/api/health" || echo '')"
+          if echo "$BODY" | grep -q '"vm_metrics_available": *true'; then
+            AGE="$(echo "$BODY" | grep -oE '"vm_metrics_age_seconds":[ ]*[0-9]+' | grep -oE '[0-9]+' || echo unknown)"
+            echo "✓ VM metrics pipeline live (snapshot age ${AGE}s)."
+            exit 0
+          fi
+          if echo "$BODY" | grep -q '"vm_metrics_available": *false'; then
+            echo "::error::VM_METRICS REGRESSION — /api/health reports vm_metrics_available=false post-deploy."
+            echo "::error::Likely causes: (1) docker-compose.prod.yml lost the /host bind-mount, (2) collector cron stopped writing /opt/sales-platform/host-metrics/metrics.json, (3) backend container can't read the file. SSH to the VM and check ci-deploy.log + sudo docker exec sales-platform-backend-1 ls /host/."
+            exit 1
+          fi
+          echo "::warning::Could not parse vm_metrics_available from /api/health — soft-pass. Body excerpt: ${BODY:0:200}"
+
       - name: Verification summary
         if: always()
         run: |
@@ -441,3 +520,98 @@ jobs:
           echo "| Expected bundle | \`${{ needs.build.outputs.frontend_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Live bundle | \`${{ steps.live.outputs.live_hash }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| URL | ${{ env.PROD_URL }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Append a stub entry to docs/RELEASES.md on every successful deploy.
+  #
+  # This runs on the default branch only (push to main + verify succeeded)
+  # and commits directly back to main with [skip ci] so it doesn't loop.
+  # The stub is short on purpose — just enough machine data (sha / tag /
+  # UTC / commit subject) to locate the change. A human is expected to
+  # edit the stub with a user-facing one-liner when the release is
+  # notable; boring fixes are fine to leave as-is.
+  #
+  # The marker `<!-- RELEASES_LOG_START -->` in RELEASES.md is where new
+  # entries insert — we prepend (newest at top) rather than append, so
+  # the file reads top-down as the release feed.
+  # ---------------------------------------------------------------------------
+  append-release:
+    name: Append release log entry
+    runs-on: ubuntu-latest
+    needs: [build, deploy, verify]
+    # Only on merges to main, only when verify passed. workflow_dispatch
+    # runs (manual deploys) still append — operator intent is the same
+    # ("this went to prod"). Skip on any upstream failure so we don't
+    # log a release that didn't actually ship.
+    if: ${{ always() && needs.verify.result == 'success' && github.ref == 'refs/heads/main' }}
+    permissions:
+      # `contents: write` lets the workflow commit + push the updated
+      # RELEASES.md back to main. Scoped to this job only; the other
+      # jobs keep the default `contents: read`.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so we can read the commit subject. Depth 2
+          # would cover the single commit but fetch-depth: 0 is
+          # future-proof against wanting multi-commit annotations.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN for the push. Branch
+          # protection on main must allow the Actions bot OR the
+          # workflow will 403 on push — document this in
+          # docs/DEPLOYMENT_PROCESS.md if protection is added.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepend stub entry to docs/RELEASES.md
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          TAG="${{ needs.build.outputs.tag }}"
+          DATE_UTC="$(date -u +%Y-%m-%d)"
+          SUBJECT="$(git log -1 --pretty=%s '${{ github.sha }}')"
+          # Escape characters that would break the markdown or the sed
+          # replacement below. `|` is our sed delimiter; `\` must be
+          # literal; newlines must not appear in SUBJECT.
+          SUBJECT_ESCAPED=$(printf '%s' "$SUBJECT" | tr '\n' ' ' | sed 's/|/\\|/g')
+
+          STUB="## ${DATE_UTC} · ${SHORT_SHA} · ${TAG}
+          ${SUBJECT_ESCAPED}
+          "
+          # Prepend BELOW the start marker and BEFORE the first existing
+          # entry. Using awk rather than sed because multi-line insertion
+          # via sed is dialect-specific (GNU vs BSD).
+          awk -v stub="$STUB" '
+            /<!-- RELEASES_LOG_START -->/ {
+              print
+              print ""
+              print stub
+              inserted = 1
+              next
+            }
+            { print }
+          ' docs/RELEASES.md > docs/RELEASES.md.tmp
+
+          mv docs/RELEASES.md.tmp docs/RELEASES.md
+
+          echo "Prepended:"
+          echo "$STUB"
+
+      - name: Commit + push
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # No-op guard: if RELEASES.md didn't actually change (e.g. the
+          # marker was removed in a prior edit), don't create an empty
+          # commit. `git diff --quiet` exits 1 on diff, 0 on clean.
+          if git diff --quiet docs/RELEASES.md; then
+            echo "No change to RELEASES.md — skipping commit."
+            exit 0
+          fi
+
+          git add docs/RELEASES.md
+          # [skip ci] prevents the Deploy workflow from re-triggering
+          # on our own push — otherwise each deploy would loop once.
+          git commit -m "docs(releases): append ${{ needs.build.outputs.tag }} [skip ci]"
+          git push origin HEAD:main

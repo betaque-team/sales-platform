@@ -7,20 +7,32 @@
 # the backend doesn't need any privileged mounts or psutil dependencies.
 #
 # Install (one-time, on the VM — see docs/VM_MONITORING.md):
+#   sudo mkdir -p /opt/sales-platform/host-metrics
 #   sudo install -m 755 collect-host-metrics.sh /usr/local/bin/
 #   ( sudo crontab -l 2>/dev/null; \
 #     echo '* * * * * /usr/local/bin/collect-host-metrics.sh >/dev/null 2>&1' \
 #   ) | sudo crontab -
 #
-# Output (world-readable, atomic-replace):
-#   /opt/sales-platform/host-metrics.json
+# Output (world-readable, atomic-replace) — the parent directory is what
+# `docker-compose.prod.yml` bind-mounts into the backend container as
+# read-only `/host`, so the JSON file appears at `/host/metrics.json`
+# inside. Writing tmp + mv inside the same dir keeps the rename atomic
+# (same filesystem) AND prevents docker from materializing a phantom
+# directory when the path is briefly missing during atomic replace:
+#   /opt/sales-platform/host-metrics/metrics.json
 #
 # Needs: jq, curl, docker CLI, journalctl. All standard on Ubuntu 22.04.
 # =============================================================================
 set -uo pipefail
 
-OUT="/opt/sales-platform/host-metrics.json"
+OUT="/opt/sales-platform/host-metrics/metrics.json"
 TMP="${OUT}.tmp.$$"
+
+# Ensure the parent directory exists. First run after a fresh install
+# would otherwise fail at `mv "$TMP" "$OUT"` below — silently, since
+# `set -e` is intentionally not enabled (we want partial-fail tolerance
+# on the "soft" sections like cloudflared metrics, journalctl, du).
+mkdir -p "$(dirname "$OUT")"
 APP_ROOT="/opt/sales-platform"
 BACKUPS_DIR="${APP_ROOT}/backups"
 CLOUDFLARED_METRICS_URL="http://127.0.0.1:20241/metrics"

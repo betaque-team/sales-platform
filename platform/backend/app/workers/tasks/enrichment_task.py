@@ -55,21 +55,54 @@ def enrich_company(self, company_id: str):
 
 @celery_app.task(name="app.workers.tasks.enrichment_task.enrich_target_companies_batch")
 def enrich_target_companies_batch():
-    """Nightly: enrich target companies that are stale or never enriched."""
+    """Nightly: enrich companies that are stale or never enriched.
+
+    Historically this filtered on ``Company.is_target.is_(True)`` — but
+    only a curated handful of companies ever make it to `is_target=True`
+    (via `auto_target_companies` or admin action), so the long tail of
+    companies ingested from ATS scans was NEVER enriched. Users reported
+    many companies with empty description/funding/logo fields.
+
+    New eligibility: any company that (a) has at least one active ATS
+    board (so enriching it actually has a signal to attach to), (b) is
+    never-enriched OR past the stale cutoff, (c) is not currently being
+    enriched by a parallel task. Ordered by `is_target DESC` first
+    (curated companies keep priority), then by `created_at DESC` so
+    fresh arrivals get enriched before the DB's oldest entries. Capped
+    at `enrichment_batch_size` (50/hour default) so external API quota
+    and scraper bandwidth stay bounded — the full 786-company corpus
+    converges in ~16 hours.
+
+    Task name is retained (not renamed) so celery beat keeps picking it
+    up and any admin-triggered `.delay()` calls from API endpoints that
+    reference the name keep working.
+    """
     session = SyncSession()
     try:
         settings = get_settings()
         stale_cutoff = datetime.now(timezone.utc) - timedelta(days=settings.enrichment_stale_days)
 
+        # Subquery: companies that have at least one active board. LEFT
+        # JOIN would work too, but EXISTS is cheaper when we only need
+        # the boolean — Postgres can short-circuit after the first hit.
+        from app.models.company import CompanyATSBoard
+        from sqlalchemy import exists
+        has_active_board = exists().where(
+            CompanyATSBoard.company_id == Company.id,
+            CompanyATSBoard.is_active.is_(True),
+        )
+
         companies = session.execute(
             select(Company).where(
-                Company.is_target.is_(True),
+                has_active_board,
                 or_(
                     Company.enriched_at.is_(None),
                     Company.enriched_at < stale_cutoff,
                 ),
                 Company.enrichment_status != "enriching",
-            ).limit(settings.enrichment_batch_size)
+            )
+            .order_by(Company.is_target.desc(), Company.created_at.desc())
+            .limit(settings.enrichment_batch_size)
         ).scalars().all()
 
         queued = 0
@@ -77,7 +110,10 @@ def enrich_target_companies_batch():
             enrich_company.delay(str(company.id))
             queued += 1
 
-        logger.info("Queued %d target companies for enrichment", queued)
+        logger.info(
+            "Queued %d companies for enrichment (is_target priority, batch cap=%d)",
+            queued, settings.enrichment_batch_size,
+        )
         return {"queued": queued}
     except Exception as exc:
         logger.exception("enrich_target_companies_batch failed: %s", exc)

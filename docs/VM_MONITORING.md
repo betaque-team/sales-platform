@@ -16,12 +16,13 @@ matter on a $0 tier:
   VM host (Ubuntu 22.04)
   ├─ cron: * * * * *   collect-host-metrics.sh
   │                      │
-  │                      └─ writes /opt/sales-platform/host-metrics.json (atomic)
+  │                      └─ writes /opt/sales-platform/host-metrics/metrics.json (atomic)
   │
   └─ cron: 0 */6 * * *  keepalive.sh   (2 min CPU burst → stays above Oracle's 10% reclaim threshold)
 
   backend container
-  └─ bind-mount: /opt/sales-platform/host-metrics.json → /host/metrics.json  (ro)
+  └─ bind-mount: /opt/sales-platform/host-metrics → /host  (ro, dir)
+      │   (so the JSON file is reachable inside as `/host/metrics.json`)
       │
       └─ app.services.host_stats.get_vm_metrics()
             │
@@ -59,13 +60,17 @@ the platform lives under `/opt/sales-platform/`, so keep scripts under
 # from the repo on the VM (e.g. /opt/sales-platform)
 sudo install -m 755 infra/scripts/collect-host-metrics.sh /usr/local/bin/
 
-# first manual run — IMPORTANT: this must happen BEFORE `docker compose up`,
-# otherwise Docker sees the missing path and creates it as a directory,
-# breaking the bind-mount.
+# Create the host-metrics directory the bind-mount targets. The collector
+# now self-creates this on first run too, but pre-creating it lets the
+# `docker compose up` below succeed even if collector cron lags by a few
+# seconds.
+sudo mkdir -p /opt/sales-platform/host-metrics
+
+# first manual run — produces metrics.json inside the dir above
 sudo /usr/local/bin/collect-host-metrics.sh
 
 # verify
-jq . /opt/sales-platform/host-metrics.json
+jq . /opt/sales-platform/host-metrics/metrics.json
 ```
 
 You should see a single JSON object with `timestamp`, `cpu`, `memory`,
@@ -187,10 +192,8 @@ is very accurate.
 The backend can't read `/host/metrics.json`. Either:
 
 - the collector hasn't run yet → run it manually (see step 1)
-- the bind-mount isn't there → `docker compose -f docker-compose.prod.yml config | grep host/metrics.json` should show the mount. If missing, pull the latest `docker-compose.prod.yml` and recreate the backend container.
-- Docker created a *directory* instead of a file-mount because
-  `/opt/sales-platform/host-metrics.json` didn't exist when compose came up.
-  Fix: `docker compose down && sudo rm -rf /opt/sales-platform/host-metrics.json && sudo /usr/local/bin/collect-host-metrics.sh && docker compose up -d`.
+- the bind-mount isn't there → `docker compose -f docker-compose.prod.yml config | grep '/host'` should show `/opt/sales-platform/host-metrics:/host:ro`. If missing, the deployed `docker-compose.prod.yml` is older than the git copy — rsync the fresh one to `/opt/sales-platform/` and recreate the backend.
+- The bind-mount is there but `/host` is empty → the host-metrics directory doesn't exist yet (or got removed). Fix: `sudo mkdir -p /opt/sales-platform/host-metrics && sudo /usr/local/bin/collect-host-metrics.sh` and confirm `metrics.json` lands inside.
 
 ### Keepalive guardrail is firing
 
@@ -244,8 +247,8 @@ sudo crontab -l | grep -v -e collect-host-metrics -e keepalive | sudo crontab -
 # remove the collector binary
 sudo rm /usr/local/bin/collect-host-metrics.sh
 
-# remove the host file
-sudo rm /opt/sales-platform/host-metrics.json
+# remove the host metrics directory (file + parent)
+sudo rm -rf /opt/sales-platform/host-metrics
 
 # revert the compose bind-mount (edit docker-compose.prod.yml), then
 docker compose -f docker-compose.prod.yml up -d --force-recreate backend

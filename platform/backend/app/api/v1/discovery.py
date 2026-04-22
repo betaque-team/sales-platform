@@ -55,6 +55,67 @@ async def list_runs(
     }
 
 
+@router.post("/fingerprint-companies", status_code=202)
+async def trigger_fingerprint_existing_companies(
+    limit: int = 50,
+    only_unfingerprinted: bool = True,
+    user: User = Depends(require_role("admin")),
+):
+    """Dispatch the reverse-discovery fingerprint task.
+
+    Iterates existing ``Company.website`` URLs, runs the ATS fingerprint
+    service against each, and seeds ``DiscoveredCompany`` rows for any
+    ``(platform, slug)`` pair we don't already have. Returns a Celery
+    ``task_id`` the admin UI can poll via the existing scan-status
+    endpoint.
+
+    Why this is a separate endpoint from ``POST /discovery/runs``:
+    the classic discovery task probes a hardcoded ATS slug list (fast,
+    stale-prone). This one takes the flip side — it probes company
+    websites from our own DB to detect which ATS each company uses.
+    Different mechanic, different cadence (this should run monthly-ish,
+    not every scan cycle), so it gets its own trigger.
+
+    ``limit`` caps per-invocation to keep wall-time bounded — default
+    50 = ~12-15 min at ~15s per fingerprint fetch. For a full-corpus
+    sweep, dispatch multiple times or bump the limit; the task already
+    dedups by ``(platform, slug)`` so overlap is safe.
+    """
+    # Bound the limit so a typo like `?limit=999999` doesn't queue a
+    # 10-hour worker burn.
+    if limit < 1 or limit > 500:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 500 inclusive",
+        )
+
+    # Dispatch to Celery. Same failure-mode pattern as
+    # `trigger_discovery_run`: if the broker is down we still want
+    # the admin UI to show a meaningful error rather than hanging.
+    try:
+        from app.workers.tasks.discovery_task import fingerprint_existing_companies
+        async_result = fingerprint_existing_companies.delay(
+            limit=limit,
+            only_unfingerprinted=only_unfingerprinted,
+        )
+        return {
+            "task_id": str(async_result.id),
+            "status": "queued",
+            "limit": limit,
+            "only_unfingerprinted": only_unfingerprinted,
+        }
+    except Exception as exc:
+        logger.exception(
+            "Failed to dispatch fingerprint_existing_companies: %s", exc
+        )
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=502,
+            detail=f"Celery dispatch failed: {exc}",
+        )
+
+
 @router.post("/runs", response_model=DiscoveryRunOut, status_code=201)
 async def trigger_discovery_run(
     user: User = Depends(require_role("admin")),

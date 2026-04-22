@@ -30,6 +30,21 @@ export function ResumeSwitcher() {
     queryClient.invalidateQueries({ queryKey: ["resume-scores"] });
     queryClient.invalidateQueries({ queryKey: ["credentials"] });
     queryClient.invalidateQueries({ queryKey: ["apply-readiness"] });
+    // F242: Intelligence page tabs are resume-sensitive but were missing
+    // from the invalidation list — the Skill Gap tab in particular computes
+    // `on_resume` + `coverage_pct` against `user.active_resume_id`, so
+    // switching the persona and staying on /intelligence showed stale
+    // coverage until a hard refresh. Test Reviewer filed the regression
+    // on 2026-04-18. Invalidating by the first key element — TanStack
+    // Query does prefix matching by default — wipes every `["skill-gaps",
+    // <cluster>]` entry regardless of the cluster filter the user had
+    // selected. Salary/timing/networking don't read the active resume
+    // today, but they live on the same page and users expect consistent
+    // freshness across tabs after a persona switch (cheap extra refetch).
+    queryClient.invalidateQueries({ queryKey: ["skill-gaps"] });
+    queryClient.invalidateQueries({ queryKey: ["salary-insights"] });
+    queryClient.invalidateQueries({ queryKey: ["timing-intelligence"] });
+    queryClient.invalidateQueries({ queryKey: ["networking-suggestions"] });
   };
 
   const switchMutation = useMutation({

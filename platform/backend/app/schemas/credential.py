@@ -23,12 +23,22 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
-# Supported ATS platforms — must stay in sync with
-# `api/v1/credentials.py::SUPPORTED_PLATFORMS`. If a new fetcher is
-# added, update both places.
+# Supported credential platforms — must stay in sync with
+# `api/v1/credentials.py::SUPPORTED_PLATFORMS` and the frontend
+# `CredentialsPage.tsx::PLATFORM_LABELS`. If a new fetcher is added,
+# update all three places.
+#
+# `linkedin` is NOT an ATS — it's a profile site — but it lives in this
+# list so each resume can carry a LinkedIn profile URL (and optionally
+# the email/password the user uses to log in, for future auto-connect
+# features). The existing `profile_url` field on the credential row is
+# what stores the LinkedIn profile; the `email` + `password` are
+# optional-but-present so the shape matches the ATS credentials and
+# the frontend can render one consistent form.
 SUPPORTED_PLATFORM_LITERALS = Literal[
     "greenhouse", "lever", "ashby", "workable", "smartrecruiters",
     "recruitee", "bamboohr", "jobvite", "wellfound", "himalayas",
+    "linkedin",
 ]
 
 # URL schemes permitted on `profile_url`. Rendered by the frontend as
