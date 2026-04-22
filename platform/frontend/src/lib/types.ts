@@ -739,12 +739,22 @@ export interface AnswerBookEntry {
   usage_count: number;
   created_at: string;
   updated_at: string;
+  // v6 Claude Routine Apply — routine-required entries are locked so
+  // the user can only edit the answer (not the question/category) and
+  // the DELETE endpoint rejects. Optional because legacy rows (seeded
+  // before is_locked landed) may not have the flag populated in API
+  // responses until the backend is fully upgraded.
+  is_locked?: boolean;
 }
 
 // Applications
 export type ApplicationStatus = "prepared" | "submitted" | "applied" | "interview" | "offer" | "rejected" | "withdrawn";
-export type ApplyMethod = "api_submit" | "manual_copy" | "career_page";
-export type ApplicationSubmissionSource = "manual_prepare" | "review_queue";
+// `claude_routine` added for the v6 MCP-Chrome routine. Still a
+// union — ApplicationsPage renders an "Auto" badge for this value.
+export type ApplyMethod = "api_submit" | "manual_copy" | "career_page" | "claude_routine";
+// `routine` added for v6 — matches Application.submission_source in
+// the backend. Applications filed by the routine set this value.
+export type ApplicationSubmissionSource = "manual_prepare" | "review_queue" | "routine";
 
 export interface Application {
   id: string;
@@ -1248,3 +1258,120 @@ export interface ProfileCreatePayload {
 }
 
 export type ProfileUpdatePayload = Partial<ProfileCreatePayload>;
+
+// ═══════════════════════════════════════════════════════════════════
+// Claude Routine Apply (v6) — automated-submission control-plane types.
+// Mirrors backend/app/schemas/routine.py. Kept at the bottom of the
+// file so the existing types don't churn on a diff review.
+// ═══════════════════════════════════════════════════════════════════
+
+export type RoutineMode = "dry_run" | "live" | "single_trial";
+export type RoutineStatus = "running" | "complete" | "aborted";
+export type AnswerSource = "manual_required" | "learned" | "generated";
+
+// One entry from GET /answer-book/required-coverage. The UI renders
+// a 16-row list; each row shows the category header, question, and an
+// inline editable answer. `filled=false` rows are the ones blocking
+// the pre-flight gate.
+export interface RequiredCoverageEntry {
+  id: string;
+  category: string;
+  question: string;
+  question_key: string;
+  answer: string;
+  filled: boolean;
+}
+
+export interface RequiredCoverageResponse {
+  complete: boolean;
+  total_required: number;
+  total_filled: number;
+  missing: RequiredCoverageEntry[];
+}
+
+export interface SeedRequiredResponse {
+  created: number;
+  already_present: number;
+  total: number;
+}
+
+export interface TopToApplyJob {
+  job_id: string;
+  title: string;
+  company_id: string | null;
+  company_name: string;
+  platform: string;
+  relevance_score: number;
+  geography_bucket: string | null;
+  role_cluster: string | null;
+}
+
+export interface TopToApplyResponse {
+  kill_switch_active: boolean;
+  daily_cap_remaining: number;
+  answer_book_ready: boolean;
+  jobs: TopToApplyJob[];
+}
+
+export interface RoutineRun {
+  id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  mode: RoutineMode;
+  applications_attempted: number;
+  applications_submitted: number;
+  applications_skipped: { job_id?: string; reason?: string }[];
+  detection_incidents: { at?: string; reason?: string }[];
+  status: RoutineStatus;
+  kill_switch_triggered: boolean;
+}
+
+// Submission detail as returned by GET /applications/{id}/submission
+// AND embedded in GET /routine/runs/{id}. Shared shape — the routine
+// detail page renders submissions inline, the applications detail
+// page renders the same row from the single-application endpoint.
+export interface SubmissionDetail {
+  id: string;
+  application_id: string;
+  routine_run_id: string | null;
+  submitted_at: string;
+  job_url: string;
+  ats_platform: string;
+  form_fingerprint_hash: string | null;
+  // Values that look like PII (email/phone/zip) are stored as
+  // `{type, len}` stubs by the backend; everything else is the raw
+  // string the ATS form received. Typed as `unknown` so the UI is
+  // forced to narrow before rendering.
+  payload_json: Record<string, unknown>;
+  // List of {question, answer, source, source_ref_id, edit_distance,
+  // draft_text}. Stored as a loose dict so the frontend can evolve
+  // without a types round-trip — the SubmissionAnswersTab does its
+  // own runtime shape check before rendering.
+  answers_json: Record<string, unknown>[];
+  resume_version_hash: string | null;
+  cover_letter_text: string | null;
+  screenshot_keys: string[];
+  confirmation_text: string | null;
+  detected_issues: string[];
+  profile_snapshot: Record<string, string>;
+  created_at: string;
+}
+
+export interface RoutineRunDetail extends RoutineRun {
+  submissions: SubmissionDetail[];
+}
+
+export interface KillSwitchState {
+  disabled: boolean;
+  disabled_at: string | null;
+  reason: string | null;
+}
+
+export interface HumanizeResult {
+  text: string;
+  passes_applied: string[];
+  burstiness_sigma: number;
+  banned_phrase_hits: string[];
+  style_match_examples_used: number;
+}

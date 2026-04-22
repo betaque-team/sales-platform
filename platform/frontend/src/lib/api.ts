@@ -63,6 +63,16 @@ import type {
   ProfileUpdatePayload,
   ProfileDocument,
   ProfileDocType,
+  RequiredCoverageResponse,
+  SeedRequiredResponse,
+  TopToApplyResponse,
+  RoutineRun,
+  RoutineRunDetail,
+  RoutineMode,
+  RoutineStatus,
+  KillSwitchState,
+  HumanizeResult,
+  SubmissionDetail,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -917,7 +927,7 @@ export async function getApplications(
     status?: string;
     // F228 — provenance filter. Backend Literal-validates the value;
     // undefined / "" = no filter.
-    submission_source?: "review_queue" | "manual_prepare";
+    submission_source?: "review_queue" | "manual_prepare" | "routine";
     search?: string;
     page?: number;
     page_size?: number;
@@ -1205,5 +1215,112 @@ export async function archiveProfileDocument(
   return request<void>(
     `/profiles/${profileId}/documents/${docId}${query}`,
     { method: "DELETE" }
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Claude Routine Apply (v6) — control-plane helpers for the MCP-Chrome
+// routine + the operator UI that drives it. All endpoints are caller-
+// scoped on the backend; no admin override is exposed here.
+// ═══════════════════════════════════════════════════════════════════
+
+// Answer-book / required-setup — the pre-flight gate for the routine.
+
+export async function getRequiredCoverage(): Promise<RequiredCoverageResponse> {
+  return request<RequiredCoverageResponse>("/answer-book/required-coverage");
+}
+
+export async function seedRequiredAnswers(): Promise<SeedRequiredResponse> {
+  // Idempotent on the backend — calling twice just returns
+  // already_present=16 on the second call.
+  return request<SeedRequiredResponse>("/answer-book/seed-required", {
+    method: "POST",
+  });
+}
+
+// Routine top-to-apply + runs
+
+export async function getRoutineTopToApply(limit = 10): Promise<TopToApplyResponse> {
+  return request<TopToApplyResponse>(`/routine/top-to-apply?limit=${limit}`);
+}
+
+export async function createRoutineRun(payload: {
+  mode: RoutineMode;
+  target_job_ids?: string[];
+}): Promise<{ run_id: string }> {
+  return request<{ run_id: string }>("/routine/runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateRoutineRun(
+  runId: string,
+  payload: {
+    applications_attempted?: number;
+    applications_submitted?: number;
+    applications_skipped?: unknown[];
+    detection_incidents?: unknown[];
+    status?: RoutineStatus;
+    ended_at?: string;
+    kill_switch_triggered?: boolean;
+  },
+): Promise<RoutineRun> {
+  return request<RoutineRun>(`/routine/runs/${runId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getRoutineRun(runId: string): Promise<RoutineRunDetail> {
+  return request<RoutineRunDetail>(`/routine/runs/${runId}`);
+}
+
+export async function listRoutineRuns(limit = 10): Promise<RoutineRun[]> {
+  return request<RoutineRun[]>(`/routine/runs?limit=${limit}`);
+}
+
+// Kill-switch
+
+export async function getKillSwitch(): Promise<KillSwitchState> {
+  return request<KillSwitchState>("/routine/kill-switch");
+}
+
+export async function setKillSwitch(payload: {
+  disabled: boolean;
+  reason?: string | null;
+}): Promise<KillSwitchState> {
+  return request<KillSwitchState>("/routine/kill-switch", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// Humanize helper — routine invokes this on every generated answer
+// and cover letter before filling the ATS form.
+export async function humanizeText(payload: {
+  text: string;
+  question?: string | null;
+}): Promise<HumanizeResult> {
+  return request<HumanizeResult>("/routine/humanize", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// Submission detail — per-application view of what was actually sent
+// to the ATS. Rendered in the Submission tab on ApplicationsPage.
+
+export async function getApplicationSubmission(appId: string): Promise<SubmissionDetail> {
+  return request<SubmissionDetail>(`/applications/${appId}/submission`);
+}
+
+export async function promoteAnswer(
+  appId: string,
+  payload: { question: string; answer: string },
+): Promise<{ answer_book_entry_id: string; already_existed: boolean }> {
+  return request<{ answer_book_entry_id: string; already_existed: boolean }>(
+    `/applications/${appId}/promote-answer`,
+    { method: "POST", body: JSON.stringify(payload) },
   );
 }

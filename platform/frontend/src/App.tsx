@@ -25,6 +25,8 @@ import { IntelligencePage } from "./pages/IntelligencePage";
 import { InsightsPage } from "./pages/InsightsPage";
 import { ProfilesPage } from "./pages/ProfilesPage";
 import { ProfileDetailPage } from "./pages/ProfileDetailPage";
+import { RoutinePage } from "./pages/RoutinePage";
+import { RequiredSetupPage } from "./pages/RequiredSetupPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -224,6 +226,25 @@ export default function App() {
         element={
           <ProtectedLayout>
             <ProfileDetailPage />
+          </ProtectedLayout>
+        }
+      />
+      {/* v6 Claude Routine Apply — operator panel + required-setup. The
+          required-setup page nests under /answer-book so the sidebar's
+          Answer Book link still feels like the parent context. */}
+      <Route
+        path="/routine"
+        element={
+          <ProtectedLayout>
+            <RoutinePage />
+          </ProtectedLayout>
+        }
+      />
+      <Route
+        path="/answer-book/required-setup"
+        element={
+          <ProtectedLayout>
+            <RequiredSetupPage />
           </ProtectedLayout>
         }
       />

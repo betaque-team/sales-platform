@@ -25,6 +25,7 @@ import {
   Brain,
   Sparkles,
   ShieldCheck,
+  Bot,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { logout } from "@/lib/api";
@@ -40,6 +41,10 @@ const navigation = [
   { name: "Answer Book", to: "/answer-book", icon: BookOpen },
   { name: "Credentials", to: "/credentials", icon: KeyRound },
   { name: "Applications", to: "/applications", icon: Send },
+  // v6 Claude Routine Apply — operator panel. Kept near Applications
+  // since that's its closest sibling (both view-apply state); the
+  // routine itself is a superset-feature on top.
+  { name: "Claude Routine", to: "/routine", icon: Bot },
   { name: "Pipeline", to: "/pipeline", icon: GitBranch },
   { name: "Analytics", to: "/analytics", icon: BarChart3 },
   { name: "Intelligence", to: "/intelligence", icon: Brain },
