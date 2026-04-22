@@ -133,6 +133,13 @@ REMOTE_COMPANIES = [
 
     # Remotive (aggregator - __all__ fetches all remote jobs)
     {"name": "Remotive", "platform": "remotive", "slug": "__all__"},
+
+    # HackerNews "Who is hiring?" monthly thread — single synthetic
+    # board; each comment in the thread is a job posting from a
+    # different hirer. The fetcher finds the latest thread itself
+    # (no per-month re-seeding needed) and a Redis descendants-count
+    # marker short-circuits repeat scans when the thread hasn't grown.
+    {"name": "HN Who's Hiring", "platform": "hackernews", "slug": "__all__"},
 ]
 
 

@@ -14,6 +14,7 @@ from app.fetchers.weworkremotely import WeWorkRemotelyFetcher
 from app.fetchers.remoteok import RemoteOKFetcher
 from app.fetchers.remotive import RemotiveFetcher
 from app.fetchers.linkedin import LinkedInFetcher
+from app.fetchers.hackernews import HackerNewsFetcher
 
 FETCHER_MAP = {
     "greenhouse": GreenhouseFetcher,
@@ -34,4 +35,7 @@ FETCHER_MAP = {
     "remoteok": RemoteOKFetcher,
     "remotive": RemotiveFetcher,
     "linkedin": LinkedInFetcher,
+    # HN "Who is hiring?" monthly thread — aggregator; slug is
+    # always `__all__`. See app/fetchers/hackernews.py.
+    "hackernews": HackerNewsFetcher,
 }

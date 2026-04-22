@@ -27,6 +27,13 @@ SOURCE_TIERS = {
     "remotive": 3,
     "himalayas": 3,
     "indeed": 3,
+    # HN "Who is hiring?" — tier 2 despite being an aggregator.
+    # Cross-board quality check: HN hirers skew heavily toward
+    # engineering-first / infra-heavy cos (dev-tools, startups with
+    # strong technical hiring bars) rather than the broader remote
+    # population that RemoteOK / WWR index. Tier 2 matches wellfound
+    # / linkedin which have a similar quality profile.
+    "hackernews": 2,
 }
 
 
