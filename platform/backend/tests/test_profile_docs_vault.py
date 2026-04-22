@@ -204,6 +204,79 @@ def test_storage_png_accepted_with_correct_magic(tmp_doc_root):
     assert result["file_type"] == "png"
 
 
+def test_storage_heic_magic_requires_ftyp_header(tmp_doc_root):
+    """F238(a) regression — operator-precedence bug in HEIC magic-byte check.
+
+    The original check read:
+        ``data[4:8] == b"ftyp" and b"heic" in data[:24] or b"heix" in data[:24]``
+    Python ``and`` binds tighter than ``or``, so the expression parsed as
+    ``(ftyp AND heic) OR heix`` — any payload with ``b"heix"`` in its
+    first 24 bytes would pass regardless of the ``ftyp`` header. A
+    renamed binary like ``b"heix-malware..."`` would sail through.
+
+    The fix wraps the ``or`` clause in parens so both brand variants
+    are gated by the ``ftyp`` header check. This test locks that
+    behaviour in.
+    """
+    from app.utils.profile_doc_storage import (
+        DocValidationError, _magic_matches_ext, validate_and_store,
+    )
+
+    # Crafted payload: carries ``b"heix"`` in the first 24 bytes but
+    # has NO ``ftyp`` header at bytes 4-7. Pre-fix, this returned True.
+    crafted = b"\x00\x00\x00\x00JUNKheix" + b"A" * 40
+    assert _magic_matches_ext(crafted, "heic") is False
+
+    # Same thing but via the full upload pipeline — reports a validation
+    # error instead of silently writing the byte stream as valid HEIC.
+    with pytest.raises(DocValidationError, match="don't match the declared type"):
+        validate_and_store(
+            profile_id=uuid.uuid4(),
+            doc_id=uuid.uuid4(),
+            file_bytes=crafted,
+            content_type="image/heic",
+            original_filename="photo.heic",
+        )
+
+    # Positive case: real HEIC fingerprint with the ftyp box header
+    # and the ``heic`` brand identifier still passes.
+    real_heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 40
+    assert _magic_matches_ext(real_heic, "heic") is True
+
+
+def test_storage_rejects_zip_mime_even_when_filename_is_docx(tmp_doc_root):
+    """F240(d) regression — a specific but non-allow-listed MIME must
+    NOT fall through to the filename fallback.
+
+    The tester's repro: browser sends ``Content-Type: application/zip``
+    with a ``.docx`` filename. DOCX is a ZIP container, so the
+    magic-byte check passes. Pre-fix, ``resolve_ext`` skipped the
+    MIME (not in the allow-list), fell back to the filename's
+    ``.docx`` suffix, and returned ``"docx"`` — leaving the row with
+    ``file_type="docx"`` even though the browser explicitly declared
+    it as a zip. Fix: only the generic / absent MIMEs (empty,
+    ``application/octet-stream``) trigger the filename fallback;
+    any other explicit MIME that isn't on the allow-list gets
+    rejected outright.
+    """
+    from app.utils.profile_doc_storage import DocValidationError, resolve_ext
+
+    with pytest.raises(DocValidationError, match="Unsupported file type"):
+        resolve_ext("application/zip", "resume.docx")
+
+    # Sanity: octet-stream still falls through to the filename suffix —
+    # that path is how drag-and-drop uploads work and we don't want
+    # to regress those. A ``.docx`` filename with
+    # ``application/octet-stream`` as Content-Type still resolves to
+    # "docx" so the DocType-legitimate path keeps working.
+    assert resolve_ext("application/octet-stream", "resume.docx") == "docx"
+    # Explicit DOCX MIME continues to work too.
+    assert resolve_ext(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "resume.docx",
+    ) == "docx"
+
+
 def test_storage_unlink_is_safe_on_missing_file(tmp_doc_root):
     """unlink_if_exists returns False (no raise) when the path
     doesn't exist — used by the hard-delete path for retention
@@ -279,6 +352,55 @@ def test_every_profile_route_is_admin_gated():
             "admin gate — KYC data is exposed to any logged-in user. "
             "Wire `_ADMIN_GUARD = require_role('admin')` on the endpoint."
         )
+
+
+def test_dob_validator_rejects_implausible_dates():
+    """F240(a) regression — DOB must be in [1900-01-01, today].
+
+    Pre-fix, Pydantic only validated ISO parse, so ``9999-12-31`` and
+    ``1850-01-01`` both sailed through as-is to the DB and into the
+    UI. For KYC data these are obvious data-entry errors — either a
+    form-filler script or a typo — and we'd rather 422 than persist.
+    """
+    from datetime import date, timedelta
+
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.profile import ProfileCreate, ProfileUpdate
+
+    today = date.today()
+    base = {"name": "Test", "email": "t@example.com"}
+
+    # Future — rejected.
+    with pytest.raises(ValidationError, match="future"):
+        ProfileCreate(**base, dob=today + timedelta(days=1))
+
+    # Far future (the tester's exact repro).
+    with pytest.raises(ValidationError, match="future"):
+        ProfileCreate(**base, dob=date(9999, 12, 31))
+
+    # Pre-1900 (the tester's other repro).
+    with pytest.raises(ValidationError, match="1900"):
+        ProfileCreate(**base, dob=date(1850, 1, 1))
+
+    # Edge: 1900-01-01 exactly — accepted (inclusive lower bound).
+    p = ProfileCreate(**base, dob=date(1900, 1, 1))
+    assert p.dob == date(1900, 1, 1)
+
+    # Edge: today exactly — accepted.
+    p = ProfileCreate(**base, dob=today)
+    assert p.dob == today
+
+    # None — still accepted (dob is optional, admin may fill later).
+    p = ProfileCreate(**base, dob=None)
+    assert p.dob is None
+
+    # PATCH path gets the same guard.
+    with pytest.raises(ValidationError, match="future"):
+        ProfileUpdate(dob=date(2999, 1, 1))
+    with pytest.raises(ValidationError, match="1900"):
+        ProfileUpdate(dob=date(1800, 1, 1))
 
 
 def test_doc_type_enum_matches_model_column_width():
