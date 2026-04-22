@@ -15,6 +15,7 @@ from app.fetchers.remoteok import RemoteOKFetcher
 from app.fetchers.remotive import RemotiveFetcher
 from app.fetchers.linkedin import LinkedInFetcher
 from app.fetchers.hackernews import HackerNewsFetcher
+from app.fetchers.yc_waas import YCWaaSFetcher
 
 FETCHER_MAP = {
     "greenhouse": GreenhouseFetcher,
@@ -38,4 +39,9 @@ FETCHER_MAP = {
     # HN "Who is hiring?" monthly thread — aggregator; slug is
     # always `__all__`. See app/fetchers/hackernews.py.
     "hackernews": HackerNewsFetcher,
+    # Y Combinator Work at a Startup — aggregator, slug `__all__`.
+    # Two-stage fetcher: yc-oss batch dumps for company enumeration
+    # + workatastartup.com /jobs/search for postings. See
+    # app/fetchers/yc_waas.py.
+    "yc_waas": YCWaaSFetcher,
 }
