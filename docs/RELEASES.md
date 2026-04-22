@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-22 · 14f2f28 · sha-14f2f28
+Merge branch 'fix/regression-findings' into main
+
+
 ## 2026-04-22 · 2a10d9e · sha-2a10d9e
 Merge feat/admin-profile-docs-vault: admin-only KYC docs vault
 
