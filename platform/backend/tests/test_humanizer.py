@@ -242,19 +242,44 @@ def test_style_match_noop_when_corpus_too_small():
     assert used == 0
 
 
-def test_style_match_v6_stub_is_text_noop_even_with_sufficient_corpus():
-    """The v6 implementation of style_match_pass is a deliberate stub:
-    it never rewrites text (the full LLM-backed rewrite lands in
-    Phase 4). A corpus at or above the minimum size keeps the text
-    unchanged and returns 0 used — regression test for the Phase 4
-    handoff: if this starts returning non-zero, the LLM path must
-    have shipped and the telemetry shape needs re-verifying."""
+def test_style_match_counts_examples_when_corpus_sufficient():
+    """At or above the minimum corpus size, the v6 stub keeps text
+    unchanged but records that it would have used up to
+    ``STYLE_MATCH_MAX_EXAMPLES`` few-shot examples. This is the
+    "corpus wiring works end-to-end" signal the caller needs, and
+    it's critical for the Phase 4 handoff — the LLM path will flip
+    text-mutation on but must preserve the counter semantics.
+
+    Historical: before the arithmetic fix this assertion was
+    `used == 0` because the gate compared `corpus[:5]` against
+    `>= 10`, which is structurally impossible. See the bug-fix
+    comment in ``style_match_pass``."""
+    from app.services.humanizer import STYLE_MATCH_MAX_EXAMPLES
+
     corpus = [("d", "f")] * (STYLE_MATCH_MIN_CORPUS_SIZE * 2)
     text, used = style_match_pass("anything", corpus)
-    assert text == "anything"
-    # Stub returns 0 because the cap-then-min-check arithmetic in
-    # the v6 code short-circuits before recording usage. Phase 4
-    # will change this; when it does, update the assertion.
+    assert text == "anything"  # v6 stub — no rewrite yet
+    # 20 rows in, capped at STYLE_MATCH_MAX_EXAMPLES (5).
+    assert used == STYLE_MATCH_MAX_EXAMPLES
+
+
+def test_style_match_at_exact_minimum_reports_capped_count():
+    """Boundary case: exactly MIN rows in. Since MIN (10) > MAX (5),
+    the output is always capped at MAX. This test pins the
+    relationship between the two constants; if someone drops MIN
+    below MAX the math flips and this test fails loudly."""
+    from app.services.humanizer import STYLE_MATCH_MAX_EXAMPLES
+
+    corpus = [("d", "f")] * STYLE_MATCH_MIN_CORPUS_SIZE
+    _, used = style_match_pass("anything", corpus)
+    assert used == min(STYLE_MATCH_MIN_CORPUS_SIZE, STYLE_MATCH_MAX_EXAMPLES)
+
+
+def test_style_match_one_below_minimum_reports_zero():
+    """Boundary case: MIN - 1 rows in. Must NOT count — the gate is
+    strict-less-than, so hitting the minimum exactly is the flip."""
+    corpus = [("d", "f")] * (STYLE_MATCH_MIN_CORPUS_SIZE - 1)
+    _, used = style_match_pass("anything", corpus)
     assert used == 0
 
 
