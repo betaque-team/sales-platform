@@ -485,22 +485,38 @@ def run_discovery(self, run_id: str | None = None):
 
 
 @celery_app.task(name="app.workers.tasks.discovery_task.discover_and_add_boards", bind=True, max_retries=1)
-def discover_and_add_boards(self):
+def discover_and_add_boards(self, source: str = "scheduled"):
     """Discovery + auto-add: Find new company boards and automatically add them to scanning.
 
     This is the separate platform discovery scan job that:
     1. Runs discovery to find new companies
     2. Automatically creates Company + CompanyATSBoard records for discovered companies
     3. Makes them immediately available for the next scan cycle
+
+    F237(a) regression fix — the ``source`` parameter lets beat and
+    the admin UI tag their rows differently:
+
+    * Celery Beat invokes this with no args (``delay()`` without
+      kwargs) → default ``source="scheduled"``. Freshness/history
+      queries that filter on ``source="scheduled"`` now see these
+      rows, closing the 4-day gap the tester observed (beat was
+      firing; rows just got tagged ``"auto_add"`` so nothing listening
+      for ``"scheduled"`` ever saw them).
+    * The admin ``POST /platforms/scan/discover`` handler passes
+      ``source="manual"`` explicitly so the admin-initiated runs stay
+      distinguishable in the history.
+    * The legacy ``source="auto_add"`` tag is retired — kept in
+      existing rows for audit but no new row uses it, so we don't
+      silently reinterpret historical data.
     """
-    logger.info("Starting discover_and_add_boards")
+    logger.info("Starting discover_and_add_boards source=%s", source)
     session = SyncSession()
 
     try:
         # First run discovery
         run = DiscoveryRun(
             id=uuid.uuid4(),
-            source="auto_add",
+            source=source,
             status="running",
         )
         session.add(run)

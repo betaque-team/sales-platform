@@ -486,10 +486,55 @@ def match_role_from_config(title: str, cluster_config: dict) -> dict:
 
 
 def match_role_with_config(title: str, cluster_config: dict | None = None) -> dict:
-    """Match a role using DB config if available, otherwise hardcoded fallback."""
-    if cluster_config:
-        return match_role_from_config(title, cluster_config)
-    return match_role(title)
+    """Match a role using DB config with a hardcoded-list safety net.
+
+    F235 regression fix — the DB ``RoleClusterConfig`` rows are seeded
+    once and drift as the hardcoded ``INFRA_KEYWORDS`` /
+    ``SECURITY_KEYWORDS`` lists get refined each regression round
+    (F91, F92, F93, F227, …). Pre-fix, ``match_role_from_config`` was
+    effectively a strict SUBSET of ``match_role``, so every
+    ``reclassify_and_rescore`` run under-classified hundreds of titles
+    that the hardcoded matcher would have caught (tester observed
+    315 stale infra + 440 stale security rows after a full sweep).
+
+    Strategy:
+
+    1. Run the config-driven matcher first. If it lands on a
+       non-empty cluster, trust it — admins explicitly configured
+       the cluster and any custom clusters (e.g. "data_science")
+       only exist on that side.
+    2. If the config-driven matcher came back empty *and* the config
+       has an active cluster for infra/security/qa, fall back to
+       the hardcoded matcher for that same built-in cluster. The
+       fallback only fires when (a) config has the cluster defined
+       and (b) config matcher produced no answer, so we can never
+       resurrect a cluster the admin explicitly disabled.
+    3. If no config is supplied, run the hardcoded matcher directly
+       (the legacy single-matcher path used by callers that haven't
+       loaded the cluster config yet).
+
+    Net effect: config wins when it has an opinion; the hardcoded
+    superset catches what the DB config narrows off; disabled clusters
+    are still respected.
+    """
+    if not cluster_config:
+        return match_role(title)
+
+    config_result = match_role_from_config(title, cluster_config)
+    if config_result["role_cluster"]:
+        return config_result
+
+    # No config-side match — try the hardcoded superset, but only for
+    # built-in clusters the admin hasn't disabled in the DB.
+    hardcoded = match_role(title)
+    hc_cluster = hardcoded["role_cluster"]
+    if hc_cluster and hc_cluster in cluster_config:
+        return hardcoded
+
+    # Either no hardcoded match either, or the hardcoded match lives
+    # in a cluster the admin removed/disabled — return the (empty)
+    # config result so the admin's disable decision wins.
+    return config_result
 
 
 def match_role(title: str) -> dict:

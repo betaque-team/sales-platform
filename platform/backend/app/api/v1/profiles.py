@@ -45,6 +45,7 @@ from app.schemas.profile import (
     ProfileCreate,
     ProfileDetailOut,
     ProfileDocumentOut,
+    ProfileListItem,
     ProfileListResponse,
     ProfileOut,
     ProfileUpdate,
@@ -145,9 +146,13 @@ async def list_profiles(
         )
         doc_counts = {pid: n for pid, n in (await db.execute(dc_q)).all()}
 
+    # F238(c): construct the slim ``ProfileListItem`` — the list
+    # response deliberately omits UAN / PF / notes so a paginated
+    # "show me everyone" call can't be used as a bulk-PII export.
+    # Full fields remain on the per-id detail endpoint.
     items = []
     for row in rows:
-        out = ProfileOut.model_validate(row)
+        out = ProfileListItem.model_validate(row)
         out.document_count = doc_counts.get(row.id, 0)
         items.append(out)
 
@@ -179,10 +184,15 @@ async def create_profile(
         select(Profile).where(func.lower(Profile.email) == body.email.lower())
     )).scalar_one_or_none()
     if existing:
+        # F238(e) regression fix: don't leak the existing row's UUID in
+        # the 409 body. The UUID is an internal handle that a caller
+        # without list/read privileges shouldn't be able to fish out
+        # just by probing emails. The error is still actionable — the
+        # admin knows which email to dedupe — without giving away the
+        # id of the pre-existing record.
         raise HTTPException(
             status_code=409,
-            detail=f"A profile with email {body.email!r} already exists "
-                   f"(id={existing.id}).",
+            detail=f"A profile with email {body.email!r} already exists.",
         )
 
     profile = Profile(
@@ -200,12 +210,24 @@ async def create_profile(
     await db.commit()
     await db.refresh(profile)
 
+    # F238(b) regression fix: NEVER put PII values (email / PAN / UAN)
+    # into audit metadata. The audit log is queryable by less-privileged
+    # ops users, so dumping the email here turned it into a secondary
+    # leak surface — an ops user with read access to ``audit_logs``
+    # could enumerate every profile's email without ever touching the
+    # ``profiles`` table. Mirror the ``profile.update`` pattern: log
+    # only the list of field names that were populated. The
+    # ``profile_id`` stays so compliance can still correlate the action
+    # with the row.
     await log_action(
         db, user,
         action="profile.create",
         resource="profile",
         request=request,
-        metadata={"profile_id": str(profile.id), "email": body.email},
+        metadata={
+            "profile_id": str(profile.id),
+            "fields": sorted(body.model_dump(exclude_unset=True).keys()),
+        },
     )
     return ProfileOut.model_validate(profile)
 
@@ -231,9 +253,35 @@ async def get_profile(
     doc_q = doc_q.order_by(ProfileDocument.uploaded_at.desc())
     docs = (await db.execute(doc_q)).scalars().all()
 
-    out = ProfileDetailOut.model_validate(profile)
-    out.documents = [ProfileDocumentOut.model_validate(d) for d in docs]
-    out.document_count = len(docs)
+    # F239 (P0): construct the response via a plain dict + kwargs
+    # rather than ``ProfileDetailOut.model_validate(profile)`` + post-
+    # validation field assignment. Two independent problems with the
+    # old form:
+    #
+    # 1. ``ProfileDetailOut`` inherits ``from_attributes=True``, and it
+    #    declares a ``documents: list[ProfileDocumentOut]`` field. When
+    #    Pydantic walks the attributes of ``profile``, it hits
+    #    ``profile.documents`` — a SQLAlchemy relationship that wasn't
+    #    eagerly loaded (``_get_profile_or_404`` doesn't
+    #    ``selectinload``). In the async session context this triggers
+    #    an implicit lazy-load, which raises ``MissingGreenlet`` and
+    #    collapses to a bare "Internal Server Error" string with no
+    #    JSON envelope — which is exactly the symptom tester F239
+    #    reported (every call to this endpoint 500s, no stack in body,
+    #    all sibling endpoints fine).
+    # 2. Even if documents had been eagerly loaded, post-validation
+    #    assignment like ``out.documents = [...]`` is brittle under
+    #    Pydantic V2 once we add any kind of ``frozen`` / strict
+    #    config — and it pointlessly revalidates on assignment.
+    #
+    # Building a dict from ``ProfileOut`` (which does NOT have a
+    # ``documents`` field, so Pydantic never probes that attribute)
+    # and then kwargs-constructing ``ProfileDetailOut`` sidesteps both.
+    doc_outs = [ProfileDocumentOut.model_validate(d) for d in docs]
+    base = ProfileOut.model_validate(profile).model_dump()
+    base["documents"] = [d.model_dump() for d in doc_outs]
+    base["document_count"] = len(doc_outs)
+    out = ProfileDetailOut.model_validate(base)
 
     # Audit every read — KYC reads are sensitive enough that "who
     # looked at whose profile" is itself a compliance question.
@@ -342,7 +390,26 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     doc_type: DocType = Form(...),
-    doc_label: str = Form(default=""),
+    # F241(a): cap ``doc_label`` to match the ``String(200)`` backing
+    # column. Pre-fix, the Form binding accepted any-length string; a
+    # 201+ char label crashed on the SQLAlchemy assignment and escaped
+    # as a bare HTTP 500 ("Internal Server Error" plain-text body,
+    # same shape as F239's pre-fix crash). FastAPI forwards
+    # ``max_length`` to the Pydantic validator, so overflow now 422s
+    # at parse time with ``string_too_long`` — actionable for the
+    # admin, no DB round-trip. No sibling ``Form(default=…)`` exists
+    # under ``app/api/v1/`` (verified by grep during the F241 sweep),
+    # so this is a spot fix rather than a pattern-wide refactor.
+    doc_label: str = Form(default="", max_length=200),
+    replace_existing: bool = Form(
+        default=False,
+        description=(
+            "If true and a non-archived doc of the same doc_type "
+            "already exists on this profile, soft-archive the old "
+            "one before storing the new upload. F240(b) opt-in guard "
+            "against accidental duplicate uploads."
+        ),
+    ),
     user: User = Depends(_ADMIN_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
@@ -356,6 +423,13 @@ async def upload_document(
          ``validate_and_store`` (400 on failure).
       4. ``doc_type="other"`` requires a non-empty ``doc_label`` so
          the admin can identify the file later.
+      5. F240(b): an existing non-archived doc of the same ``doc_type``
+         on the same profile 409s unless ``replace_existing=true``,
+         in which case the previous one gets soft-archived first.
+         ``doc_type="other"`` is exempt from the dedup check because
+         multiple "other" docs (e.g. two different passports, voter
+         ID + ration card) are legitimate and disambiguated by
+         ``doc_label``.
 
     On success, the file lives at
     ``{PROFILE_DOC_ROOT}/{profile_id}/{doc_id}.{ext}`` with mode 0600.
@@ -368,6 +442,39 @@ async def upload_document(
             detail='doc_type="other" requires a non-empty doc_label '
                    "describing the file",
         )
+
+    # F240(b) duplicate-doc-type guard. The "slot" mental model in the
+    # admin UI (one Aadhaar, one PAN, one 12th marksheet, …) lined up
+    # with what admins actually do in practice — but nothing on the
+    # backend enforced it, so a repeated click on the upload button
+    # silently accumulated rows. Now:
+    #   * ``doc_type="other"``  → skip the check (multi is legitimate)
+    #   * ``replace_existing``  → soft-archive the prior row, proceed
+    #   * otherwise             → 409 pointing at the existing row id
+    if doc_type != "other":
+        existing_doc = (await db.execute(
+            select(ProfileDocument).where(
+                ProfileDocument.profile_id == profile.id,
+                ProfileDocument.doc_type == doc_type,
+                ProfileDocument.archived_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if existing_doc is not None:
+            if not replace_existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"A non-archived '{doc_type}' document already "
+                        "exists for this profile. Pass "
+                        "replace_existing=true to archive the current "
+                        "one and upload a replacement, or archive it "
+                        "manually first."
+                    ),
+                )
+            # Soft-archive so the audit trail keeps the previous upload.
+            from datetime import datetime, timezone
+            existing_doc.archived_at = datetime.now(timezone.utc)
+            await db.flush()
 
     file_bytes = await file.read()
     doc_id = uuid.uuid4()
@@ -396,12 +503,23 @@ async def upload_document(
             detail="Document storage is temporarily unavailable. Try again later.",
         )
 
+    # F240(c): cap the stored filename so it actually fits the
+    # ``String(500)`` column *and* the Content-Disposition header we
+    # later build off it. Pre-fix, the column accepted whatever the
+    # browser sent; a 251+ char filename got persisted as-is and the
+    # download handler's separate ``[:200]`` truncation meant DB and
+    # on-disk/header disagreed. One cap, one source of truth — set it
+    # at the vault boundary. 200 is the same limit the download handler
+    # already applied, so existing rows are unaffected.
+    raw_filename = file.filename or f"{doc_id}.{storage_meta['file_type']}"
+    safe_filename = raw_filename[:200]
+
     doc = ProfileDocument(
         id=doc_id,
         profile_id=profile.id,
         doc_type=doc_type,
         doc_label=(doc_label.strip() or doc_type.replace("_", " ").title()),
-        filename=file.filename or f"{doc_id}.{storage_meta['file_type']}",
+        filename=safe_filename,
         file_type=storage_meta["file_type"],
         storage_path=storage_meta["storage_path"],
         size_bytes=storage_meta["size_bytes"],
@@ -525,6 +643,15 @@ async def archive_document(
     doc_id: UUID,
     request: Request,
     hard: bool = Query(default=False, description="If true, unlink the underlying file AND delete the row. Otherwise soft-archive."),
+    confirm: str | None = Query(
+        default=None,
+        description=(
+            "Required when ``hard=true`` — must exactly match the "
+            "owning profile's email (case-insensitive). Acts as a "
+            "typed second factor against accidental bulk-button misfire."
+        ),
+        max_length=320,
+    ),
     user: User = Depends(_ADMIN_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
@@ -532,9 +659,9 @@ async def archive_document(
 
     Default soft-delete (``archived_at`` timestamp). ``?hard=true``
     physically unlinks the file and hard-deletes the row — intended
-    for GDPR / DPDP erasure requests only; requires an audit
-    justification in a higher-level workflow (not enforced at this
-    API layer to keep things simple).
+    for GDPR / DPDP erasure requests only. Hard-delete additionally
+    requires ``?confirm=<email>`` matching the owning profile's email
+    as a typed second factor (F238(d) regression fix).
     """
     doc = (await db.execute(
         select(ProfileDocument).where(
@@ -553,6 +680,28 @@ async def archive_document(
     }
 
     if hard:
+        # F238(d) regression fix — second-factor confirmation guard.
+        # Hard-delete is irreversible (the file on disk gets unlinked
+        # and the row is physically removed), so we require the caller
+        # to explicitly re-type the owning profile's email. This turns
+        # "accidental click on a delete button" into an impossible
+        # mistake: a stray DELETE with just ``?hard=true`` now 400s.
+        # Comparison is case-insensitive on both sides since the
+        # profile email is stored as entered.
+        profile = await _get_profile_or_404(
+            profile_id, db, include_archived=True
+        )
+        expected = (profile.email or "").strip().lower()
+        got = (confirm or "").strip().lower()
+        if not got or got != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Hard-delete requires ?confirm=<owning profile email>. "
+                    "The confirm value must exactly match the profile's "
+                    "email on file."
+                ),
+            )
         unlinked = False
         if doc.storage_path:
             unlinked = unlink_if_exists(doc.storage_path)

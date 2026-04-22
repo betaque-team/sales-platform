@@ -118,7 +118,18 @@ def _magic_matches_ext(data: bytes, ext: str) -> bool:
         # or "ftypheix" or "ftyphevc" or "ftyphevx". The exact brand
         # varies across iPhone versions — just check the ftyp box header
         # position which is stable.
-        return data[4:8] == b"ftyp" and b"heic" in data[:24] or b"heix" in data[:24]
+        #
+        # IMPORTANT — operator precedence: ``and`` binds tighter than
+        # ``or``, so the expression ``A and B or C`` parses as
+        # ``(A and B) or C``. Without the parens below, any payload
+        # containing ``b"heix"`` in its first 24 bytes would pass the
+        # check regardless of whether bytes 4-7 are ``ftyp``, letting a
+        # malicious non-HEIC file slip through the magic-byte guard.
+        # The parens force both variants to be gated by the ``ftyp``
+        # header check. (F238(a) regression fix.)
+        return data[4:8] == b"ftyp" and (
+            b"heic" in data[:24] or b"heix" in data[:24]
+        )
     if ext == "docx":
         # DOCX is a ZIP container; ZIP files start with PK\x03\x04.
         return data.startswith(b"PK\x03\x04")
@@ -134,14 +145,32 @@ def resolve_ext(content_type: str | None, fallback_filename: str | None) -> str:
     fall back to the filename's extension so we can still accept
     obviously-legitimate uploads. Raises ``DocValidationError`` only
     if neither source yields a known type.
+
+    F240(d) regression fix: a SPECIFIC but non-allow-listed MIME
+    (``application/zip``, ``video/mp4``, etc.) must NOT fall through
+    to the filename-suffix fallback. Pre-fix, a browser explicitly
+    declaring ``Content-Type: application/zip`` with a ``.docx``
+    filename sailed through — the MIME wasn't in the map, so the
+    filename won, and the magic-byte check passed because DOCX and
+    ZIP share the ``PK\\x03\\x04`` header. Result: we'd tag the row
+    ``file_type="docx"`` even though the caller explicitly said it
+    was a ZIP. The filename fallback is meant for GENERIC MIMEs only —
+    missing / empty Content-Type headers, or the
+    ``application/octet-stream`` default browsers use for drag-and-
+    drop. Any other explicit MIME that isn't on the allow-list is
+    now an outright reject.
     """
     ct = (content_type or "").strip().lower()
     if ct in _MIME_TO_EXT:
         return _MIME_TO_EXT[ct]
     # Filename fallback — last 5 chars, lowercase. Guards against a
     # missing Content-Type for drag-n-drop uploads that some browsers
-    # send as application/octet-stream.
-    if fallback_filename:
+    # send as application/octet-stream. We ONLY reach the fallback
+    # when the MIME is generic-or-absent; a specific declared MIME
+    # that isn't on the allow-list must be rejected without consulting
+    # the filename (F240(d)).
+    _generic_mimes = {"", "application/octet-stream", "binary/octet-stream"}
+    if ct in _generic_mimes and fallback_filename:
         suffix = pathlib.PurePath(fallback_filename).suffix.lstrip(".").lower()
         # Accept only if the suffix matches one of our canonical exts,
         # not "exe" or "sh" or anything arbitrary.

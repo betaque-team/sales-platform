@@ -13,7 +13,7 @@ import re
 import uuid
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -146,8 +146,15 @@ async def auto_populate_from_resume(
 
 @router.get("")
 async def get_answer_book(
-    category: str | None = None,
-    resume_id: UUID | None = None,
+    category: str | None = Query(default=None),
+    resume_id: UUID | None = Query(default=None),
+    q: str | None = Query(
+        default=None,
+        max_length=200,
+        description="Case-insensitive substring filter over question + answer.",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -161,12 +168,24 @@ async def get_answer_book(
     switching resumes, or in the resume-comparison flow), they had no
     way to get them.
 
-    Contract now:
-      - `resume_id` omitted  → base + user.active_resume_id overrides
+    F236 regression fix: add the canonical pagination envelope
+    (``{items, total, page, page_size, total_pages}``) plus a free-
+    text ``q`` filter to match the shape used by ``/feedback``,
+    ``/jobs``, ``/applications``. ``categories`` and ``active_resume_id``
+    stay at the top level for backward compatibility with the
+    AnswerBookPage UI — both fields are envelope-sidecar, not
+    per-page metadata.
+
+    Contract:
+      - ``resume_id`` omitted  → base + user.active_resume_id overrides
         (unchanged, backward-compatible default)
-      - `resume_id` provided → base + that resume's overrides, after
+      - ``resume_id`` provided → base + that resume's overrides, after
         verifying the caller owns the resume (404 otherwise — match
         the existing pattern on `create_answer`)
+      - ``category`` and ``q`` filters run BEFORE the resume-override
+        merge; pagination happens AFTER, counting merged rows — so a
+        base-vs-override pair with the same ``question_key`` counts as
+        one item for ``total``.
     """
     # Resolve the effective override resume. None ⇒ "no overrides".
     override_resume_id = None
@@ -189,17 +208,45 @@ async def get_answer_book(
     )
     if category:
         query = query.where(AnswerBookEntry.category == category)
+    if q and q.strip():
+        # Case-insensitive substring over question + answer. The
+        # frontend just needs "find anything that mentions X" behaviour
+        # — no regex/full-text yet. If this grows we can wire a
+        # tsvector index later, but for the typical ~50-entry personal
+        # answer book a LIKE scan is trivially fast.
+        needle = f"%{q.strip().lower()}%"
+        query = query.where(
+            or_(
+                func.lower(AnswerBookEntry.question).like(needle),
+                func.lower(AnswerBookEntry.answer).like(needle),
+            )
+        )
     query = query.order_by(AnswerBookEntry.category, AnswerBookEntry.question)
 
     result = await db.execute(query)
     entries = result.scalars().all()
 
-    # Merge: resume-specific overrides win on matching question_key
+    # Merge: resume-specific overrides win on matching question_key.
+    # Done in Python because the merge rule is business-logic and the
+    # answer book is small (~tens of rows), so a SQL-level override
+    # join would be more code than it's worth.
     merged: dict[str, AnswerBookEntry] = {}
     for entry in entries:
         key = entry.question_key
         if key not in merged or entry.resume_id is not None:
             merged[key] = entry
+
+    # Stable ordering across the merged dict: SQL-level order_by is by
+    # (category, question) ascending. Python dicts preserve insertion
+    # order as of 3.7 — first write wins the position, later override
+    # just replaces the value at that key. So merged.values() is
+    # already in the intended order.
+    all_items = list(merged.values())
+    total = len(all_items)
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    start = (page - 1) * page_size
+    end = start + page_size
+    window = all_items[start:end]
 
     return {
         "items": [
@@ -217,8 +264,14 @@ async def get_answer_book(
                 "created_at": e.created_at.isoformat(),
                 "updated_at": e.updated_at.isoformat(),
             }
-            for e in merged.values()
+            for e in window
         ],
+        # Canonical pagination envelope — mirrors /feedback, /jobs.
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        # Backward-compat sidecars. Not per-page state.
         "categories": VALID_CATEGORIES,
         "active_resume_id": str(user.active_resume_id) if user.active_resume_id else None,
     }

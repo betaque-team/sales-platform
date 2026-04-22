@@ -15,6 +15,38 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
+# F240(a) regression fix: DOB calendar-plausibility range.
+# Pydantic's ``date`` field only validates ISO-format parse; any
+# syntactically-valid date (``0001-01-01``, ``9999-12-31``) sails
+# through. For KYC data we want to reject obvious data-entry
+# mistakes — a 1850-01-01 DOB is a typo, a 9999-12-31 is a form-fill
+# scripting artefact. 1900 is a conservative upper bound for
+# "old enough to be plausibly alive"; we don't enforce a strict
+# ≥18 lower bound because the vault stores onboarding candidates
+# whose DOB may be future-adjusted pending document verification.
+# Uses module-level constants so the admin UI can mirror the range
+# via the ``/api/v1/profiles`` OpenAPI spec if it wants to.
+_DOB_MIN = date(1900, 1, 1)
+
+
+def _validate_dob_range(value: date | None) -> date | None:
+    """Enforce 1900 ≤ DOB ≤ today. Raise ValueError otherwise so
+    Pydantic surfaces a 422 with the reason.
+    """
+    if value is None:
+        return value
+    today = date.today()
+    if value < _DOB_MIN:
+        raise ValueError(
+            f"dob must be on or after {_DOB_MIN.isoformat()}; got {value.isoformat()}"
+        )
+    if value > today:
+        raise ValueError(
+            f"dob cannot be in the future; got {value.isoformat()} (today is {today.isoformat()})"
+        )
+    return value
+
+
 # The canonical set of document types the UI knows how to render
 # (special-case labels, icons, etc.). Anything else goes under
 # ``other`` with a free-text label.
@@ -65,6 +97,9 @@ class ProfileCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=200)
     # Pydantic accepts ISO date strings or date objects.
+    # F240(a): also gated by ``_validate_dob_range`` below so obvious
+    # calendar-sanity errors (pre-1900, post-today) 422 instead of
+    # being persisted.
     dob: date | None = None
     email: EmailStr
     father_name: str | None = Field(default=None, max_length=200)
@@ -75,6 +110,8 @@ class ProfileCreate(BaseModel):
     uan_number: str | None = Field(default=None, max_length=40)
     pf_number: str | None = Field(default=None, max_length=40)
     notes: str = Field(default="", max_length=5000)
+
+    _validate_dob = field_validator("dob")(lambda cls, v: _validate_dob_range(v))
 
 
 class ProfileUpdate(BaseModel):
@@ -91,6 +128,9 @@ class ProfileUpdate(BaseModel):
     pf_number: str | None = Field(default=None, max_length=40)
     notes: str | None = Field(default=None, max_length=5000)
 
+    # F240(a): same calendar-sanity guard as ProfileCreate.
+    _validate_dob = field_validator("dob")(lambda cls, v: _validate_dob_range(v))
+
 
 class ProfileDocumentOut(BaseModel):
     """Document metadata. File contents served via
@@ -106,6 +146,40 @@ class ProfileDocumentOut(BaseModel):
     uploaded_by_user_id: UUID
     uploaded_at: datetime
     archived_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProfileListItem(BaseModel):
+    """Slim profile shape for the list endpoint.
+
+    F238(c) regression fix: the list view intentionally OMITS the
+    hot KYC identifiers (``uan_number``, ``pf_number``) and the
+    free-form ``notes`` field. Those are only returned on the detail
+    endpoint (``GET /profiles/{id}``) — which is still admin-only but
+    also separately audited, so "who saw what" is reconstructable.
+
+    Rationale: a paginated list iterates over many rows at once, which
+    makes it the prime screen-scrape target. Pulling the UAN/PF numbers
+    into that response turned the list into a bulk-PII export. Even
+    though both endpoints require ``admin``, scoping the list payload
+    to searchable-metadata-only limits the blast radius of a compromised
+    or over-privileged admin session.
+
+    Keep in sync with ``ProfileOut`` below: any field present on both
+    MUST have the same name + type so the ORM object validates into
+    either.
+    """
+    id: UUID
+    name: str
+    dob: date | None = None
+    email: str
+    father_name: str | None = None
+    created_by_user_id: UUID
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None = None
+    document_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -137,7 +211,8 @@ class ProfileDetailOut(ProfileOut):
 
 
 class ProfileListResponse(BaseModel):
-    items: list[ProfileOut]
+    # F238(c): list items use the slim shape (no UAN/PF/notes).
+    items: list[ProfileListItem]
     total: int
     page: int
     page_size: int

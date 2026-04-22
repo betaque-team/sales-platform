@@ -204,6 +204,79 @@ def test_storage_png_accepted_with_correct_magic(tmp_doc_root):
     assert result["file_type"] == "png"
 
 
+def test_storage_heic_magic_requires_ftyp_header(tmp_doc_root):
+    """F238(a) regression — operator-precedence bug in HEIC magic-byte check.
+
+    The original check read:
+        ``data[4:8] == b"ftyp" and b"heic" in data[:24] or b"heix" in data[:24]``
+    Python ``and`` binds tighter than ``or``, so the expression parsed as
+    ``(ftyp AND heic) OR heix`` — any payload with ``b"heix"`` in its
+    first 24 bytes would pass regardless of the ``ftyp`` header. A
+    renamed binary like ``b"heix-malware..."`` would sail through.
+
+    The fix wraps the ``or`` clause in parens so both brand variants
+    are gated by the ``ftyp`` header check. This test locks that
+    behaviour in.
+    """
+    from app.utils.profile_doc_storage import (
+        DocValidationError, _magic_matches_ext, validate_and_store,
+    )
+
+    # Crafted payload: carries ``b"heix"`` in the first 24 bytes but
+    # has NO ``ftyp`` header at bytes 4-7. Pre-fix, this returned True.
+    crafted = b"\x00\x00\x00\x00JUNKheix" + b"A" * 40
+    assert _magic_matches_ext(crafted, "heic") is False
+
+    # Same thing but via the full upload pipeline — reports a validation
+    # error instead of silently writing the byte stream as valid HEIC.
+    with pytest.raises(DocValidationError, match="don't match the declared type"):
+        validate_and_store(
+            profile_id=uuid.uuid4(),
+            doc_id=uuid.uuid4(),
+            file_bytes=crafted,
+            content_type="image/heic",
+            original_filename="photo.heic",
+        )
+
+    # Positive case: real HEIC fingerprint with the ftyp box header
+    # and the ``heic`` brand identifier still passes.
+    real_heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 40
+    assert _magic_matches_ext(real_heic, "heic") is True
+
+
+def test_storage_rejects_zip_mime_even_when_filename_is_docx(tmp_doc_root):
+    """F240(d) regression — a specific but non-allow-listed MIME must
+    NOT fall through to the filename fallback.
+
+    The tester's repro: browser sends ``Content-Type: application/zip``
+    with a ``.docx`` filename. DOCX is a ZIP container, so the
+    magic-byte check passes. Pre-fix, ``resolve_ext`` skipped the
+    MIME (not in the allow-list), fell back to the filename's
+    ``.docx`` suffix, and returned ``"docx"`` — leaving the row with
+    ``file_type="docx"`` even though the browser explicitly declared
+    it as a zip. Fix: only the generic / absent MIMEs (empty,
+    ``application/octet-stream``) trigger the filename fallback;
+    any other explicit MIME that isn't on the allow-list gets
+    rejected outright.
+    """
+    from app.utils.profile_doc_storage import DocValidationError, resolve_ext
+
+    with pytest.raises(DocValidationError, match="Unsupported file type"):
+        resolve_ext("application/zip", "resume.docx")
+
+    # Sanity: octet-stream still falls through to the filename suffix —
+    # that path is how drag-and-drop uploads work and we don't want
+    # to regress those. A ``.docx`` filename with
+    # ``application/octet-stream`` as Content-Type still resolves to
+    # "docx" so the DocType-legitimate path keeps working.
+    assert resolve_ext("application/octet-stream", "resume.docx") == "docx"
+    # Explicit DOCX MIME continues to work too.
+    assert resolve_ext(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "resume.docx",
+    ) == "docx"
+
+
 def test_storage_unlink_is_safe_on_missing_file(tmp_doc_root):
     """unlink_if_exists returns False (no raise) when the path
     doesn't exist — used by the hard-delete path for retention
@@ -281,6 +354,55 @@ def test_every_profile_route_is_admin_gated():
         )
 
 
+def test_dob_validator_rejects_implausible_dates():
+    """F240(a) regression — DOB must be in [1900-01-01, today].
+
+    Pre-fix, Pydantic only validated ISO parse, so ``9999-12-31`` and
+    ``1850-01-01`` both sailed through as-is to the DB and into the
+    UI. For KYC data these are obvious data-entry errors — either a
+    form-filler script or a typo — and we'd rather 422 than persist.
+    """
+    from datetime import date, timedelta
+
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.profile import ProfileCreate, ProfileUpdate
+
+    today = date.today()
+    base = {"name": "Test", "email": "t@example.com"}
+
+    # Future — rejected.
+    with pytest.raises(ValidationError, match="future"):
+        ProfileCreate(**base, dob=today + timedelta(days=1))
+
+    # Far future (the tester's exact repro).
+    with pytest.raises(ValidationError, match="future"):
+        ProfileCreate(**base, dob=date(9999, 12, 31))
+
+    # Pre-1900 (the tester's other repro).
+    with pytest.raises(ValidationError, match="1900"):
+        ProfileCreate(**base, dob=date(1850, 1, 1))
+
+    # Edge: 1900-01-01 exactly — accepted (inclusive lower bound).
+    p = ProfileCreate(**base, dob=date(1900, 1, 1))
+    assert p.dob == date(1900, 1, 1)
+
+    # Edge: today exactly — accepted.
+    p = ProfileCreate(**base, dob=today)
+    assert p.dob == today
+
+    # None — still accepted (dob is optional, admin may fill later).
+    p = ProfileCreate(**base, dob=None)
+    assert p.dob is None
+
+    # PATCH path gets the same guard.
+    with pytest.raises(ValidationError, match="future"):
+        ProfileUpdate(dob=date(2999, 1, 1))
+    with pytest.raises(ValidationError, match="1900"):
+        ProfileUpdate(dob=date(1800, 1, 1))
+
+
 def test_doc_type_enum_matches_model_column_width():
     """The `DocType` Literal maps 1:1 with the canonical doc types;
     every value must fit in the `String(40)` column. Guards against
@@ -303,4 +425,71 @@ def test_doc_type_enum_matches_model_column_width():
     }
     assert set(doc_types) == expected, (
         f"DocType drift: expected {expected}, got {set(doc_types)}"
+    )
+
+
+def test_upload_doc_label_form_field_capped_to_column_width():
+    """F241(a) regression — ``doc_label`` Form field must declare
+    ``max_length=200`` so an overflow 422s at parse time instead of
+    propagating as a 500 from the ``String(200)`` DB column.
+
+    Pre-fix boundary (tester-verified, commit c97ff38):
+        doc_label × 100 → 201
+        doc_label × 200 → 201 (at the column cap)
+        doc_label × 201 → **500**  ← the bug: unhandled DB error
+        doc_label × 300/500        → 500
+
+    FastAPI wires ``Form(max_length=…)`` into the Pydantic validator
+    for the endpoint's request model, so this test asserts the
+    constraint is present at the signature level rather than relying
+    on a live HTTP round-trip (no DB fixture in the unit-test pass).
+
+    Independent markers:
+      (1) the default-value Form metadata carries a ``max_length``
+          attribute equal to 200,
+      (2) the declared value matches the ``String(200)`` DB column
+          width — drifts between the two would re-open the bug.
+    """
+    import inspect
+
+    from app.api.v1.profiles import upload_document
+    from app.models.profile import ProfileDocument
+
+    sig = inspect.signature(upload_document)
+    param = sig.parameters.get("doc_label")
+    assert param is not None, (
+        "upload_document() no longer declares a `doc_label` parameter — "
+        "if the field was renamed, update this test AND add the same "
+        "max_length guard to the replacement."
+    )
+
+    # FastAPI's ``Form(...)`` returns a ``fastapi.params.Form`` FieldInfo
+    # subclass. ``max_length`` is stored on the instance in Pydantic V2,
+    # either as the attribute directly or on the ``metadata`` list.
+    field_info = param.default
+    declared = getattr(field_info, "max_length", None)
+    if declared is None:
+        # Pydantic V2 sometimes tucks it into the metadata list as a
+        # ``MaxLen(200)`` constraint. Walk the metadata for a match.
+        for item in getattr(field_info, "metadata", []) or []:
+            if getattr(item, "max_length", None) is not None:
+                declared = item.max_length
+                break
+
+    assert declared == 200, (
+        f"doc_label Form field must declare max_length=200 to match the "
+        f"ProfileDocument.doc_label String(200) column — got {declared!r}. "
+        "Without this cap, a 201+ char label crashes the SQLAlchemy "
+        "assignment and escapes as HTTP 500 (F241(a))."
+    )
+
+    # Cross-check against the ORM column width so a future DB migration
+    # that widens the column also flags here — either move the cap up
+    # in the same commit, or consciously leave the stricter API limit.
+    col = ProfileDocument.__table__.c.doc_label
+    col_width = getattr(col.type, "length", None)
+    assert col_width == declared, (
+        f"doc_label column width ({col_width}) drifted from the Form "
+        f"max_length ({declared}). Keep them in sync or the bug pattern "
+        "re-opens on the wider side."
     )

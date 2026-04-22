@@ -113,8 +113,22 @@ async def get_system_health(
     # to a warning badge. Also returns `runs_24h` alongside the
     # existing `scans_run` so the two cadences are legible side-by-
     # side.
+    #
+    # F237(c) regression fix: filter the freshness check on
+    # ``status='completed'``. Previously any fresh ``pending`` row —
+    # including the orphan rows that `fix_stuck_discovery_runs` hasn't
+    # swept yet — would make freshness look "ok" even when the actual
+    # last *completed* discovery was days stale. Filtering on completed
+    # status turns this into an honest signal. ``last_discovery_at``
+    # surfaced to the UI also uses the completed row so admins don't
+    # see a timestamp that has no scan payload behind it. The separate
+    # ``discovery_runs_24h`` counter still counts all rows (including
+    # pending/failed) — it's a throughput signal, not a success signal.
     last_discovery = (await db.execute(
-        select(DiscoveryRun).order_by(DiscoveryRun.started_at.desc()).limit(1)
+        select(DiscoveryRun)
+        .where(DiscoveryRun.status == "completed")
+        .order_by(DiscoveryRun.started_at.desc())
+        .limit(1)
     )).scalar_one_or_none()
     discovery_runs_24h = (await db.execute(
         select(func.count()).select_from(DiscoveryRun).where(
