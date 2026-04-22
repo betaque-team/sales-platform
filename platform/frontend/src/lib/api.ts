@@ -56,6 +56,13 @@ import type {
   TrainingTaskType,
   SavedFilter,
   SavedFiltersResponse,
+  Profile,
+  ProfileDetail,
+  ProfileListResponse,
+  ProfileCreatePayload,
+  ProfileUpdatePayload,
+  ProfileDocument,
+  ProfileDocType,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -1100,4 +1107,103 @@ export async function getTimingIntelligence(): Promise<TimingIntelligence> {
 export async function getNetworkingSuggestions(jobId?: string): Promise<{ suggestions: NetworkingSuggestion[] }> {
   const q = jobId ? `?job_id=${jobId}` : "";
   return request<{ suggestions: NetworkingSuggestion[] }>(`/intelligence/networking${q}`);
+}
+
+// ── Profile Docs Vault (admin-only) ─────────────────────────────────────────
+// Every endpoint is gated by `require_role("admin")` on the backend,
+// so `reviewer` / `viewer` calls return 403. The ProfilesPage treats
+// 403 as a permission-denied state rather than a generic error.
+export async function listProfiles(params: {
+  search?: string;
+  page?: number;
+  page_size?: number;
+  include_archived?: boolean;
+} = {}): Promise<ProfileListResponse> {
+  const query = buildQuery({
+    search: params.search,
+    page: params.page,
+    page_size: params.page_size,
+    include_archived: params.include_archived,
+  });
+  return request<ProfileListResponse>(`/profiles${query}`);
+}
+
+export async function getProfile(
+  profileId: string,
+  opts: { include_archived?: boolean } = {}
+): Promise<ProfileDetail> {
+  const query = buildQuery({ include_archived: opts.include_archived });
+  return request<ProfileDetail>(`/profiles/${profileId}${query}`);
+}
+
+export async function createProfile(
+  payload: ProfileCreatePayload
+): Promise<Profile> {
+  return request<Profile>("/profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateProfile(
+  profileId: string,
+  payload: ProfileUpdatePayload
+): Promise<Profile> {
+  return request<Profile>(`/profiles/${profileId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function archiveProfile(profileId: string): Promise<void> {
+  return request<void>(`/profiles/${profileId}`, { method: "DELETE" });
+}
+
+// Upload a document — mirrors the `uploadResume` pattern: hand-rolled
+// fetch so the browser sets the multipart boundary automatically.
+// Backend validates MIME + magic bytes + 20 MB cap; failures surface
+// as ApiError with a human-readable `detail`.
+export async function uploadProfileDocument(
+  profileId: string,
+  file: File,
+  docType: ProfileDocType,
+  docLabel?: string
+): Promise<{ document: ProfileDocument; profile_id: string }> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("doc_type", docType);
+  if (docLabel) formData.append("doc_label", docLabel);
+  const response = await fetch(`${BASE_URL}/profiles/${profileId}/documents`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, body.detail || "Upload failed");
+  }
+  return response.json();
+}
+
+// Download URL — consumed as an <a href> so the browser handles the
+// file save. The `Content-Disposition: attachment` header from the
+// backend forces download rather than inline preview. `no-store` on
+// the backend prevents intermediate caching of KYC bytes.
+export function profileDocumentDownloadUrl(
+  profileId: string,
+  docId: string
+): string {
+  return `${BASE_URL}/profiles/${profileId}/documents/${docId}/download`;
+}
+
+export async function archiveProfileDocument(
+  profileId: string,
+  docId: string,
+  opts: { hard?: boolean } = {}
+): Promise<void> {
+  const query = buildQuery({ hard: opts.hard });
+  return request<void>(
+    `/profiles/${profileId}/documents/${docId}${query}`,
+    { method: "DELETE" }
+  );
 }

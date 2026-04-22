@@ -24,6 +24,7 @@ import {
   HelpCircle,
   Brain,
   Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { logout } from "@/lib/api";
@@ -54,6 +55,10 @@ const navigation = [
 const adminNavigation = [
   { name: "Monitoring", to: "/monitoring", icon: Activity },
   { name: "Role Clusters", to: "/role-clusters", icon: Tags },
+  // KYC profile docs vault — backend routes are gated on
+  // require_role("admin"), so the hierarchy admits both admin and
+  // super_admin. Shield icon distinguishes from generic "Docs" help.
+  { name: "Profile Vault", to: "/profiles", icon: ShieldCheck },
 ];
 
 const superAdminNavigation = [
