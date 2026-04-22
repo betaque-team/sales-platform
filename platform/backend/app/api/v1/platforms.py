@@ -414,7 +414,13 @@ async def trigger_discovery_scan(
             detail="A discovery scan is already running.",
         )
     try:
-        task = discover_and_add_boards.delay()
+        # F237(a): tag admin-initiated discovery runs with
+        # ``source="manual"`` so they're distinguishable from the
+        # beat-scheduled rows (which default to ``"scheduled"``).
+        # Without this, the admin UI and the scheduler run would
+        # both tag their rows the same way and the freshness /
+        # history monitoring can't tell them apart.
+        task = discover_and_add_boards.delay(source="manual")
     except Exception:
         release_scan_lock("discover")
         raise
