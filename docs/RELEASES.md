@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-22 · 85fd7a4 · sha-85fd7a4
+Merge feat/claude-routine-apply: Claude Routine Apply (v6)
+
+
 ## 2026-04-22 · 980ae9c · sha-980ae9c
 docs(regression-report): Round 5A test plan for Track B features
 
