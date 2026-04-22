@@ -791,3 +791,524 @@ async def withdraw_application(
     app.status = "withdrawn"
     await db.commit()
     return {"status": "withdrawn", "message": "Application withdrawn (data preserved)"}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Claude Routine Apply — submission confirmation + detail + promotion
+# ═══════════════════════════════════════════════════════════════════
+
+# Imports needed by the routine-apply endpoints below. Kept local to
+# this block so the additions are easy to audit in isolation and the
+# existing import section stays stable.
+from fastapi import Request  # noqa: E402
+from app.models.review import Review  # noqa: E402
+from app.models.pipeline import PotentialClient  # noqa: E402
+from app.models.application_submission import ApplicationSubmission  # noqa: E402
+from app.models.routine_run import RoutineRun  # noqa: E402
+from app.models.humanization_corpus import HumanizationCorpus  # noqa: E402
+from app.schemas.routine import (  # noqa: E402
+    ConfirmSubmittedRequest,
+    ConfirmSubmittedResponse,
+    PromoteAnswerRequest,
+    PromoteAnswerResponse,
+    SubmissionDetail,
+)
+from app.utils.audit import log_action  # noqa: E402
+
+
+# Keys we refuse to store in payload_json under any circumstance. The
+# routine should reject these fields on the browser side (abort the
+# apply with status="pii_requested" before clicking Submit), but we
+# double-check server-side in case a custom flow slips through.
+# Case-insensitive substring match — "ssn_last_4", "applicant_dob",
+# "dateOfBirth" all get caught.
+_PII_BLOCKED_KEY_SUBSTRINGS: tuple[str, ...] = (
+    "ssn", "social_security", "socialsecurity",
+    "date_of_birth", "dateofbirth", "dob",
+    "passport_number", "passportnumber",
+)
+
+
+def _payload_contains_pii(payload: dict) -> str | None:
+    """Return the offending key name, or None. Case-insensitive."""
+    for key in payload.keys():
+        lower = key.lower()
+        for banned in _PII_BLOCKED_KEY_SUBSTRINGS:
+            if banned in lower:
+                return key
+    return None
+
+
+def _levenshtein_crude(a: str, b: str) -> int:
+    """Cheap edit-distance estimate for humanization_corpus capture.
+
+    We avoid the full O(mn) DP here — humanization_corpus is opt-in
+    analytics, not a correctness-critical computation, and the routine
+    already computed the real distance on the routine side. When the
+    routine sends an explicit `edit_distance`, we trust it. This
+    helper is only a fallback when a caller forgets to compute.
+    """
+    if not a:
+        return len(b or "")
+    if not b:
+        return len(a)
+    # Use character-diff as a proxy — good enough for "is it a small
+    # edit or a big rewrite" bucketing.
+    return abs(len(a) - len(b)) + sum(1 for x, y in zip(a, b) if x != y)
+
+
+@router.post("/{app_id}/confirm-submitted", response_model=ConfirmSubmittedResponse)
+async def confirm_submitted(
+    app_id: UUID,
+    body: ConfirmSubmittedRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Record a successful application submission from the Claude routine.
+
+    Called by the routine after the browser-side submit confirms. The
+    handler performs a platform-consistent update spanning:
+
+    1. Write the ``application_submissions`` row (1:1 with the app).
+    2. Flip ``Application.status`` to ``"applied"``, stamp
+       ``applied_at``, set ``apply_method="claude_routine"`` and
+       ``submission_source="routine"``. (Dry-run path skips this —
+       see ``body.dry_run``.)
+    3. Create an accepted ``Review`` row — matches the existing
+       /reviews/apply pattern so the review event log is a single
+       source of truth for "this job was applied to by this user."
+    4. Create/advance the ``PotentialClient`` pipeline entry for the
+       job's company so the pipeline card shows "1 application."
+    5. Dispatch the same Celery feedback task that /reviews submit
+       uses, writing company_boost / cluster_boost / geography_boost
+       ScoringSignal rows that feed back into relevance scoring.
+    6. Increment ``usage_count`` on every answer-book entry the
+       routine referenced.
+    7. Capture generated answers into ``humanization_corpus`` so the
+       style-match pipeline has training data.
+    8. Write an audit log row (``routine.application_submitted`` or
+       ``routine.application_dry_run``).
+    9. Increment the owning ``routine_runs.applications_submitted``
+       counter (only on non-dry-run).
+
+    Dry-run mode writes the submission row and the audit log only;
+    everything else is skipped so the rest of the platform isn't
+    told a live apply happened when it didn't.
+    """
+    # ── 1. Ownership + state checks ──────────────────────────────────
+    app = (await db.execute(
+        select(Application).where(
+            Application.id == app_id,
+            Application.user_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Idempotency — if a submission row already exists, 409 rather than
+    # double-writing. The routine shouldn't retry confirm-submitted;
+    # if it does (network blip, worker restart) we want the first
+    # write to win and the second to be a visible error.
+    existing = (await db.execute(
+        select(ApplicationSubmission).where(
+            ApplicationSubmission.application_id == app_id
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="A submission already exists for this application.",
+        )
+
+    # ── 2. PII firewall ──────────────────────────────────────────────
+    pii_key = _payload_contains_pii(body.payload_json)
+    if pii_key is not None:
+        # 400 + explicit message so the routine can log it and abort.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"payload_json contains a PII-restricted field: {pii_key!r}. "
+                "SSN, DOB, and passport numbers are never stored. "
+                "Abort the apply and surface the field to the user."
+            ),
+        )
+
+    # ── 3. Cross-reference answer-book IDs ───────────────────────────
+    # For every answer with source in {manual_required, learned}, the
+    # source_ref_id must be one of this user's answer-book entries.
+    # This prevents a malicious client from linking a submission row
+    # to another user's answers.
+    referenced_ids = [
+        a.source_ref_id for a in body.answers
+        if a.source_ref_id is not None
+    ]
+    if referenced_ids:
+        found = (await db.execute(
+            select(AnswerBookEntry.id).where(
+                AnswerBookEntry.id.in_(referenced_ids),
+                AnswerBookEntry.user_id == user.id,
+            )
+        )).scalars().all()
+        if set(found) != set(referenced_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="One or more answer source_ref_id values don't belong to this user.",
+            )
+
+    # ── 4. Routine-run ownership check ───────────────────────────────
+    run: RoutineRun | None = None
+    if body.routine_run_id is not None:
+        run = (await db.execute(
+            select(RoutineRun).where(
+                RoutineRun.id == body.routine_run_id,
+                RoutineRun.user_id == user.id,
+            )
+        )).scalar_one_or_none()
+        if not run:
+            raise HTTPException(
+                status_code=400,
+                detail="routine_run_id not found for this user.",
+            )
+
+    now = datetime.now(timezone.utc)
+
+    # ── 5. Platform-sync (skipped when dry_run) ──────────────────────
+    # Detected-issues aggregator. Core writes raise through; platform-
+    # sync failures are logged to this list and returned to the caller
+    # (the UI surfaces them in the submission detail tab).
+    detected = list(body.detected_issues or [])
+    pipeline_entry_id: UUID | None = None
+
+    if not body.dry_run:
+        # 5a. Status + metadata
+        app.status = "applied"
+        app.applied_at = now
+        app.submitted_at = body.submitted_at
+        app.apply_method = "claude_routine"
+        app.submission_source = "routine"
+        if body.routine_run_id:
+            app.routine_run_id = body.routine_run_id
+
+        # 5b. Accepted Review (matches /reviews/apply pattern). Fresh
+        # row — reviews table is an event log, not per-(job,user) state.
+        review = Review(
+            id=uuid.uuid4(),
+            job_id=app.job_id,
+            reviewer_id=user.id,
+            decision="accepted",
+            comment="Applied via Claude routine",
+            tags=[],
+        )
+        db.add(review)
+
+        # 5c. Flip Job.status (same side-effect as /reviews/apply).
+        # Guarded: may be None in unusual test scenarios.
+        job = (await db.execute(
+            select(Job).where(Job.id == app.job_id)
+        )).scalar_one_or_none()
+        if job:
+            job.status = "accepted"
+            # 5d. Pipeline — create or advance.
+            if job.company_id:
+                client = (await db.execute(
+                    select(PotentialClient).where(PotentialClient.company_id == job.company_id)
+                )).scalar_one_or_none()
+                if not client:
+                    company = (await db.execute(
+                        select(Company).where(Company.id == job.company_id)
+                    )).scalar_one_or_none()
+                    if company:
+                        company.is_target = True
+                        client = PotentialClient(
+                            company_id=job.company_id,
+                            stage="new_lead",
+                            resume_id=app.resume_id,
+                            applied_by=user.id,
+                        )
+                        db.add(client)
+                        await db.flush()
+                else:
+                    client.resume_id = app.resume_id
+                    client.applied_by = user.id
+                if client:
+                    pipeline_entry_id = client.id
+
+        # 5e. Answer-book usage tracking.
+        for a in body.answers:
+            if a.source_ref_id is not None:
+                entry = (await db.execute(
+                    select(AnswerBookEntry).where(AnswerBookEntry.id == a.source_ref_id)
+                )).scalar_one_or_none()
+                if entry:
+                    entry.usage_count = (entry.usage_count or 0) + 1
+
+        # 5f. Run counter bump.
+        if run is not None:
+            run.applications_submitted = (run.applications_submitted or 0) + 1
+
+    # ── 6. Persist the submission row (always; dry-run included) ─────
+    # We redact payload values for PII-shaped fields even after the
+    # firewall pass — identity fields that are safe to fill (email,
+    # phone) get their values replaced with {type, len} metadata. The
+    # firewall already rejected the hard-banned ones; this is a
+    # belt-and-suspenders sanitization for log-friendly storage.
+    sanitized_payload = _sanitize_payload_for_storage(body.payload_json)
+
+    submission = ApplicationSubmission(
+        id=uuid.uuid4(),
+        application_id=app.id,
+        routine_run_id=body.routine_run_id,
+        submitted_at=body.submitted_at,
+        job_url=body.job_url,
+        ats_platform=body.ats_platform,
+        form_fingerprint_hash=body.form_fingerprint_hash,
+        payload_json=sanitized_payload,
+        answers_json=[a.model_dump(mode="json") for a in body.answers],
+        resume_version_hash=body.resume_version_hash,
+        cover_letter_text=body.cover_letter_text,
+        screenshot_keys=list(body.screenshot_keys),
+        confirmation_text=body.confirmation_text,
+        detected_issues=detected + (["dry_run"] if body.dry_run else []),
+        profile_snapshot=dict(body.profile_snapshot),
+    )
+    db.add(submission)
+
+    # ── 7. Humanization corpus capture for generated answers ─────────
+    # Only when `draft_text` is supplied (routine opts in per-answer).
+    if not body.dry_run:
+        for a in body.answers:
+            if a.source == "generated" and a.draft_text is not None:
+                db.add(HumanizationCorpus(
+                    id=uuid.uuid4(),
+                    user_id=user.id,
+                    application_id=app.id,
+                    question=a.question,
+                    draft_text=a.draft_text,
+                    final_text=a.answer,
+                    edit_distance=(
+                        a.edit_distance
+                        if a.edit_distance > 0
+                        else _levenshtein_crude(a.draft_text, a.answer)
+                    ),
+                ))
+
+    await db.commit()
+    await db.refresh(submission)
+
+    # ── 8. Post-commit hooks (feedback task + audit) ─────────────────
+    # Dispatched AFTER commit so a failing Celery broker doesn't roll
+    # back the submission. Mirrors the pattern in reviews.submit_review.
+    if not body.dry_run:
+        try:
+            # Find the review we just created so the feedback task can
+            # read it. Look up by (job_id, reviewer_id, created_at desc).
+            fresh_review = (await db.execute(
+                select(Review).where(
+                    Review.job_id == app.job_id,
+                    Review.reviewer_id == user.id,
+                ).order_by(Review.created_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            if fresh_review:
+                from app.workers.tasks.feedback_task import process_review_feedback_task
+                process_review_feedback_task.delay(str(fresh_review.id))
+        except Exception as e:
+            # Feedback-dispatch failure is non-fatal — submission is
+            # already written. Surface in detected_issues for the UI.
+            detected.append(f"feedback_dispatch_failed: {type(e).__name__}")
+
+    # Audit log — fail-open (the helper swallows its own exceptions).
+    await log_action(
+        db, user,
+        action=("routine.application_dry_run" if body.dry_run else "routine.application_submitted"),
+        resource="application",
+        request=request,
+        metadata={
+            "application_id": str(app.id),
+            "submission_id": str(submission.id),
+            "job_id": str(app.job_id),
+            "platform": body.ats_platform,
+            "routine_run_id": str(body.routine_run_id) if body.routine_run_id else None,
+            "answer_count": len(body.answers),
+            "dry_run": body.dry_run,
+        },
+    )
+
+    return ConfirmSubmittedResponse(
+        application_id=app.id,
+        submission_id=submission.id,
+        pipeline_entry_id=pipeline_entry_id,
+        dry_run=body.dry_run,
+        detected_issues=submission.detected_issues,
+    )
+
+
+# Payload sanitization — runs on every submission write. PII-shaped
+# fields get their values replaced with a type+length stub so a later
+# audit or UI view can tell "a phone was entered, length 12" without
+# storing the actual number. Identity-class fields that are safe to
+# store (salary, notice period, cover letter) pass through untouched.
+_SANITIZE_KEY_SUBSTRINGS: tuple[tuple[str, str], ...] = (
+    ("email", "email"),
+    ("phone", "phone"),
+    ("mobile", "phone"),
+    ("zip", "postal"),
+    ("postal", "postal"),
+)
+
+
+def _sanitize_payload_for_storage(payload: dict) -> dict:
+    out: dict = {}
+    for k, v in payload.items():
+        lower = k.lower()
+        matched_type: str | None = None
+        for substr, field_type in _SANITIZE_KEY_SUBSTRINGS:
+            if substr in lower:
+                matched_type = field_type
+                break
+        if matched_type is not None and isinstance(v, str):
+            out[k] = {"type": matched_type, "len": len(v)}
+        else:
+            out[k] = v
+    return out
+
+
+@router.get("/{app_id}/submission", response_model=SubmissionDetail)
+async def get_application_submission(
+    app_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the stored submission detail for an application.
+
+    Renders the "Submission Detail" tab on the Application detail
+    page. 404 when the application has no submission (manual apps
+    filed pre-routine, review-queue apps).
+    """
+    # Join via application ownership so we enforce user scoping in
+    # one query instead of two round-trips.
+    row = (await db.execute(
+        select(ApplicationSubmission).join(
+            Application, Application.id == ApplicationSubmission.application_id
+        ).where(
+            ApplicationSubmission.application_id == app_id,
+            Application.user_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="No submission recorded for this application.")
+
+    return SubmissionDetail(
+        id=row.id,
+        application_id=row.application_id,
+        routine_run_id=row.routine_run_id,
+        submitted_at=row.submitted_at,
+        job_url=row.job_url,
+        ats_platform=row.ats_platform,
+        form_fingerprint_hash=row.form_fingerprint_hash,
+        payload_json=row.payload_json or {},
+        answers_json=row.answers_json or [],
+        resume_version_hash=row.resume_version_hash,
+        cover_letter_text=row.cover_letter_text,
+        screenshot_keys=row.screenshot_keys or [],
+        confirmation_text=row.confirmation_text,
+        detected_issues=row.detected_issues or [],
+        profile_snapshot=row.profile_snapshot or {},
+        created_at=row.created_at,
+    )
+
+
+@router.post("/{app_id}/promote-answer", response_model=PromoteAnswerResponse)
+async def promote_answer(
+    app_id: UUID,
+    body: PromoteAnswerRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Promote a generated answer from a submission into the answer book.
+
+    User clicks "Save to Answer Book" next to a `generated` answer
+    in the submission detail tab. We create (or find) an answer-book
+    entry with ``source="learned"``, ``is_locked=False`` — so future
+    routine runs prefer it over LLM generation, and the user can still
+    edit the question text if they want to canonicalize the phrasing.
+
+    Idempotent: if the exact ``question_key`` already exists for this
+    user as a base entry, we update the answer and return
+    ``already_existed=True``. Useful when the user clicks promote on
+    two similar-but-different questions that normalize to the same key.
+    """
+    # Ownership check (fail early with a clean 404).
+    app = (await db.execute(
+        select(Application).where(
+            Application.id == app_id,
+            Application.user_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Inline the normalizer to avoid a cross-router import.
+    from app.api.v1.answer_book import normalize_question_key
+    question_key = normalize_question_key(body.question)
+
+    # Don't let promote walk around the lock — if the key collides
+    # with a routine-required one, reject.
+    from app.services.answer_book_seed import REQUIRED_QUESTION_KEYS
+    if question_key in REQUIRED_QUESTION_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail="This question overlaps a routine-required entry and cannot be promoted.",
+        )
+
+    existing = (await db.execute(
+        select(AnswerBookEntry).where(
+            AnswerBookEntry.user_id == user.id,
+            AnswerBookEntry.resume_id.is_(None),
+            AnswerBookEntry.question_key == question_key,
+        )
+    )).scalar_one_or_none()
+
+    if existing:
+        # Don't overwrite if the existing answer is manual (user-typed)
+        # — they may have carefully phrased it. Only update when the
+        # source is already `learned` or equivalent.
+        already = True
+        if existing.source in ("learned", "generated"):
+            existing.answer = body.answer
+        entry_id = existing.id
+    else:
+        already = False
+        new_entry = AnswerBookEntry(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            resume_id=None,
+            category="custom",
+            question=body.question,
+            question_key=question_key,
+            answer=body.answer,
+            source="learned",
+            is_locked=False,
+        )
+        db.add(new_entry)
+        await db.flush()
+        entry_id = new_entry.id
+
+    # Flip promoted flag on any matching humanization_corpus row so
+    # the style-match loader can deprioritize it.
+    corpus_rows = (await db.execute(
+        select(HumanizationCorpus).where(
+            HumanizationCorpus.user_id == user.id,
+            HumanizationCorpus.application_id == app_id,
+            HumanizationCorpus.question == body.question,
+        )
+    )).scalars().all()
+    for row in corpus_rows:
+        row.promoted_to_answer_book = True
+
+    await db.commit()
+
+    return PromoteAnswerResponse(
+        answer_book_entry_id=entry_id,
+        already_existed=already,
+    )

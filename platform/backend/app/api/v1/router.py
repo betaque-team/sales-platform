@@ -6,7 +6,7 @@ from app.api.v1 import (
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
     alerts, cover_letter, interview_prep, intelligence, audit, ai, insights,
-    training_data, saved_filters, profiles,
+    training_data, saved_filters, profiles, routine,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -47,3 +47,7 @@ api_router.include_router(saved_filters.router)
 # documents (Aadhaar, PAN, marksheets, bank/PF) with role-gated
 # access + audit trail.
 api_router.include_router(profiles.router)
+# v6 Claude Routine Apply — browser-automation orchestration endpoints
+# (top-to-apply, runs CRUD, kill-switch, humanize helper). The routine
+# runs as the caller; no admin-gated routes here.
+api_router.include_router(routine.router)
