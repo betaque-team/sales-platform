@@ -63,6 +63,10 @@ PlatformFilter = Literal[
     "greenhouse", "lever", "ashby", "workable", "bamboohr",
     "smartrecruiters", "jobvite", "recruitee", "wellfound", "himalayas",
     "linkedin", "remoteok", "remotive", "weworkremotely",
+    # HN monthly "Who is hiring?" thread — aggregator (see
+    # app/fetchers/hackernews.py). Filterable from the UI dropdown
+    # so admins can segment "came from HN" vs "came from Greenhouse".
+    "hackernews",
 ]
 
 
