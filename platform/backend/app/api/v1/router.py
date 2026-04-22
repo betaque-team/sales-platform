@@ -6,7 +6,7 @@ from app.api.v1 import (
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
     alerts, cover_letter, interview_prep, intelligence, audit, ai, insights,
-    training_data, saved_filters,
+    training_data, saved_filters, profiles,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -43,3 +43,7 @@ api_router.include_router(insights.router)
 api_router.include_router(training_data.router)
 # F241: per-user saved filter presets.
 api_router.include_router(saved_filters.router)
+# KYC profile vault — admin/superadmin only. Stores personal HR
+# documents (Aadhaar, PAN, marksheets, bank/PF) with role-gated
+# access + audit trail.
+api_router.include_router(profiles.router)

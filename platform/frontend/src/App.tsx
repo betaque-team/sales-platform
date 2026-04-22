@@ -23,6 +23,8 @@ import { FeedbackPage } from "./pages/FeedbackPage";
 import { DocsPage } from "./pages/DocsPage";
 import { IntelligencePage } from "./pages/IntelligencePage";
 import { InsightsPage } from "./pages/InsightsPage";
+import { ProfilesPage } from "./pages/ProfilesPage";
+import { ProfileDetailPage } from "./pages/ProfileDetailPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -201,6 +203,27 @@ export default function App() {
         element={
           <ProtectedLayout>
             <DocsPage />
+          </ProtectedLayout>
+        }
+      />
+      {/* KYC profile docs vault — admin / super_admin only. The
+          backend enforces the role gate (403 from the API); we still
+          show these routes to every authenticated user so an admin
+          following a deep-link doesn't hit a 404 loop — the page
+          itself renders a permission-denied state on 403. */}
+      <Route
+        path="/profiles"
+        element={
+          <ProtectedLayout>
+            <ProfilesPage />
+          </ProtectedLayout>
+        }
+      />
+      <Route
+        path="/profiles/:id"
+        element={
+          <ProtectedLayout>
+            <ProfileDetailPage />
           </ProtectedLayout>
         }
       />

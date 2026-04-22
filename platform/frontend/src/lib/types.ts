@@ -1177,3 +1177,74 @@ export interface VmMetricsAvailable {
 }
 
 export type VmMetrics = VmMetricsAvailable | VmMetricsUnavailable;
+
+// ── Profile Docs Vault (admin / super_admin only) ────────────────────────────
+// Backend canonical DocType — keep in sync with
+// backend/app/schemas/profile.py::DocType. The `"other"` branch is
+// the escape hatch; the UI treats it specially (shows the free-text
+// doc_label instead of the PROFILE_DOC_TYPE_LABELS entry).
+export type ProfileDocType =
+  | "aadhaar"
+  | "pan"
+  | "12th_marksheet"
+  | "college_marksheet"
+  | "cancelled_cheque"
+  | "bank_statement"
+  | "passbook"
+  | "epfo_nominee_proof"
+  | "father_aadhaar"
+  | "father_pan"
+  | "address_proof"
+  | "other";
+
+export interface ProfileDocument {
+  id: string;
+  doc_type: ProfileDocType;
+  doc_label: string;
+  filename: string;
+  file_type: string; // "pdf" | "jpg" | "png" | "heic" | "docx"
+  size_bytes: number;
+  uploaded_by_user_id: string;
+  uploaded_at: string;
+  archived_at: string | null;
+}
+
+export interface Profile {
+  id: string;
+  name: string;
+  dob: string | null;
+  email: string;
+  father_name: string | null;
+  uan_number: string | null;
+  pf_number: string | null;
+  notes: string;
+  created_by_user_id: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  document_count: number;
+}
+
+export interface ProfileDetail extends Profile {
+  documents: ProfileDocument[];
+}
+
+export interface ProfileListResponse {
+  items: Profile[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ProfileCreatePayload {
+  name: string;
+  dob?: string | null;
+  email: string;
+  father_name?: string | null;
+  uan_number?: string | null;
+  pf_number?: string | null;
+  notes?: string;
+}
+
+export type ProfileUpdatePayload = Partial<ProfileCreatePayload>;
