@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-22 · 2a10d9e · sha-2a10d9e
+Merge feat/admin-profile-docs-vault: admin-only KYC docs vault
+
+
 ## 2026-04-19 · 318fd4a · sha-318fd4a
 Merge fix/feedback-f242-f243-f244: resolve F242, F243, F244
 
