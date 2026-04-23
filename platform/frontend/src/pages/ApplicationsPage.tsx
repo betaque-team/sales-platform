@@ -167,7 +167,7 @@ export function ApplicationsPage() {
           <option value="">All sources</option>
           <option value="review_queue">Review queue</option>
           <option value="manual_prepare">Manual</option>
-          <option value="routine">Claude Routine</option>
+          <option value="routine">Apply Routine</option>
         </select>
         <input
           type="text"

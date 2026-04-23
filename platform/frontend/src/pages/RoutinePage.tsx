@@ -101,7 +101,7 @@ export function RoutinePage() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-neutral-900">
-            Claude Routine Apply
+            Apply Routine
           </h1>
           <p className="text-sm text-neutral-500">
             Operator panel for the MCP-Chrome routine.

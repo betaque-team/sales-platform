@@ -44,7 +44,7 @@ const navigation = [
   // v6 Claude Routine Apply — operator panel. Kept near Applications
   // since that's its closest sibling (both view-apply state); the
   // routine itself is a superset-feature on top.
-  { name: "Claude Routine", to: "/routine", icon: Bot },
+  { name: "Apply Routine", to: "/routine", icon: Bot },
   { name: "Pipeline", to: "/pipeline", icon: GitBranch },
   { name: "Analytics", to: "/analytics", icon: BarChart3 },
   { name: "Intelligence", to: "/intelligence", icon: Brain },
