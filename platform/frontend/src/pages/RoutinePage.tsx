@@ -37,23 +37,29 @@ export function RoutinePage() {
   const queryClient = useQueryClient();
   const [killReason, setKillReason] = useState("");
 
-  const coverageQ = useQuery({
+  // Operator panel poll cadence — all three queries refresh on the same
+  // 30s tick so the pre-flight card, top-to-apply list, and recent-runs
+  // counters stay in sync. Previously only top-to-apply polled, which
+  // left the runs list stale for minutes while a live run ticked its
+  // counters forward via PATCH /routine/runs/{id}.
+  const POLL_MS = 30_000;
+
+  const topToApplyQ = useQuery({
     queryKey: ["routine-top-to-apply"],
     queryFn: () => getRoutineTopToApply(10),
-    // Polling is cheap; refresh so the operator sees daily-cap + kill-
-    // switch state without a manual reload. 30s is the compromise
-    // between "feels live" and "not spamming the backend".
-    refetchInterval: 30_000,
+    refetchInterval: POLL_MS,
   });
 
   const killSwitchQ = useQuery({
     queryKey: ["routine-kill-switch"],
     queryFn: getKillSwitch,
+    refetchInterval: POLL_MS,
   });
 
   const runsQ = useQuery({
     queryKey: ["routine-runs"],
     queryFn: () => listRoutineRuns(10),
+    refetchInterval: POLL_MS,
   });
 
   const killSwitchMutation = useMutation({
@@ -66,14 +72,20 @@ export function RoutinePage() {
     },
   });
 
-  const topToApply = coverageQ.data;
+  const topToApply = topToApplyQ.data;
   const killSwitch = killSwitchQ.data;
   const runs = runsQ.data ?? [];
 
   const anyError =
-    coverageQ.isError || killSwitchQ.isError || runsQ.isError;
+    topToApplyQ.isError || killSwitchQ.isError || runsQ.isError;
 
-  if (coverageQ.isLoading || killSwitchQ.isLoading) {
+  // Daily-cap is amber at ≤2 remaining — "1 left" is effectively
+  // exhausted for operator planning. Green at 3+, amber 1-2, amber
+  // (with the "cap hit" copy) at 0.
+  const dailyRemaining = topToApply?.daily_cap_remaining ?? 0;
+  const dailyGood = dailyRemaining > 2;
+
+  if (topToApplyQ.isLoading || killSwitchQ.isLoading) {
     return (
       <div className="p-8 text-sm text-neutral-500">
         Loading routine state…
@@ -98,7 +110,7 @@ export function RoutinePage() {
       </div>
 
       {anyError && (
-        <BackendErrorBanner queries={[coverageQ, killSwitchQ, runsQ]} />
+        <BackendErrorBanner queries={[topToApplyQ, killSwitchQ, runsQ]} />
       )}
 
       {/* ── Pre-flight card ───────────────────────────────────────── */}
@@ -138,7 +150,7 @@ export function RoutinePage() {
             detail={
               !topToApply?.answer_book_ready
                 ? undefined
-                : "All 16 required entries filled"
+                : "All required entries filled"
             }
           >
             {!topToApply?.answer_book_ready && (
@@ -152,10 +164,16 @@ export function RoutinePage() {
           </PreflightCell>
           <PreflightCell
             label="Daily cap"
-            value={`${topToApply?.daily_cap_remaining ?? 0} / 10`}
-            good={(topToApply?.daily_cap_remaining ?? 0) > 0}
+            value={`${dailyRemaining} / 10`}
+            good={dailyGood}
             icon={Clock}
-            detail="Rolling 24-hour window"
+            detail={
+              dailyRemaining === 0
+                ? "Cap hit — live runs blocked until rollover"
+                : dailyRemaining <= 2
+                  ? "Almost exhausted (rolling 24h)"
+                  : "Rolling 24-hour window"
+            }
           />
         </div>
 
@@ -186,12 +204,16 @@ export function RoutinePage() {
               )}
               <button
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  // Re-enable flow sends reason=null; wipe local input
+                  // state too so a stale "deploying new version" string
+                  // doesn't sit in the textbox after the toggle flips.
+                  if (killSwitch?.disabled) setKillReason("");
                   killSwitchMutation.mutate({
                     disabled: !killSwitch?.disabled,
                     reason: killSwitch?.disabled ? null : killReason || null,
-                  })
-                }
+                  });
+                }}
                 disabled={killSwitchMutation.isPending}
                 className={`inline-flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 ${
                   killSwitch?.disabled
@@ -378,18 +400,13 @@ function RunListItem({ run }: { run: RoutineRun }) {
             )}
           </p>
         </div>
-        {/* Drill-down is future work — placeholder in this commit.
-            The detail endpoint exists; the detail page will land with
-            the submission-detail work. */}
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 text-xs font-medium text-neutral-400"
-          disabled
-          title="Run detail page — next commit"
+        <Link
+          to={`/routine/runs/${run.id}`}
+          className="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-700"
         >
           <ExternalLink className="h-3.5 w-3.5" />
           Detail
-        </button>
+        </Link>
       </div>
     </li>
   );

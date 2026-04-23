@@ -89,13 +89,13 @@ export function RequiredSetupPage() {
   const filled = coverage.total_filled;
   const progress = total === 0 ? 0 : (filled / total) * 100;
 
-  // A fresh account has 0 rows persisted — the backend returns the 16
-  // entries with placeholder UUIDs and filled=false. The `id` is the
-  // cheapest "is this row persisted yet?" signal: persisted rows come
-  // back with their real DB id, placeholders are generated per-request
-  // so they'd change on reload. We therefore lean on the simpler check
-  // "are any rows filled or is any entry present in the DB" — if every
-  // entry is unfilled AND every answer is empty, we prompt to seed.
+  // Seed endpoint is idempotent — it creates only the missing rows
+  // and reports how many were already present. Previously we only
+  // surfaced the button when *every* row was missing, which left the
+  // operator stuck if a partial seed created 15/16 (no button to
+  // re-seed the last one). Now: show the button whenever coverage is
+  // incomplete; the POST safely no-ops for already-present entries.
+  const hasMissing = coverage.missing.length > 0;
   const allMissing = coverage.missing.length === total;
 
   // Group all 16 entries by category for display. `missing` only has
@@ -156,7 +156,7 @@ export function RequiredSetupPage() {
           </div>
         )}
 
-        {allMissing && (
+        {hasMissing && (
           <button
             type="button"
             onClick={() => seedMutation.mutate()}
@@ -166,11 +166,13 @@ export function RequiredSetupPage() {
             <Sparkles className="h-4 w-4" />
             {seedMutation.isPending
               ? "Seeding…"
-              : "Seed required entries"}
+              : allMissing
+                ? "Seed required entries"
+                : "Seed missing entries"}
           </button>
         )}
 
-        {seedMutation.isSuccess && !allMissing && (
+        {seedMutation.isSuccess && (
           <div className="mt-3 text-xs text-neutral-500">
             Seeded {seedMutation.data?.created} new entries ·{" "}
             {seedMutation.data?.already_present} already present.
@@ -219,6 +221,25 @@ export function RequiredSetupPage() {
                         onChange={(e) =>
                           setEdits({ ...edits, [entry.id]: e.target.value })
                         }
+                        onKeyDown={(e) => {
+                          // Enter submits — 16 rows × "click the button"
+                          // was bad keyboard ergonomics. Shift+Enter is
+                          // left for anyone who wants the default form
+                          // behaviour (though this isn't in a <form>).
+                          if (
+                            e.key === "Enter" &&
+                            !e.shiftKey &&
+                            hasChanges &&
+                            !saveMutation.isPending
+                          ) {
+                            e.preventDefault();
+                            setSavingId(entry.id);
+                            saveMutation.mutate({
+                              id: entry.id,
+                              answer: editing,
+                            });
+                          }
+                        }}
                         placeholder="Your answer…"
                         className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
                       />

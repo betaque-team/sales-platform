@@ -26,6 +26,7 @@ import { InsightsPage } from "./pages/InsightsPage";
 import { ProfilesPage } from "./pages/ProfilesPage";
 import { ProfileDetailPage } from "./pages/ProfileDetailPage";
 import { RoutinePage } from "./pages/RoutinePage";
+import { RoutineRunDetailPage } from "./pages/RoutineRunDetailPage";
 import { RequiredSetupPage } from "./pages/RequiredSetupPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
@@ -237,6 +238,14 @@ export default function App() {
         element={
           <ProtectedLayout>
             <RoutinePage />
+          </ProtectedLayout>
+        }
+      />
+      <Route
+        path="/routine/runs/:id"
+        element={
+          <ProtectedLayout>
+            <RoutineRunDetailPage />
           </ProtectedLayout>
         }
       />
