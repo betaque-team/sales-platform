@@ -89,14 +89,23 @@ export function RequiredSetupPage() {
   const filled = coverage.total_filled;
   const progress = total === 0 ? 0 : (filled / total) * 100;
 
-  // A fresh account has 0 rows persisted — the backend returns the 16
-  // entries with placeholder UUIDs and filled=false. The `id` is the
-  // cheapest "is this row persisted yet?" signal: persisted rows come
-  // back with their real DB id, placeholders are generated per-request
-  // so they'd change on reload. We therefore lean on the simpler check
-  // "are any rows filled or is any entry present in the DB" — if every
-  // entry is unfilled AND every answer is empty, we prompt to seed.
+  // Seed endpoint is idempotent — it creates only the missing rows
+  // and reports how many were already present. Previously we only
+  // surfaced the button when *every* row was missing, which left the
+  // operator stuck if a partial seed created 15/16 (no button to
+  // re-seed the last one). Now: show the button whenever coverage is
+  // incomplete; the POST safely no-ops for already-present entries.
+  const hasMissing = coverage.missing.length > 0;
   const allMissing = coverage.missing.length === total;
+  // Phase-2: the backend now returns ALL required rows (filled +
+  // unfilled) in canonical seed order on ``entries``. Older backends
+  // may only return ``missing`` — fall back to that so the page still
+  // works during a rolling deploy where frontend has shipped but
+  // backend hasn't.
+  const allEntries: RequiredCoverageEntry[] =
+    coverage.entries && coverage.entries.length > 0
+      ? coverage.entries
+      : coverage.missing;
 
   // Group all 16 entries by category for display. `missing` only has
   // unfilled — for the grouped view we need everything, so we merge
@@ -108,8 +117,13 @@ export function RequiredSetupPage() {
   // if filled < total the missing array is what the user needs to act
   // on. Unfilled-first is the useful operator flow.
 
+  // Group ALL entries (not just missing) — operator needs to be able
+  // to update a filled answer later (salary bumped, notice period
+  // changed, visa status changed). Filled rows render with a green
+  // check and a read-only look until the user starts typing a new
+  // answer, at which point the Save button activates.
   const grouped: Record<string, RequiredCoverageEntry[]> = {};
-  for (const entry of coverage.missing) {
+  for (const entry of allEntries) {
     const cat = entry.category || "custom";
     if (!grouped[cat]) grouped[cat] = [];
     grouped[cat].push(entry);
@@ -156,7 +170,7 @@ export function RequiredSetupPage() {
           </div>
         )}
 
-        {allMissing && (
+        {hasMissing && (
           <button
             type="button"
             onClick={() => seedMutation.mutate()}
@@ -166,11 +180,13 @@ export function RequiredSetupPage() {
             <Sparkles className="h-4 w-4" />
             {seedMutation.isPending
               ? "Seeding…"
-              : "Seed required entries"}
+              : allMissing
+                ? "Seed required entries"
+                : "Seed missing entries"}
           </button>
         )}
 
-        {seedMutation.isSuccess && !allMissing && (
+        {seedMutation.isSuccess && (
           <div className="mt-3 text-xs text-neutral-500">
             Seeded {seedMutation.data?.created} new entries ·{" "}
             {seedMutation.data?.already_present} already present.
@@ -219,6 +235,25 @@ export function RequiredSetupPage() {
                         onChange={(e) =>
                           setEdits({ ...edits, [entry.id]: e.target.value })
                         }
+                        onKeyDown={(e) => {
+                          // Enter submits — 16 rows × "click the button"
+                          // was bad keyboard ergonomics. Shift+Enter is
+                          // left for anyone who wants the default form
+                          // behaviour (though this isn't in a <form>).
+                          if (
+                            e.key === "Enter" &&
+                            !e.shiftKey &&
+                            hasChanges &&
+                            !saveMutation.isPending
+                          ) {
+                            e.preventDefault();
+                            setSavingId(entry.id);
+                            saveMutation.mutate({
+                              id: entry.id,
+                              answer: editing,
+                            });
+                          }
+                        }}
                         placeholder="Your answer…"
                         className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
                       />

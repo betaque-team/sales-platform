@@ -673,4 +673,8 @@ async def required_coverage(
         total_required=len(REQUIRED_ENTRIES),
         total_filled=total_filled,
         missing=missing,
+        # Phase-2: expose the full list so the UI can render filled
+        # rows too (and let the operator edit them in-place). ``items``
+        # is already in canonical seed order from the loop above.
+        entries=items,
     )

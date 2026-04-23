@@ -1247,8 +1247,13 @@ export async function getRoutineTopToApply(limit = 10): Promise<TopToApplyRespon
 export async function createRoutineRun(payload: {
   mode: RoutineMode;
   target_job_ids?: string[];
-}): Promise<{ run_id: string }> {
-  return request<{ run_id: string }>("/routine/runs", {
+  // Optional client-generated UUID — if the routine retries a request
+  // whose response was lost (network blip, timeout), reuse the same
+  // key and the backend returns the original run_id instead of
+  // creating a duplicate. Required to be 8-64 chars server-side.
+  idempotency_key?: string;
+}): Promise<{ run_id: string; replayed: boolean }> {
+  return request<{ run_id: string; replayed: boolean }>("/routine/runs", {
     method: "POST",
     body: JSON.stringify(payload),
   });

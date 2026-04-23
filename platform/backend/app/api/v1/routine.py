@@ -36,6 +36,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func, and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -126,20 +127,50 @@ async def _get_relevant_clusters(db: AsyncSession) -> list[str]:
 async def _count_recent_submissions(db: AsyncSession, user_id: UUID, hours: int = 24) -> int:
     """Count applications the user submitted in the last ``hours`` window.
 
-    Source of truth is ``Application.applied_at`` because that's when
-    the submit actually happened — ``created_at`` can be days older
-    for rows that sat in the "prepared" state. Dry-run submissions
-    don't flip ``status="applied"`` so they're naturally excluded.
+    Daily-cap gating is defined on *live submissions* — a submission is
+    "live" when the routine's confirm-submitted handler actually sent
+    it to the ATS (vs. dry_run / single_trial). There are two places
+    this signal can live:
+
+      1. ``Application.status == "applied"`` with ``applied_at >= cutoff``
+         — the nominal, post-commit state. Always counted.
+
+      2. ``ApplicationSubmission`` rows from a live ``RoutineRun`` with
+         ``submitted_at >= cutoff`` — catches the race window where the
+         submission row was written but the Application status flip is
+         still in-flight (network blip between handler steps, or a
+         partial rollback that left the submission but not the status).
+
+    We UNION both via a Python set on application_id so an application
+    counted in both buckets isn't double-counted. Dry-run and single-
+    trial submissions are excluded via the ``routine_runs.mode == 'live'``
+    filter — those runs' submissions carry ``detected_issues=["dry_run"]``
+    and shouldn't consume the cap.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    result = await db.execute(
-        select(func.count(Application.id)).where(
+
+    # Bucket 1: committed applies.
+    committed_ids = (await db.execute(
+        select(Application.id).where(
             Application.user_id == user_id,
             Application.status == "applied",
             Application.applied_at >= cutoff,
         )
-    )
-    return int(result.scalar() or 0)
+    )).scalars().all()
+
+    # Bucket 2: in-flight live-run submissions (may overlap bucket 1).
+    in_flight_ids = (await db.execute(
+        select(ApplicationSubmission.application_id)
+        .join(Application, Application.id == ApplicationSubmission.application_id)
+        .join(RoutineRun, RoutineRun.id == ApplicationSubmission.routine_run_id)
+        .where(
+            Application.user_id == user_id,
+            RoutineRun.mode == "live",
+            ApplicationSubmission.submitted_at >= cutoff,
+        )
+    )).scalars().all()
+
+    return len(set(committed_ids) | set(in_flight_ids))
 
 
 async def _required_coverage_complete(db: AsyncSession, user_id: UUID) -> bool:
@@ -386,7 +417,35 @@ async def create_run(
     flip the kill-switch off, wait out the daily cap) and retry —
     it should NOT create a partial run row just to record that the
     attempt was blocked (the audit log carries that).
+
+    Idempotency (A5)
+    ----------------
+    If ``body.idempotency_key`` is set AND a run already exists for
+    ``(user_id, key)``, we return that existing run's id with
+    ``replayed=True`` — NO pre-flight gate check, NO audit entry,
+    NO new row. This matches the idempotency contract most APIs use
+    (Stripe, etc.): a retry sees the same response as the original.
+
+    The pre-flight gates only run when we're *actually* creating a
+    new row. Running them on a replay would produce a confusing UX:
+    the operator would get a 400 "cap hit" response for an idempotent
+    retry of a request that originally succeeded.
     """
+    # ── Idempotency replay path ────────────────────────────────────
+    # Check this FIRST — before any gate — so a retry after a transient
+    # network error returns the original run_id instead of spuriously
+    # failing on "daily cap hit" from the row the original request
+    # already created.
+    if body.idempotency_key:
+        existing = (await db.execute(
+            select(RoutineRun).where(
+                RoutineRun.user_id == user.id,
+                RoutineRun.idempotency_key == body.idempotency_key,
+            )
+        )).scalar_one_or_none()
+        if existing:
+            return CreateRoutineRunResponse(run_id=existing.id, replayed=True)
+
     if await _kill_switch_disabled(db, user.id):
         raise HTTPException(
             status_code=400,
@@ -418,9 +477,31 @@ async def create_run(
         user_id=user.id,
         mode=body.mode,
         status="running",
+        idempotency_key=body.idempotency_key,
     )
     db.add(run)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Race: two concurrent requests with the same idempotency_key
+        # both passed the replay check, one committed first. Roll back,
+        # re-query, and return the winner's id. This is the only way
+        # to honor the idempotency contract under true concurrency.
+        await db.rollback()
+        if body.idempotency_key:
+            winner = (await db.execute(
+                select(RoutineRun).where(
+                    RoutineRun.user_id == user.id,
+                    RoutineRun.idempotency_key == body.idempotency_key,
+                )
+            )).scalar_one_or_none()
+            if winner:
+                return CreateRoutineRunResponse(run_id=winner.id, replayed=True)
+        # Not an idempotency collision — re-raise as a generic 500.
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create routine run (integrity error).",
+        )
     await db.refresh(run)
 
     await log_action(
@@ -432,16 +513,18 @@ async def create_run(
             "run_id": str(run.id),
             "mode": body.mode,
             "target_job_count": len(body.target_job_ids) if body.target_job_ids else 0,
+            "idempotency_key": body.idempotency_key,
         },
     )
 
-    return CreateRoutineRunResponse(run_id=run.id)
+    return CreateRoutineRunResponse(run_id=run.id, replayed=False)
 
 
 @router.patch("/runs/{run_id}", response_model=RoutineRunOut)
 async def update_run(
     run_id: UUID,
     body: UpdateRoutineRunRequest,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -453,6 +536,15 @@ async def update_run(
 
     Non-terminal → terminal status transitions auto-stamp ``ended_at``
     if the caller forgets to send it.
+
+    Audit (B4): two kinds of transitions leave an audit row so the
+    operator can reconstruct "why did this run stop" from the audit
+    log alone:
+      * ``kill_switch_triggered`` flipping False→True (mid-run kill)
+      * ``status`` transitioning to a terminal value (complete / aborted)
+
+    Counter bumps (applications_attempted etc.) are NOT audited — they
+    tick every few seconds during a live run and would drown the log.
     """
     run = (await db.execute(
         select(RoutineRun).where(
@@ -472,6 +564,11 @@ async def update_run(
         )
 
     patch = body.model_dump(exclude_unset=True)
+
+    # Capture pre-patch state so we can detect transitions before
+    # flushing. Tuple order is stable across this function.
+    prev_status = run.status
+    prev_kill = run.kill_switch_triggered
 
     if "applications_attempted" in patch and patch["applications_attempted"] is not None:
         run.applications_attempted = patch["applications_attempted"]
@@ -497,6 +594,41 @@ async def update_run(
     db.add(run)
     await db.commit()
     await db.refresh(run)
+
+    # Audit transitions AFTER commit — a failed audit write (fail-open
+    # per log_action contract) must not roll back the legitimate patch.
+    if prev_kill is False and run.kill_switch_triggered is True:
+        await log_action(
+            db, user,
+            action="routine.run_killed_mid_flight",
+            resource="routine_run",
+            request=request,
+            metadata={
+                "run_id": str(run.id),
+                "mode": run.mode,
+                "applications_submitted": run.applications_submitted,
+                "applications_attempted": run.applications_attempted,
+            },
+        )
+    if prev_status == "running" and run.status in ("complete", "aborted"):
+        await log_action(
+            db, user,
+            action=(
+                "routine.run_completed" if run.status == "complete"
+                else "routine.run_aborted"
+            ),
+            resource="routine_run",
+            request=request,
+            metadata={
+                "run_id": str(run.id),
+                "mode": run.mode,
+                "applications_submitted": run.applications_submitted,
+                "applications_attempted": run.applications_attempted,
+                "applications_skipped": len(run.applications_skipped or []),
+                "detection_incidents": len(run.detection_incidents or []),
+                "kill_switch_triggered": run.kill_switch_triggered,
+            },
+        )
 
     return _run_to_out(run)
 

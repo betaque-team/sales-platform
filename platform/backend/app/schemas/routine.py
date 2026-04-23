@@ -52,12 +52,21 @@ class RequiredCoverageResponse(BaseModel):
     Pre-flight gate for the routine: if ``complete=False`` the routine
     refuses to run any application (the UI surfaces the ``missing``
     list on /answer-book/required-setup).
+
+    ``entries`` (added in phase-2 improvements) carries *every* required
+    row — filled and unfilled — in canonical seed order, so the UI can
+    render a stable list that lets the operator EDIT a previously
+    filled answer (salary floor changed, notice period changed, etc.).
+    ``missing`` is retained for backward compatibility: older frontends
+    that only render unfilled rows keep working without a schema round-
+    trip.
     """
 
     complete: bool
     total_required: int
     total_filled: int
     missing: list[RequiredCoverageEntry]  # entries with answer == ""
+    entries: list[RequiredCoverageEntry]  # ALL required rows (filled + unfilled)
 
 
 class SeedRequiredResponse(BaseModel):
@@ -207,10 +216,21 @@ class CreateRoutineRunRequest(BaseModel):
     # it's advisory metadata so a historical run row can show
     # "you planned to apply to these 10 jobs."
     target_job_ids: list[UUID] | None = Field(default=None, max_length=50)
+    # Optional idempotency key. When present and a run already exists
+    # for ``(user_id, idempotency_key)``, the handler returns that
+    # run's id instead of creating a new one — protects against
+    # MCP-Chrome retrying a request whose response was lost in flight.
+    # Clients should generate a UUID4 per logical attempt and retry
+    # with the same key until they get a 2xx.
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class CreateRoutineRunResponse(BaseModel):
     run_id: UUID
+    # True when the returned run_id was looked up by idempotency_key
+    # rather than freshly created. Lets the client distinguish "my
+    # retry succeeded" from "a new run started".
+    replayed: bool = False
 
 
 class UpdateRoutineRunRequest(BaseModel):

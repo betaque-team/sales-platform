@@ -139,6 +139,184 @@ def test_routine_geography_buckets_have_salary_seed_coverage():
         )
 
 
+def test_create_run_request_accepts_valid_idempotency_key():
+    """Phase-2: POST /routine/runs accepts an idempotency_key for
+    replay protection. The key is optional and bounded to [8, 64]
+    characters so a stray empty string or a pasted-in JWT doesn't
+    silently pass validation."""
+    from app.schemas.routine import CreateRoutineRunRequest
+
+    # Nominal UUID4 hex = 32 chars, well inside bounds.
+    req = CreateRoutineRunRequest(
+        mode="live",
+        idempotency_key="a" * 32,
+    )
+    assert req.idempotency_key == "a" * 32
+
+    # Omitted key is fine — legacy clients keep working.
+    req_no_key = CreateRoutineRunRequest(mode="live")
+    assert req_no_key.idempotency_key is None
+
+
+def test_create_run_request_rejects_bad_idempotency_keys():
+    """Key bounds are enforced at the Pydantic boundary so bad input
+    422s before it reaches the DB. Too-short or too-long keys would
+    defeat the protection (a two-char key has huge collision risk;
+    a 10kB key would blow past the column width)."""
+    import pytest
+    from pydantic import ValidationError
+    from app.schemas.routine import CreateRoutineRunRequest
+
+    # Under minimum — 7 chars.
+    with pytest.raises(ValidationError):
+        CreateRoutineRunRequest(mode="live", idempotency_key="short")
+
+    # Over maximum — 65 chars.
+    with pytest.raises(ValidationError):
+        CreateRoutineRunRequest(mode="live", idempotency_key="x" * 65)
+
+
+def test_create_run_response_carries_replayed_flag():
+    """The client needs to tell "my retry succeeded" from "a new run
+    was created" — otherwise it can't decide whether to re-emit
+    target_job_ids or just rejoin the existing run's stream."""
+    from app.schemas.routine import CreateRoutineRunResponse
+    from uuid import uuid4
+
+    # Fresh creation defaults to replayed=False.
+    fresh = CreateRoutineRunResponse(run_id=uuid4())
+    assert fresh.replayed is False
+
+    # Replay path explicitly sets it.
+    replayed = CreateRoutineRunResponse(run_id=uuid4(), replayed=True)
+    assert replayed.replayed is True
+
+
+def test_required_coverage_response_carries_entries_and_missing():
+    """Phase-2: the response schema gained an ``entries`` field with
+    ALL required rows (filled + unfilled) so the UI can render + edit
+    filled answers. ``missing`` is retained so a rolling-deploy
+    frontend that only reads ``missing`` keeps working."""
+    from app.schemas.routine import (
+        RequiredCoverageEntry,
+        RequiredCoverageResponse,
+    )
+    from uuid import uuid4
+
+    filled = RequiredCoverageEntry(
+        id=uuid4(),
+        category="preferences",
+        question="salary floor?",
+        question_key="expected_min_salary_remote",
+        answer="150000",
+        filled=True,
+    )
+    unfilled = RequiredCoverageEntry(
+        id=uuid4(),
+        category="work_auth",
+        question="visa?",
+        question_key="visa_status",
+        answer="",
+        filled=False,
+    )
+    resp = RequiredCoverageResponse(
+        complete=False,
+        total_required=16,
+        total_filled=1,
+        missing=[unfilled],
+        entries=[filled, unfilled],
+    )
+    assert [e.filled for e in resp.entries] == [True, False]
+    assert [e.filled for e in resp.missing] == [False]
+
+
+def test_update_run_emits_audit_actions():
+    """B4: source-inspection guard that ``update_run`` references the
+    two audit actions we rely on for "why did the run stop" forensics.
+    This is structural (reads the source file) because exercising the
+    real handler needs a live DB; the string-presence check catches
+    accidental deletion of the audit calls during a refactor.
+    """
+    import inspect
+    from app.api.v1 import routine as routine_mod
+
+    src = inspect.getsource(routine_mod.update_run)
+    # Mid-run kill (operator disabled the routine while it was running).
+    assert "routine.run_killed_mid_flight" in src, (
+        "update_run should audit mid-run kill-switch trips"
+    )
+    # Terminal transitions — one of these is emitted when status moves
+    # from "running" to "complete" or "aborted".
+    assert "routine.run_completed" in src, (
+        "update_run should audit completion transitions"
+    )
+    assert "routine.run_aborted" in src, (
+        "update_run should audit abort transitions"
+    )
+
+
+def test_count_recent_submissions_joins_through_live_runs():
+    """A4 fix guard. ``_count_recent_submissions`` must count BOTH
+    committed applies (Application.status='applied') and in-flight
+    live-run submissions (ApplicationSubmission joined to a live
+    RoutineRun) — counting only the first was the race window that
+    let the 11th submission through.
+
+    Structural: inspect the source for both branches. A behavioral
+    test needs a live DB harness which we don't have for this router.
+    """
+    import inspect
+    from app.api.v1 import routine as routine_mod
+
+    src = inspect.getsource(routine_mod._count_recent_submissions)
+    # Committed-applies branch.
+    assert "Application.status" in src
+    assert "applied_at" in src
+    # In-flight branch — must join ApplicationSubmission + RoutineRun
+    # and scope to live mode.
+    assert "ApplicationSubmission" in src, (
+        "_count_recent_submissions should union in-flight submissions"
+    )
+    assert 'RoutineRun.mode == "live"' in src or (
+        "RoutineRun.mode" in src and '"live"' in src
+    ), "in-flight branch must scope to live-mode runs only"
+
+
+def test_create_run_replay_precedes_preflight_gates():
+    """A5 correctness guard. The idempotency replay MUST be checked
+    before any gate (kill-switch, coverage, daily-cap). Otherwise a
+    retry of a request that originally succeeded would spuriously
+    fail with "cap hit" because the original attempt already consumed
+    a slot.
+
+    Structural: inspect line order in the source. The
+    ``body.idempotency_key`` check has to appear before the first
+    ``raise HTTPException`` for any gate.
+    """
+    import inspect
+    from app.api.v1 import routine as routine_mod
+
+    src = inspect.getsource(routine_mod.create_run)
+    replay_idx = src.find("body.idempotency_key")
+    kill_gate_idx = src.find("_kill_switch_disabled(db, user.id)")
+    coverage_gate_idx = src.find("_required_coverage_complete(db, user.id)")
+    cap_gate_idx = src.find("_count_recent_submissions")
+
+    assert replay_idx > -1, "replay check missing from create_run"
+    assert kill_gate_idx > -1
+    assert coverage_gate_idx > -1
+    assert cap_gate_idx > -1
+    assert replay_idx < kill_gate_idx, (
+        "idempotency replay must run BEFORE the kill-switch gate"
+    )
+    assert replay_idx < coverage_gate_idx, (
+        "idempotency replay must run BEFORE the coverage gate"
+    )
+    assert replay_idx < cap_gate_idx, (
+        "idempotency replay must run BEFORE the daily-cap gate"
+    )
+
+
 def test_routine_router_registered_in_v1_router():
     """Smoke-test: the routine router must be included in the v1
     router aggregator, or none of the endpoints above are reachable

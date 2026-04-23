@@ -1286,7 +1286,13 @@ export interface RequiredCoverageResponse {
   complete: boolean;
   total_required: number;
   total_filled: number;
+  // Unfilled entries only — kept for backward compatibility with the
+  // phase-1 UI that rendered "what still needs to be done".
   missing: RequiredCoverageEntry[];
+  // All required entries in canonical seed order (filled + unfilled).
+  // The phase-2 UI renders this list and lets the operator edit a
+  // previously filled answer in place.
+  entries: RequiredCoverageEntry[];
 }
 
 export interface SeedRequiredResponse {
