@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-23 · 98c529d · sha-98c529d
+Merge feat/routine-apply-improvements: phase 1 + 2 routine-apply improvements
+
+
 ## 2026-04-22 · bbe5028 · sha-bbe5028
 fix(humanizer): style_match_pass corpus-size gate compared wrong length
 
