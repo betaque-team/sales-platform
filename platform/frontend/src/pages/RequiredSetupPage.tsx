@@ -97,6 +97,15 @@ export function RequiredSetupPage() {
   // incomplete; the POST safely no-ops for already-present entries.
   const hasMissing = coverage.missing.length > 0;
   const allMissing = coverage.missing.length === total;
+  // Phase-2: the backend now returns ALL required rows (filled +
+  // unfilled) in canonical seed order on ``entries``. Older backends
+  // may only return ``missing`` — fall back to that so the page still
+  // works during a rolling deploy where frontend has shipped but
+  // backend hasn't.
+  const allEntries: RequiredCoverageEntry[] =
+    coverage.entries && coverage.entries.length > 0
+      ? coverage.entries
+      : coverage.missing;
 
   // Group all 16 entries by category for display. `missing` only has
   // unfilled — for the grouped view we need everything, so we merge
@@ -108,8 +117,13 @@ export function RequiredSetupPage() {
   // if filled < total the missing array is what the user needs to act
   // on. Unfilled-first is the useful operator flow.
 
+  // Group ALL entries (not just missing) — operator needs to be able
+  // to update a filled answer later (salary bumped, notice period
+  // changed, visa status changed). Filled rows render with a green
+  // check and a read-only look until the user starts typing a new
+  // answer, at which point the Save button activates.
   const grouped: Record<string, RequiredCoverageEntry[]> = {};
-  for (const entry of coverage.missing) {
+  for (const entry of allEntries) {
     const cat = entry.category || "custom";
     if (!grouped[cat]) grouped[cat] = [];
     grouped[cat].push(entry);

@@ -52,6 +52,15 @@ class RoutineRun(Base):
     detection_incidents: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
     kill_switch_triggered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Optional client-supplied idempotency key (added in the phase-2
+    # improvements migration). Scoped unique per-user via
+    # ``uq_routine_runs_user_idempotency_key``. When a POST /routine/
+    # runs arrives with a key that already exists for the user, the
+    # handler returns the existing run_id instead of creating a new
+    # row — protection against the MCP-Chrome client retrying on a
+    # network blip and producing ghost runs. NULL = no protection
+    # (legacy behavior; retry creates a fresh row).
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
