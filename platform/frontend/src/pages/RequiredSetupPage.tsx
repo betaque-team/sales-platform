@@ -139,7 +139,7 @@ export function RequiredSetupPage() {
               Required answer-book setup
             </h1>
             <p className="mt-1 text-sm text-neutral-600">
-              The Claude Routine Apply feature refuses to submit any
+              The Apply Routine feature refuses to submit any
               application until every row below has an answer. These are
               the identity, compensation, and EEO questions that must
               come from you — never from the model.
