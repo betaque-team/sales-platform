@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-23 · 1a7b853 · sha-1a7b853
+chore(ui): rename "Claude Routine" to "Apply Routine" in user-visible copy
+
+
 ## 2026-04-23 · 98c529d · sha-98c529d
 Merge feat/routine-apply-improvements: phase 1 + 2 routine-apply improvements
 
