@@ -339,6 +339,86 @@ def test_fetch_proceeds_when_descendants_changed():
     assert job["raw_json"]["hn_thread_id"] == "40000000"
 
 
+def test_fetch_does_not_cache_descendants_when_zero_jobs_emitted():
+    """F249 regression — a 0-job result must NOT update the cache.
+
+    Pre-fix the cache was set unconditionally after the parse loop, so
+    a single empty run (parser regression, transient upstream hiccup,
+    every comment deleted/dead, etc.) silently locked the fetcher into
+    a "nothing new" short-circuit until the thread's descendants count
+    changed upstream — which on multi-week-old threads can be hours
+    or days. Live-observed on 2026-04-26: HN had been registered for
+    hours, scans returned ``jobs_found=0`` repeatedly, prod
+    ``hackernews`` platform had zero rows in ``Job``.
+
+    Refusing to cache empty results means the next scheduled tick
+    re-attempts the full fetch, so a transient zero is self-healing.
+    The happy-path (jobs > 0) still updates the cache so the
+    rate-limit benefit is preserved during steady state.
+    """
+    from app.fetchers.hackernews import HackerNewsFetcher
+
+    fake_redis = _FakeRedis()  # empty cache → don't short-circuit
+
+    client = MagicMock()
+
+    def _stub(url, params=None, timeout=None):  # noqa: ARG001
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        if "algolia" in url:
+            resp.json.return_value = {
+                "hits": [
+                    {
+                        "objectID": "40000000",
+                        "title": "Ask HN: Who is hiring? (April 2026)",
+                        "_tags": ["story", "author_whoishiring"],
+                        "created_at": "2026-04-01T00:00:00Z",
+                        "created_at_i": 1743465600,
+                    }
+                ]
+            }
+        elif url.endswith("/40000000.json"):
+            resp.json.return_value = {
+                "id": 40000000,
+                "title": "Ask HN: Who is hiring? (April 2026)",
+                "descendants": 99,
+                # Two kids — one deleted, one with no parseable header.
+                # Neither produces a job.
+                "kids": [40000001, 40000002],
+                "time": 1743465600,
+            }
+        elif url.endswith("/40000001.json"):
+            # Deleted — fetcher skips.
+            resp.json.return_value = {"id": 40000001, "deleted": True}
+        elif url.endswith("/40000002.json"):
+            # No company / no URL — parser returns nothing usable, skipped.
+            resp.json.return_value = {
+                "id": 40000002,
+                "by": "some_user",
+                "time": 1743466000,
+                "text": "Just some unrelated commentary, no job here.",
+            }
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    client.get.side_effect = _stub
+
+    fetcher = HackerNewsFetcher(client=client, redis_client=fake_redis)
+    jobs = fetcher.fetch("__all__")
+
+    # 0 jobs emitted — and crucially, the cache must NOT carry the
+    # descendants count forward, so the next tick retries.
+    assert jobs == []
+    cache_key = "hn:whoishiring:40000000:descendants"
+    assert cache_key not in fake_redis._store, (
+        f"F249: cache was poisoned with the descendants count after a "
+        f"zero-job run. Next scheduled tick would short-circuit and "
+        f"the fetcher would never recover until upstream descendants "
+        f"changed. Saw cache value: {fake_redis._store.get(cache_key)!r}"
+    )
+
+
 def test_fetch_gracefully_handles_no_thread_found():
     """Algolia returns no whoishiring stories (outage / off-month).
     Must not crash; returns [].
