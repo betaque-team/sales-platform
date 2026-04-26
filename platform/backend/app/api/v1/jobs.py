@@ -449,28 +449,50 @@ async def review_queue(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the next batch of unreviewed jobs, prioritized by discovery
-    recency → team-wide best resume fit → platform relevance.
+    recency → CURRENT REVIEWER'S resume fit → platform relevance.
 
     Ordering (each tier DESC, NULLS LAST):
       1. ``DATE(first_seen_at)``    — today first, then yesterday, then older.
          Bucketing by calendar date (not timestamp) so the UI can surface a
          single "12 today / 8 yesterday" summary that matches the order.
-      2. ``max(ResumeScore.overall_score)`` across every resume that has
-         scored this job — a team-wide "best resume fit" signal. Jobs that
-         no resume has scored yet fall to the bottom of this tier.
+      2. ``ResumeScore.overall_score`` for **the reviewer's own active
+         resume**. Jobs the reviewer's resume hasn't been scored against
+         yet fall to the bottom of this tier (coalesced to -1).
       3. ``Job.relevance_score``     — platform-wide role/geography match.
+
+    Pre-fix this used ``MAX(ResumeScore.overall_score)`` across **every
+    resume on the platform**. Real-world bug: a reviewer with a DevOps/SRE
+    resume would see Data-Engineer / Automation-Engineer roles ranked at
+    the top of their queue because some other team-mate's data-engineer
+    resume scored those jobs at 90+. The team-wide max blew Sarthak's
+    own ranking out of the water for any job a different specialist
+    happened to fit. The right semantics for a per-reviewer queue is
+    per-reviewer scoring — anyone else's fit is irrelevant to what
+    *this* reviewer should triage next.
+
+    If the reviewer has no active resume (``user.active_resume_id`` is
+    NULL), the subquery returns no matching rows, every job's
+    ``my_score`` coalesces to -1, and tier 2 collapses — ordering then
+    falls back to ``Job.relevance_score`` which is correct for
+    resume-less admin browsing.
 
     Also excludes jobs the *current reviewer* has already decided on
     (NOT EXISTS against reviews.reviewer_id), which is defense-in-depth
     against any future flow where a review is recorded without flipping
     ``Job.status`` off ``"new"``.
     """
-    max_scores_sq = (
+    # Per-user resume-score subquery: only this reviewer's active resume.
+    # Filtering on ``ResumeScore.resume_id == user.active_resume_id`` gives
+    # us at most one row per job so no GROUP BY needed. ``literal(None)``
+    # for the `where` LHS when active_resume_id is NULL is intentional —
+    # SQL's ``x = NULL`` is always false so the subquery returns empty,
+    # which is exactly what we want (the coalesce in ORDER BY handles it).
+    my_score_sq = (
         select(
             ResumeScore.job_id.label("rs_job_id"),
-            func.max(ResumeScore.overall_score).label("max_score"),
+            ResumeScore.overall_score.label("my_score"),
         )
-        .group_by(ResumeScore.job_id)
+        .where(ResumeScore.resume_id == user.active_resume_id)
         .subquery()
     )
 
@@ -488,13 +510,13 @@ async def review_queue(
     )
 
     query = (
-        select(Job, max_scores_sq.c.max_score)
+        select(Job, my_score_sq.c.my_score)
         .options(joinedload(Job.company))
-        .outerjoin(max_scores_sq, Job.id == max_scores_sq.c.rs_job_id)
+        .outerjoin(my_score_sq, Job.id == my_score_sq.c.rs_job_id)
         .where(Job.status == "new", ~reviewer_decided)
         .order_by(
             func.date(Job.first_seen_at).desc(),
-            func.coalesce(max_scores_sq.c.max_score, literal(-1.0)).desc(),
+            func.coalesce(my_score_sq.c.my_score, literal(-1.0)).desc(),
             Job.relevance_score.desc(),
         )
         .limit(limit)
@@ -516,11 +538,19 @@ async def review_queue(
     stats_row = (await db.execute(stats_q)).one()
 
     items = []
-    for j, max_score in rows:
+    for j, my_score in rows:
         item = JobOut.model_validate(j)
         item.company_name = j.company.name if j.company else None
         d = item.model_dump(mode="json")
-        d["max_resume_score"] = round(max_score, 1) if max_score is not None else None
+        # Per-reviewer resume score (active resume's fit for this job).
+        # Keep ``max_resume_score`` populated with the same value for
+        # backward-compat with any consumer / tab that hadn't been
+        # updated yet — it's the same number from the reviewer's POV
+        # since their queue is now per-user-scoped. The new
+        # ``your_resume_score`` key is the canonical name going forward.
+        rounded = round(my_score, 1) if my_score is not None else None
+        d["your_resume_score"] = rounded
+        d["max_resume_score"] = rounded
         items.append(d)
 
     total = int(stats_row.total or 0)

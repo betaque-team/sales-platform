@@ -218,7 +218,15 @@ async def add_board(
     if not company_name or not platform or not slug:
         raise HTTPException(status_code=400, detail="company_name, platform, and slug are required")
 
-    valid_platforms = ["greenhouse", "lever", "ashby", "workable", "bamboohr", "himalayas", "wellfound", "jobvite", "smartrecruiters", "recruitee"]
+    # F246(b) follow-up: read the allow-list from the canonical
+    # ``FETCHER_MAP`` rather than hardcoding it here. Pre-fix, this
+    # list lagged the FETCHER_MAP additions every time a new fetcher
+    # shipped — Workday, weworkremotely, remoteok, remotive, linkedin,
+    # hackernews, yc_waas all silently couldn't be added via the admin
+    # UI even though the workers could fetch them. Single source of
+    # truth means a future fetcher addition wires up immediately.
+    from app.fetchers import FETCHER_MAP
+    valid_platforms = sorted(FETCHER_MAP.keys())
     if platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"platform must be one of: {', '.join(valid_platforms)}")
 

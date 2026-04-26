@@ -247,6 +247,17 @@ else:
             "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
             "schedule": crontab(minute=45, hour="*/6"),
         },
+        # Mode-parity fix: ``fix_stuck_discovery_runs`` was only in the
+        # aggressive schedule, so DiscoveryRun rows that got orphaned
+        # (worker crash mid-run, beat fired into a Redis hiccup) sat in
+        # 'pending'/'running' forever in normal-mode prod. Live monitoring
+        # showed 2 stuck rows from 2026-04-16 still pending 10 days later,
+        # blocking the discovery-runs UI list. Cadence matches aggressive
+        # mode (every 6h on minute 50, staggered from enrichments).
+        "fix_stuck_discovery_runs": {
+            "task": "app.workers.tasks.maintenance_task.fix_stuck_discovery_runs",
+            "schedule": crontab(minute=50, hour="*/6"),
+        },
         "deduplicate_contacts": {
             "task": "app.workers.tasks.enrichment_task.deduplicate_contacts",
             "schedule": crontab(minute=0, hour=2, day_of_week="sunday"),
