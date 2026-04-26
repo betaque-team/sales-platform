@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +11,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import get_settings
 from app.api.v1.router import api_router
 from app.utils.log_scrub import install_root_scrubber
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -23,8 +27,58 @@ settings = get_settings()
 install_root_scrubber()
 
 
+async def _seed_remote_companies_if_enabled() -> None:
+    """F246(b) regression fix — startup-time idempotent seed of the
+    synthetic platform boards (HN "Who is Hiring?", YC Work at a Startup,
+    plus the long-standing aggregators like RemoteOK/Remotive).
+
+    WHY THIS RUNS HERE
+    ------------------
+    F246(a) added a ``python -m app.seed_remote_companies`` invocation
+    to ``ci-deploy.sh`` after ``alembic upgrade head``. That should
+    have shipped the seed on every deploy. Live verification on
+    2026-04-26 showed prod still had **0 hackernews + 0 yc_waas
+    boards** despite multiple deploys with the new ci-deploy.sh —
+    the deploy-shell step either silently failed, ran against the
+    wrong DB, or never executed (no shell access to the VM means we
+    couldn't tell which). Symptom: Track B fetchers register cleanly
+    but every scheduled scan tick is a no-op against zero boards.
+
+    Running the seed inside the FastAPI ``lifespan`` makes it
+    effectively unconditional — every backend container boot
+    re-applies the seed, so prod converges to the correct state on
+    the first restart after this commit lands. The seed module is
+    fully idempotent (check-then-insert against ``companies.name``
+    and the ``(company_id, platform, slug)`` triple), so re-running
+    on every boot adds only the genuinely-new rows.
+
+    Failure is non-fatal: the existing platform-boards corpus is
+    already correct for the legacy 14 platforms, and Track B is
+    a feature gap, not a crash surface. We log the failure so it's
+    visible in container logs but DO NOT block the rest of the
+    lifespan from yielding (which would break the /api/health probe
+    and trigger a docker-compose restart loop).
+
+    Opt-out via env var ``SEED_REMOTE_COMPANIES_ON_STARTUP=0`` for
+    test fixtures + local dev where the DB is intentionally empty.
+    """
+    if os.environ.get("SEED_REMOTE_COMPANIES_ON_STARTUP", "1") == "0":
+        return
+    try:
+        from app.seed_remote_companies import seed_remote
+        await seed_remote()
+        logger.info("startup-seed: seed_remote_companies completed")
+    except Exception as exc:
+        logger.warning(
+            "startup-seed: seed_remote_companies failed (non-fatal): %s",
+            exc,
+            exc_info=True,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await _seed_remote_companies_if_enabled()
     yield
 
 

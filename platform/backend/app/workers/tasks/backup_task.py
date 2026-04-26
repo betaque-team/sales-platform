@@ -79,15 +79,65 @@ def _alembic_rev(env: dict) -> str:
 
 
 def _rotate(backup_root: Path, keep: int) -> int:
-    dirs = sorted(
-        [d for d in backup_root.iterdir() if d.is_dir() and d.name[0].isdigit()],
-        reverse=True,
-    )
+    """Rotate stale backups, keeping the most recent ``keep`` of each kind.
+
+    Two backup shapes coexist in this directory:
+
+    * **Nightly backups** — dated subdirs like ``20260426_030000/`` written
+      by ``run_backup`` (this task). Sortable by name = sortable by time.
+    * **Pre-deploy backups** — flat ``pre-deploy-<sha>.sql.gz`` files
+      written by ``scripts/ci-deploy.sh:pre_deploy_backup`` before each
+      rolling restart. Sortable by mtime = sortable by deploy time.
+
+    Pre-fix this function only rotated the dated subdirs. The flat
+    pre-deploy files accumulated unbounded — live monitoring on
+    2026-04-26 showed **77 backups occupying 13.3 GB** with the oldest
+    going back 20 days (one per deploy, multiple per busy day). At the
+    free-tier 200 GB cap this would fill the disk in ~3 months.
+
+    Now we rotate BOTH shapes with the same ``keep`` count. Order is:
+      1. Subdirs (nightly + manual labels that begin with a digit)
+      2. ``pre-deploy-*.sql.gz`` flat files
+
+    Failure on either path is logged but doesn't abort — half-rotated
+    is strictly better than not-rotated when disk is filling.
+    """
     removed = 0
-    for old in dirs[keep:]:
-        shutil.rmtree(old, ignore_errors=True)
-        logger.info("Rotated old backup: %s", old.name)
-        removed += 1
+
+    # 1. Dated subdirs — the original behaviour.
+    try:
+        dirs = sorted(
+            [d for d in backup_root.iterdir() if d.is_dir() and d.name[0].isdigit()],
+            reverse=True,
+        )
+        for old in dirs[keep:]:
+            shutil.rmtree(old, ignore_errors=True)
+            logger.info("Rotated old backup dir: %s", old.name)
+            removed += 1
+    except Exception as exc:
+        logger.warning("backup-rotate: subdir sweep failed: %s", exc)
+
+    # 2. Flat pre-deploy .sql.gz files — written by ci-deploy.sh, NOT by
+    # this task. Sort by mtime so we keep the most recent ``keep``
+    # regardless of the embedded short-sha (sha-tags don't sort
+    # chronologically — ``sha-aa6017d`` is alphabetically before
+    # ``sha-15cf095`` despite being newer).
+    try:
+        flats = sorted(
+            backup_root.glob("pre-deploy-*.sql.gz"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in flats[keep:]:
+            try:
+                old.unlink()
+                logger.info("Rotated old pre-deploy backup: %s", old.name)
+                removed += 1
+            except OSError as exc:
+                logger.warning("Could not unlink %s: %s", old.name, exc)
+    except Exception as exc:
+        logger.warning("backup-rotate: flat-file sweep failed: %s", exc)
+
     return removed
 
 
