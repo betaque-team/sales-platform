@@ -440,6 +440,59 @@ def test_fetch_does_not_cache_descendants_when_zero_jobs_emitted():
     )
 
 
+def test_normalize_caps_long_title_to_fit_db_column():
+    """F253 regression — HN parser sometimes returns a multi-paragraph
+    comment body as the ``title`` (poster didn't follow the
+    ``Company | Role | Location | URL`` convention). Pre-fix that
+    overflowed ``Job.title_normalized`` (``String(500)``) and triggered
+    ``psycopg2.errors.StringDataRightTruncation`` on the FIRST bad
+    job, which cascaded as ``PendingRollbackError`` to every
+    subsequent job in the same scan via the shared SQLAlchemy session.
+    298 fetched HN jobs, 0 persisted on the first run.
+
+    The fetcher's ``_normalize`` now caps title at 200 chars before
+    handing the dict to scan_task. Belt-and-suspenders: scan_task
+    also wraps each ``_upsert_job`` call in a SAVEPOINT so a future
+    overflow on a different field can't take down the whole batch.
+
+    This test pins the cap by feeding a parsed dict with an
+    enormous title (1000 chars) and asserting the normalized output
+    fits the column.
+    """
+    from app.fetchers.hackernews import HackerNewsFetcher
+
+    f = HackerNewsFetcher()
+    raw = {"id": 47602061, "by": "u", "time": 1743466000}
+    parsed = {
+        "company": "Acme Corp",
+        "title": (
+            "Senior Engineer — we are a quantum computing company "
+            "based in Paris, with offices in NYC and Brooklyn, "
+            "looking for someone with deep expertise in superposition, "
+            "entanglement, and decoherence; you'll be writing Qiskit "
+            "code, working with our hardware team, and shipping product. "
+        ) * 5,  # > 500 chars guaranteed
+        "url": "https://acme.example.com/careers",
+        "remote_scope": "remote",
+    }
+    thread = {"id": "47601859", "title": "Ask HN: Who is hiring? (April 2026)"}
+
+    out = f._normalize(raw, parsed=parsed, thread=thread)
+    assert "title" in out
+    assert len(out["title"]) <= 200, (
+        f"F253 regression: title is {len(out['title'])} chars; must be "
+        "≤ 200 to fit Job.title_normalized String(500) with comfortable "
+        "headroom. Pre-fix overflow triggered StringDataRightTruncation "
+        "and cascaded PendingRollbackError to every other job in the batch."
+    )
+    # Empty / whitespace-only title gets the safe default.
+    out2 = f._normalize(raw, parsed={"company": "Acme", "title": "   ", "url": "https://x.com"}, thread=thread)
+    assert out2["title"] == "Multiple roles", (
+        "Empty title must fall back to 'Multiple roles' — pre-fix the "
+        "code did this, but the new truncation path needed to preserve it."
+    )
+
+
 def test_legacy_int_cache_value_triggers_refetch_and_schema_upgrade():
     """F251 auto-heal — pre-F251 prod runs wrote the descendants count
     as a raw int. Those rows can outlive the deploy that introduced

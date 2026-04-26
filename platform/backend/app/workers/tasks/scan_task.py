@@ -576,7 +576,22 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
                                 else:
                                     raise
 
-                result = _upsert_job(session, job_company, board, raw_job, cluster_config)
+                # F253 regression fix: per-job SAVEPOINT so one failing
+                # row can't poison the whole batch. Pre-fix, the HN scan
+                # produced 298 jobs but the FIRST one overflowed
+                # ``Job.title_normalized String(500)`` — SQLAlchemy
+                # rolled the session back, every subsequent job's
+                # autoflush hit ``PendingRollbackError``, and ALL 298
+                # jobs were lost on a single overflow. Wrapping the
+                # ``_upsert_job`` call in a nested transaction
+                # (PostgreSQL SAVEPOINT) means a per-job DB error is
+                # local: the savepoint rolls back, the outer
+                # transaction continues, and the remaining 297 jobs
+                # land normally. The except block below still records
+                # the error for observability, but the rest of the
+                # batch survives.
+                with session.begin_nested():
+                    result = _upsert_job(session, job_company, board, raw_job, cluster_config)
                 if result == "new":
                     stats["new_jobs"] += 1
                 elif result == "updated":
