@@ -998,14 +998,24 @@ function ResumePreviewModal({
         {/* Body — branch on capability */}
         <div className="flex-1 overflow-hidden">
           {resume.has_file_data && resume.file_type === "pdf" ? (
-            // Browsers render application/pdf inline; cookie JWT goes
-            // with the iframe request automatically (same-origin). The
-            // ``title`` attribute satisfies the iframe a11y rule.
-            <iframe
-              src={fileUrl}
-              title={`PDF preview of ${titleFile}`}
-              className="h-full w-full border-0"
-            />
+            // F255 regression fix: pre-fix this passed ``src={fileUrl}``
+            // directly to the iframe. The endpoint sets
+            // ``Content-Security-Policy: frame-ancestors 'none'`` (CSP
+            // hardening per F219) AND the outer nginx layer adds
+            // ``X-Frame-Options: DENY`` — both fire on every API
+            // response, including ``/api/v1/resume/{id}/file``. Even
+            // a same-origin iframe load gets blocked by the browser
+            // and the modal renders blank — the "preview not working"
+            // user report.
+            //
+            // ``PdfBlobIframe`` fetches the PDF bytes via ``fetch()``
+            // (cookie auth via ``credentials: 'include'``), wraps them
+            // in a Blob, and uses ``URL.createObjectURL`` to get a
+            // blob URL. Blob URLs are same-origin synthetic — neither
+            // X-Frame-Options nor ``frame-ancestors`` applies to them
+            // because the browser treats the blob as the iframe's
+            // direct content, not a cross-resource fetch.
+            <PdfBlobIframe url={fileUrl} title={`PDF preview of ${titleFile}`} />
           ) : resume.has_file_data && resume.file_type === "docx" ? (
             <DocxFallback
               fileUrl={fileUrl}
@@ -1026,6 +1036,106 @@ function ResumePreviewModal({
     </div>
   );
 }
+
+/**
+ * F255 — same-origin PDF preview via blob URL.
+ *
+ * Why not ``<iframe src={fileUrl}>`` directly?
+ *  - The backend's ``SecurityHeadersMiddleware`` sets
+ *    ``Content-Security-Policy: frame-ancestors 'none'``.
+ *  - The infra nginx layer adds ``X-Frame-Options: DENY``.
+ *  - Both block iframe rendering in every modern browser, even when
+ *    the iframe is same-origin.
+ *
+ * A blob URL bypasses both: the iframe's content is the blob itself,
+ * not a fetched resource that XFO / CSP-frame-ancestors would gate.
+ *
+ * Lifecycle:
+ *  1. fetch the PDF with cookie auth (``credentials: 'include'``).
+ *  2. wrap the bytes in a Blob with ``application/pdf`` MIME.
+ *  3. ``URL.createObjectURL`` → iframe-renderable URL.
+ *  4. ``URL.revokeObjectURL`` on unmount + on URL change so the
+ *     blob doesn't leak. (Browsers eventually GC blob URLs anyway,
+ *     but explicit revocation frees the bytes immediately — relevant
+ *     when a user previews several large PDFs in a row.)
+ */
+function PdfBlobIframe({ url, title }: { url: string; title: string }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let aborted = false;
+    let createdUrl: string | null = null;
+    setError(null);
+    setBlobUrl(null);
+
+    (async () => {
+      try {
+        const resp = await fetch(url, { credentials: "include" });
+        if (!resp.ok) {
+          // 410 = legacy resume without file_data — modal would normally
+          // route this to LegacyTextFallback before getting here, but
+          // be defensive in case ``has_file_data`` was stale on the row.
+          if (resp.status === 410) {
+            setError(
+              "This resume's original file isn't stored — re-upload to enable preview.",
+            );
+          } else if (resp.status === 404) {
+            setError("Resume not found (it may have been deleted).");
+          } else {
+            setError(`Failed to load preview (HTTP ${resp.status}).`);
+          }
+          return;
+        }
+        const blob = await resp.blob();
+        if (aborted) return;
+        // Force the MIME so the browser's PDF viewer kicks in even if
+        // the response Content-Type was generic.
+        const pdfBlob =
+          blob.type === "application/pdf"
+            ? blob
+            : new Blob([blob], { type: "application/pdf" });
+        createdUrl = URL.createObjectURL(pdfBlob);
+        setBlobUrl(createdUrl);
+      } catch (err) {
+        if (!aborted) {
+          setError(err instanceof Error ? err.message : "Failed to load preview");
+        }
+      }
+    })();
+
+    return () => {
+      aborted = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [url]);
+
+  if (error) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-sm text-gray-600">
+        <AlertCircle className="h-5 w-5 text-amber-500" />
+        <p className="text-center">{error}</p>
+      </div>
+    );
+  }
+
+  if (!blobUrl) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-gray-400" />
+      </div>
+    );
+  }
+
+  return (
+    <iframe
+      src={blobUrl}
+      title={title}
+      className="h-full w-full border-0"
+    />
+  );
+}
+
 
 function DocxFallback({
   fileUrl,
@@ -1071,14 +1181,26 @@ function LegacyTextFallback({
   loading: boolean;
   error: string | null;
 }) {
+  // F255 follow-up: the bare "re-upload to enable preview" copy was
+  // confusing — users read it as "preview broken" without knowing
+  // the file is genuinely missing on the server. Be explicit about
+  // what we're showing AND what to do (the upload button is still in
+  // the page header, but the affordance gets lost when the modal is
+  // open). The text view below is now styled like a printed page so
+  // the user can still skim resume content even without the bytes.
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-gray-100 bg-blue-50 px-5 py-2 text-xs text-blue-800">
-        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
-        <span>
-          The original file isn't stored for this resume — re-upload it to
-          enable the inline file preview. Showing extracted text below.
-        </span>
+      <div className="flex items-start gap-2 border-b border-gray-100 bg-blue-50 px-5 py-3 text-xs text-blue-900">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        <div className="leading-relaxed">
+          <p className="font-medium">Original file not stored.</p>
+          <p className="mt-0.5 text-blue-800">
+            This resume was uploaded before the platform retained source
+            files. The extracted text is shown below. To enable the
+            full PDF preview, close this dialog and re-upload the file
+            via &ldquo;Upload Resume&rdquo;.
+          </p>
+        </div>
       </div>
       <ExtractedTextView text={text} loading={loading} error={error} />
     </div>
@@ -1115,11 +1237,17 @@ function ExtractedTextView({
       </div>
     );
   }
+  // F255 follow-up: render the extracted text inside a centered
+  // "page" card with a sans-serif body so legacy-text fallback feels
+  // like a preview rather than a raw debug dump. Mirrors how Word /
+  // Google Docs render a single-page document on a grey backdrop.
   return (
-    <div className="h-full overflow-y-auto bg-gray-50 p-5">
-      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-gray-800">
-        {text}
-      </pre>
+    <div className="h-full overflow-y-auto bg-gray-100 p-6">
+      <div className="mx-auto max-w-2xl rounded bg-white p-8 shadow-sm">
+        <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-gray-800">
+          {text}
+        </pre>
+      </div>
     </div>
   );
 }
