@@ -63,7 +63,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # No requirements.txt yet -- mirror the Dockerfile's pip install set
+          # No requirements.txt yet -- mirror the Dockerfile's pip install set.
+          # KEEP IN SYNC with platform/backend/Dockerfile's RUN pip install
+          # block. The bcrypt entry was added to the Dockerfile but missed
+          # here, and pytest collection imported `app.api.v1.auth` (which
+          # `import bcrypt`s for password hashing) and 500'd CI on every
+          # commit until added. See `tests/test_smoke.py::test_ci_install_block_matches_dockerfile`
+          # for the drift guard.
           pip install \
             "fastapi[standard]>=0.115" "uvicorn[standard]>=0.32" \
             "sqlalchemy[asyncio]>=2.0" "asyncpg>=0.30" "alembic>=1.14" \
@@ -73,6 +79,7 @@ jobs:
             "itsdangerous>=2.1" "psycopg2-binary>=2.9" \
             "pdfplumber>=0.11" "python-docx>=1.1" "anthropic>=0.40" \
             "beautifulsoup4>=4.12" "dnspython>=2.6" \
+            "bcrypt>=4.2" \
             pytest pytest-asyncio
 
       - name: Bootstrap DB schema (create_all + alembic stamp head)

@@ -92,6 +92,54 @@ def test_openapi_docs_redoc_all_under_api_prefix() -> None:
     )
 
 
+def test_ci_install_block_matches_dockerfile() -> None:
+    """Drift guard between CI's hand-rolled pip install block and the
+    Dockerfile's RUN pip install block.
+
+    Failure mode this catches: a new runtime dep gets added to the
+    Dockerfile (so prod + local docker compose work) but missed in
+    ``.github/workflows/ci.yml``. CI then 500s on import at pytest
+    collection time. Most recent example: ``bcrypt`` was added to
+    the Dockerfile when password hashing landed but the CI install
+    block wasn't updated, so every backend test failed with
+    ``ModuleNotFoundError: No module named 'bcrypt'``.
+
+    Compares the SET of quoted package specs (``"name>=ver"``) in
+    both files. CI may have a couple of test-only extras (pytest,
+    pytest-asyncio, psycopg2-binary used as the sync driver) that
+    don't belong in the runtime image — those are tolerated.
+    """
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    dockerfile = (repo_root / "platform" / "backend" / "Dockerfile").read_text()
+    ci_yaml = (repo_root / ".github" / "workflows" / "ci.yml").read_text()
+
+    # Match all ``"package>=ver"`` quoted specs across both files.
+    pkg = re.compile(r'"([a-zA-Z0-9_\-\[\]]+)[>=<~][\d.]+(?:[a-zA-Z0-9.\-]+)?"')
+    docker_pkgs = {m.group(1).lower() for m in pkg.finditer(dockerfile)}
+    ci_pkgs = {m.group(1).lower() for m in pkg.finditer(ci_yaml)}
+
+    # Test-only / sync-driver extras allowed in CI but not the runtime image.
+    ci_only_allowed = {"pytest", "pytest-asyncio", "psycopg2-binary"}
+
+    missing_in_ci = docker_pkgs - ci_pkgs
+    extra_in_ci = ci_pkgs - docker_pkgs - ci_only_allowed
+
+    assert not missing_in_ci, (
+        f"CI install block is missing runtime deps that the Dockerfile has: "
+        f"{sorted(missing_in_ci)}. Add them to .github/workflows/ci.yml's "
+        f"'Install dependencies' step. CI will fail on the import at "
+        "pytest collection otherwise."
+    )
+    assert not extra_in_ci, (
+        f"CI install block has packages the Dockerfile doesn't: "
+        f"{sorted(extra_in_ci)}. Either add them to the Dockerfile or, "
+        f"if test-only, add them to ``ci_only_allowed`` in this guard."
+    )
+
+
 def test_init_ci_db_imports_match_alembic_env() -> None:
     """Drift guard between ``scripts/init_ci_db.py`` and ``alembic/env.py``.
 
