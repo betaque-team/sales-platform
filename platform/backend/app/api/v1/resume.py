@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, undefer
 
 from app.database import get_db
 from app.models.resume import Resume, ResumeScore
@@ -139,6 +139,11 @@ async def upload_resume(
         text_content=text_content,
         word_count=word_count,
         status="ready",
+        # Persist the original bytes so the Resume Score page can render
+        # an inline preview (PDF iframe / DOCX download). Pre-b8c9d0e1f2g3
+        # the bytes were thrown away after extraction; new uploads keep
+        # them. The 5 MB upload cap above bounds the column size.
+        file_data=file_bytes,
     )
     db.add(resume)
     await db.flush()  # flush to DB so FK constraint is satisfied
@@ -199,6 +204,10 @@ async def upload_resume(
         "uploaded_at": resume.uploaded_at.isoformat(),
         "text_preview": text_content[:500] if text_content else "",
         "is_active": str(user.active_resume_id) == str(resume.id),
+        # Always True for fresh uploads — the bytes were just persisted.
+        # Surfaced so the frontend can render the Preview button without
+        # a second round-trip to /resume to re-fetch the list.
+        "has_file_data": True,
     }
 
 
@@ -297,6 +306,15 @@ async def get_active_resume(
         .where(ResumeScore.resume_id == resume.id, ResumeScore.overall_score >= 70)
     )).scalar() or 0
 
+    # Cheap NULL probe — same pattern as ``list_resumes``. Avoids
+    # un-deferring the BYTEA column on the main row load.
+    has_file_data = (await db.execute(
+        select(Resume.id).where(
+            Resume.id == resume.id,
+            Resume.file_data.isnot(None),
+        )
+    )).scalar_one_or_none() is not None
+
     return {
         "active_resume": {
             "id": str(resume.id),
@@ -306,6 +324,7 @@ async def get_active_resume(
             "word_count": resume.word_count,
             "status": resume.status,
             "uploaded_at": resume.uploaded_at.isoformat(),
+            "has_file_data": has_file_data,
             "score_summary": {
                 "jobs_scored": score_stats[0] or 0,
                 "average_score": round(float(score_stats[1]), 1) if score_stats[1] else 0.0,
@@ -322,6 +341,106 @@ async def get_active_resume(
                 ),
             },
         }
+    }
+
+
+@router.get("/{resume_id}/file")
+async def get_resume_file(
+    resume_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream the original uploaded resume bytes for in-app preview.
+
+    Loaded by the Resume Score page Preview modal — PDFs render in an
+    iframe (browsers handle ``application/pdf`` inline by default),
+    DOCX rows trigger a download (no native browser viewer for DOCX).
+
+    Auth: cookie JWT — same-origin iframe inherits credentials, so the
+    frontend can use this URL directly as ``<iframe src=...>``.
+
+    Returns 410 Gone when ``file_data IS NULL`` (legacy rows uploaded
+    before b8c9d0e1f2g3 added the column). The frontend translates 410
+    into a "Re-upload to enable preview" hint plus a fallback view of
+    the extracted ``text_content``.
+
+    ``Content-Disposition: inline`` keeps the PDF rendering in-place;
+    the filename hint is only used if the user picks "Save as".
+    """
+    # Need to un-defer ``file_data`` for THIS query only — the model
+    # default is deferred so list/active queries don't pay the BYTEA
+    # cost.
+    resume = (await db.execute(
+        select(Resume)
+        .options(undefer(Resume.file_data))
+        .where(Resume.id == resume_id, Resume.user_id == user.id)
+    )).scalar_one_or_none()
+    if not resume:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    if not resume.file_data:
+        # 410 Gone — distinguishes "this resume exists but its bytes
+        # aren't stored" from "no such resume" (404). Lets the UI render
+        # the right empty state.
+        raise HTTPException(
+            status_code=410,
+            detail="Original file is not stored for this resume. "
+                   "Re-upload to enable preview.",
+        )
+
+    media_type = (
+        "application/pdf"
+        if resume.file_type == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    # ``inline`` so PDFs render in-iframe; ``filename`` only kicks in
+    # when the user explicitly downloads (Ctrl+S / "Save as").
+    safe_name = (resume.filename or f"resume.{resume.file_type}").replace('"', "")
+    return Response(
+        content=resume.file_data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            # The bytes never change for a given resume id (uploads are
+            # immutable — re-upload creates a new row). Letting the
+            # browser cache aggressively makes preview re-opens instant.
+            # Private + must-revalidate so a shared CDN can't serve one
+            # user's resume to another.
+            "Cache-Control": "private, max-age=3600, must-revalidate",
+        },
+    )
+
+
+@router.get("/{resume_id}/text")
+async def get_resume_text(
+    resume_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the extracted plaintext used by the scorer.
+
+    Powers two flows:
+
+      * Fallback for legacy resumes (no ``file_data``) — the Preview
+        modal falls back to this when ``GET /resume/{id}/file`` returns
+        410.
+      * Operator debugging — when a score looks wrong, knowing exactly
+        what plain text the scoring pipeline saw is the fastest path
+        to "the PDF extractor mangled this section".
+
+    The full ``text_content`` lives on the row already; this is just a
+    convenient JSON shape and a safe place to apply per-user auth.
+    """
+    resume = (await db.execute(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == user.id)
+    )).scalar_one_or_none()
+    if not resume:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    return {
+        "id": str(resume.id),
+        "filename": resume.filename,
+        "file_type": resume.file_type,
+        "word_count": resume.word_count,
+        "text": resume.text_content or "",
     }
 
 
@@ -384,6 +503,23 @@ async def list_resumes(
 
     result = await db.execute(query)
     resumes = result.unique().scalars().all()
+    # Cheap "do we have the original bytes?" probe — selects only the
+    # ids that have a non-NULL ``file_data`` so the iteration below can
+    # set ``has_file_data`` without un-deferring the BYTEA column on
+    # every row (which would defeat the whole point of ``deferred=True``
+    # on the model). Two SELECTs vs. dragging the bytes through the
+    # serializer is the right trade.
+    has_file_ids: set[str] = set()
+    if resumes:
+        ids = [r.id for r in resumes]
+        rows = (await db.execute(
+            select(Resume.id).where(
+                Resume.id.in_(ids),
+                Resume.file_data.isnot(None),
+            )
+        )).scalars().all()
+        has_file_ids = {str(rid) for rid in rows}
+
     items = [
         {
             "id": str(r.id),
@@ -394,6 +530,11 @@ async def list_resumes(
             "status": r.status,
             "uploaded_at": r.uploaded_at.isoformat(),
             "is_active": str(user.active_resume_id) == str(r.id) if user.active_resume_id else False,
+            # Tells the UI whether the Preview button can render an
+            # iframe of the original file. Legacy rows uploaded before
+            # b8c9d0e1f2g3 fall back to an extracted-text view in the
+            # frontend modal.
+            "has_file_data": str(r.id) in has_file_ids,
             **({"owner_name": r.owner.name, "owner_email": r.owner.email}
                if all_users and user.role in ("admin", "super_admin") and hasattr(r, "owner") and r.owner else {}),
         }

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey, JSON, Float, Integer, Text, Boolean
+from sqlalchemy import String, DateTime, ForeignKey, JSON, Float, Integer, Text, Boolean, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -17,6 +17,18 @@ class Resume(Base):
     word_count: Mapped[int] = mapped_column(Integer, default=0)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     status: Mapped[str] = mapped_column(String(50), default="processing")  # processing | ready | error
+
+    # Original file bytes (PDF or DOCX) for the in-app preview on the
+    # Resume Score page. Up to 5 MB per row (enforced by the upload
+    # handler). DEFERRED so list/active queries don't pull the bytes —
+    # only the dedicated ``GET /resume/{id}/file`` endpoint touches this
+    # column, where ``undefer(Resume.file_data)`` is invoked explicitly.
+    # Nullable for backward compatibility with rows uploaded before the
+    # b8c9d0e1f2g3 migration; those resumes fall back to a text-only
+    # preview in the UI.
+    file_data: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, deferred=True
+    )
 
     owner: Mapped["User"] = relationship(foreign_keys=[user_id])
     scores: Mapped[list["ResumeScore"]] = relationship(back_populates="resume", cascade="all, delete-orphan")

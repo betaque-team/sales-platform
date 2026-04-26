@@ -592,6 +592,36 @@ export async function deleteResume(id: string): Promise<void> {
   return request<void>(`/resume/${id}`, { method: "DELETE" });
 }
 
+/**
+ * Build the URL the browser should hit to render the original uploaded
+ * resume bytes inline. The cookie JWT travels automatically since the
+ * URL is same-origin (or proxied to backend in dev) — pass straight to
+ * ``<iframe src=...>`` for PDFs, or ``<a href=... download>`` for DOCX
+ * downloads. Returns a string, not a fetch — the browser owns the
+ * request lifecycle, not TanStack Query.
+ */
+export function getResumeFileUrl(resumeId: string): string {
+  return `${BASE_URL}/resume/${resumeId}/file`;
+}
+
+/**
+ * Fetch the extracted plaintext for a resume. Used by the Preview modal
+ * fallback when the original bytes aren't stored (legacy rows pre-dating
+ * the b8c9d0e1f2g3 migration) and when the user wants to inspect what
+ * the scorer actually sees.
+ */
+export async function getResumeText(
+  resumeId: string,
+): Promise<{ id: string; filename: string; file_type: string; word_count: number; text: string }> {
+  return request<{
+    id: string;
+    filename: string;
+    file_type: string;
+    word_count: number;
+    text: string;
+  }>(`/resume/${resumeId}/text`);
+}
+
 export async function scoreResume(resumeId: string): Promise<{ task_id: string; resume_id: string; status: string; message: string }> {
   return request<{ task_id: string; resume_id: string; status: string; message: string }>(`/resume/${resumeId}/score`, { method: "POST" });
 }

@@ -521,6 +521,12 @@ export interface Resume {
   uploaded_at: string;
   text_preview?: string;
   is_active?: boolean;
+  // Whether the original uploaded bytes are stored (b8c9d0e1f2g3+).
+  // Drives the Preview button's behaviour: true → render the file via
+  // ``GET /resume/{id}/file``; false → fall back to the extracted-text
+  // view (legacy resumes). Optional for older API responses that
+  // pre-date the migration; treat ``undefined`` as ``false``.
+  has_file_data?: boolean;
 }
 
 export interface ResumeScore {
@@ -724,6 +730,7 @@ export interface ActiveResume {
   word_count: number;
   status: string;
   uploaded_at: string;
+  has_file_data?: boolean;
   score_summary: {
     jobs_scored: number;
     average_score: number;

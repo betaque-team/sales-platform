@@ -17,6 +17,10 @@ import {
   ArrowUpDown,
   Edit3,
   Check,
+  Eye,
+  X,
+  Download,
+  AlertCircle,
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
@@ -34,8 +38,10 @@ import {
   customizeResume,
   switchResume,
   updateResumeLabel,
+  getResumeFileUrl,
+  getResumeText,
 } from "@/lib/api";
-import type { ResumeScore, ResumeCustomization } from "@/lib/types";
+import type { Resume, ResumeScore, ResumeCustomization } from "@/lib/types";
 
 function ScoreBreakdownBar({ label, score, color }: { label: string; score: number; color: string }) {
   return (
@@ -338,6 +344,12 @@ export function ResumeScorePage() {
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [labelInput, setLabelInput] = useState("");
 
+  // Resume currently shown in the preview modal. ``null`` = closed. We
+  // hold the whole row (not just the id) so the modal title + filename
+  // + ``has_file_data`` flag survive a list refetch that might happen
+  // while the modal is open.
+  const [previewResume, setPreviewResume] = useState<Resume | null>(null);
+
   const switchMutation = useMutation({
     mutationFn: (resumeId: string) => switchResume(resumeId),
     onSuccess: () => {
@@ -488,6 +500,21 @@ export function ResumeScorePage() {
                               Set Active
                             </button>
                           )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPreviewResume(r);
+                            }}
+                            className="p-1 text-gray-400 hover:text-primary-600"
+                            aria-label="Preview resume"
+                            title={
+                              r.has_file_data
+                                ? "Preview the original file"
+                                : "Preview extracted text (original file not stored)"
+                            }
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                          </button>
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -848,6 +875,251 @@ export function ResumeScorePage() {
           )}
         </div>
       </div>
+
+      {/* Resume preview overlay — see the originally-uploaded file
+          (PDF inline, DOCX as a download), or fall back to extracted
+          text when ``has_file_data`` is false. Mounted at the page
+          root so the backdrop covers the whole viewport. */}
+      {previewResume && (
+        <ResumePreviewModal
+          resume={previewResume}
+          onClose={() => setPreviewResume(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Resume preview modal
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Inline viewer for the originally-uploaded resume.
+ *
+ * Three render branches:
+ *
+ *   1. ``has_file_data && file_type === "pdf"`` — render an iframe
+ *      pointing at ``GET /resume/{id}/file``. The browser handles
+ *      ``application/pdf`` natively (PDF.js or built-in viewer); cookie
+ *      auth travels with the iframe request because the URL is
+ *      same-origin.
+ *
+ *   2. ``has_file_data && file_type === "docx"`` — browsers don't
+ *      render DOCX inline, so show a download button + the extracted
+ *      text view as a secondary "what's in this file" preview. The
+ *      Word app on the user's machine opens the downloaded file.
+ *
+ *   3. ``!has_file_data`` — legacy resume uploaded before the bytes
+ *      were persisted. Show a one-liner explainer + the extracted
+ *      text view (which we still have). The user can re-upload to
+ *      enable the rich preview.
+ */
+function ResumePreviewModal({
+  resume,
+  onClose,
+}: {
+  resume: Resume;
+  onClose: () => void;
+}) {
+  // Lazy-fetch extracted text only when we need the fallback view —
+  // PDFs render directly from the iframe, no JSON round-trip needed.
+  // For DOCX and legacy rows we always want it, so the gate is
+  // "render mode != pdf".
+  const wantsText = !resume.has_file_data || resume.file_type === "docx";
+  const textQ = useQuery({
+    queryKey: ["resume-text", resume.id],
+    queryFn: () => getResumeText(resume.id),
+    enabled: wantsText,
+    staleTime: 5 * 60_000,
+  });
+
+  // Esc closes — one-key dismissal is the operator-friendly default
+  // for any modal that doesn't ask for input.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const fileUrl = getResumeFileUrl(resume.id);
+  const titleFile = resume.label || resume.filename;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Preview of ${titleFile}`}
+    >
+      <div
+        // Stop propagation so clicks inside the panel don't fire the
+        // backdrop's onClose.
+        onClick={(e) => e.stopPropagation()}
+        className="flex h-[90vh] w-full max-w-4xl flex-col rounded-lg bg-white shadow-2xl"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-sm font-semibold text-gray-900">
+              {titleFile}
+            </h2>
+            <p className="truncate text-xs text-gray-500">
+              {resume.filename} · {resume.file_type.toUpperCase()} ·{" "}
+              {resume.word_count.toLocaleString()} words
+            </p>
+          </div>
+          <div className="ml-3 flex items-center gap-2">
+            {resume.has_file_data && (
+              <a
+                href={fileUrl}
+                download={resume.filename}
+                className="inline-flex items-center gap-1 rounded border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                title="Download the original file"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </a>
+            )}
+            <button
+              onClick={onClose}
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+              aria-label="Close preview"
+              title="Close (Esc)"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Body — branch on capability */}
+        <div className="flex-1 overflow-hidden">
+          {resume.has_file_data && resume.file_type === "pdf" ? (
+            // Browsers render application/pdf inline; cookie JWT goes
+            // with the iframe request automatically (same-origin). The
+            // ``title`` attribute satisfies the iframe a11y rule.
+            <iframe
+              src={fileUrl}
+              title={`PDF preview of ${titleFile}`}
+              className="h-full w-full border-0"
+            />
+          ) : resume.has_file_data && resume.file_type === "docx" ? (
+            <DocxFallback
+              fileUrl={fileUrl}
+              filename={resume.filename}
+              text={textQ.data?.text}
+              loading={textQ.isLoading}
+              error={textQ.isError ? (textQ.error as Error)?.message : null}
+            />
+          ) : (
+            <LegacyTextFallback
+              text={textQ.data?.text}
+              loading={textQ.isLoading}
+              error={textQ.isError ? (textQ.error as Error)?.message : null}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DocxFallback({
+  fileUrl,
+  filename,
+  text,
+  loading,
+  error,
+}: {
+  fileUrl: string;
+  filename: string;
+  text: string | undefined;
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-gray-100 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+        <span>
+          Browsers can't render DOCX inline — download to open in Word, or
+          read the extracted text below.
+        </span>
+        <a
+          href={fileUrl}
+          download={filename}
+          className="ml-auto inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-amber-700"
+        >
+          <Download className="h-3 w-3" />
+          Download .docx
+        </a>
+      </div>
+      <ExtractedTextView text={text} loading={loading} error={error} />
+    </div>
+  );
+}
+
+function LegacyTextFallback({
+  text,
+  loading,
+  error,
+}: {
+  text: string | undefined;
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-gray-100 bg-blue-50 px-5 py-2 text-xs text-blue-800">
+        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+        <span>
+          The original file isn't stored for this resume — re-upload it to
+          enable the inline file preview. Showing extracted text below.
+        </span>
+      </div>
+      <ExtractedTextView text={text} loading={loading} error={error} />
+    </div>
+  );
+}
+
+function ExtractedTextView({
+  text,
+  loading,
+  error,
+}: {
+  text: string | undefined;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-gray-400" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="p-5 text-sm text-red-600">
+        Failed to load extracted text: {error}
+      </div>
+    );
+  }
+  if (!text || !text.trim()) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-gray-400">
+        No extracted text available.
+      </div>
+    );
+  }
+  return (
+    <div className="h-full overflow-y-auto bg-gray-50 p-5">
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-gray-800">
+        {text}
+      </pre>
     </div>
   );
 }
