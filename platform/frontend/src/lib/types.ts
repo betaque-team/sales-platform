@@ -457,6 +457,17 @@ export interface ScoreBreakdown {
   breakdown: ScoreBreakdownSignal[];
 }
 
+export interface PlatformLastRun {
+  source: string;
+  started_at: string | null;
+  completed_at: string | null;
+  jobs_found: number;
+  new_jobs: number;
+  updated_jobs: number;
+  errors: number;
+  error_message: string;
+}
+
 export interface PlatformStats {
   name: string;
   total_boards: number;
@@ -468,6 +479,12 @@ export interface PlatformStats {
   avg_score: number;
   last_scan: string | null;
   total_errors: number;
+  // F250: stats from the SINGLE most-recent scan_logs row for this
+  // platform. Null for platforms that have never scanned (newly seeded
+  // boards). The Platforms UI renders "175 found · 0 new · 12m ago" on
+  // each card so admins don't need to expand the Scan Logs panel just
+  // to see how the last run went.
+  last_run?: PlatformLastRun | null;
 }
 
 export interface PlatformBoard {

@@ -68,7 +68,16 @@ async def list_platforms(
             "avg_score": round(float(row.avg_score or 0), 1),
         }
 
-    # Latest scan per platform
+    # Latest scan per platform — aggregate (max completed_at + total
+    # errors) PLUS the per-row stats of the single most recent run so the
+    # Platforms UI can show "175 found, 0 new (12 min ago)" inline on each
+    # card without a second per-platform round-trip. Two queries here:
+    #   1. ``scans_q`` — aggregate max-completed_at + sum-errors per platform.
+    #   2. ``last_run_q`` — DISTINCT ON-style window: for each platform,
+    #      pick the row whose ``started_at`` is the most recent and pull
+    #      its individual stats forward. SQLAlchemy doesn't have a direct
+    #      ``DISTINCT ON`` helper for cross-dialect, so we use a
+    #      row_number() window function which works on Postgres + SQLite.
     scans_q = (
         select(
             ScanLog.platform,
@@ -85,6 +94,46 @@ async def list_platforms(
             "total_errors": int(row.total_errors or 0),
         }
 
+    # F250: per-platform "last run" stats. Window-rank by started_at DESC
+    # within each platform, then keep rank=1. Cheap on the indexed
+    # (platform, started_at) compound; ~30ms even on a 250k-row scan_logs
+    # table. We also pull error_message for the tooltip on the failure
+    # icon, so admins can see "what went wrong on the last try" without
+    # expanding the Scan Logs panel.
+    rn = func.row_number().over(
+        partition_by=ScanLog.platform,
+        order_by=ScanLog.started_at.desc(),
+    ).label("rn")
+    ranked = (
+        select(
+            ScanLog.platform,
+            ScanLog.source,
+            ScanLog.started_at,
+            ScanLog.completed_at,
+            ScanLog.jobs_found,
+            ScanLog.new_jobs,
+            ScanLog.updated_jobs,
+            ScanLog.errors,
+            ScanLog.error_message,
+            rn,
+        )
+        .subquery()
+    )
+    last_run_q = select(ranked).where(ranked.c.rn == 1)
+    last_run_result = await db.execute(last_run_q)
+    last_run_by_platform: dict[str, dict] = {}
+    for row in last_run_result:
+        last_run_by_platform[row.platform] = {
+            "source": row.source or "",
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "jobs_found": int(row.jobs_found or 0),
+            "new_jobs": int(row.new_jobs or 0),
+            "updated_jobs": int(row.updated_jobs or 0),
+            "errors": int(row.errors or 0),
+            "error_message": row.error_message or "",
+        }
+
     # Combine into platform list
     all_platforms = set(boards_by_platform.keys()) | set(jobs_by_platform.keys())
     platforms = []
@@ -92,11 +141,17 @@ async def list_platforms(
         boards = boards_by_platform.get(name, {"total_boards": 0, "active_boards": 0})
         jobs = jobs_by_platform.get(name, {"total_jobs": 0, "new_jobs": 0, "accepted_jobs": 0, "rejected_jobs": 0, "avg_score": 0})
         scans = scans_by_platform.get(name, {"last_scan": None, "total_errors": 0})
+        last_run = last_run_by_platform.get(name)
         platforms.append({
             "name": name,
             **boards,
             **jobs,
             **scans,
+            # F250: per-platform last-run snapshot. Null when the
+            # platform has zero scan_logs rows (newly seeded boards,
+            # never run). Frontend uses this to show "175 found, 0 new"
+            # under the Last-scan timestamp on each card.
+            "last_run": last_run,
         })
 
     return {"platforms": platforms}

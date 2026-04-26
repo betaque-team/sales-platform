@@ -76,7 +76,15 @@ function formatTime(iso: string | null) {
 export function PlatformsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  // Mirror the backend role hierarchy: ``super_admin > admin > reviewer
+  // > viewer`` (see app/api/deps.py::ROLE_HIERARCHY). Pre-fix the
+  // strict equality ``user?.role === "admin"`` excluded super_admin
+  // users from every admin button on this page (Boards / Scan Logs /
+  // trigger-scan / add / delete) — they could see the platform cards
+  // but not interact, even though the backend handlers correctly let
+  // them through. ``["admin","super_admin"].includes(role)`` brings the
+  // frontend gate in line with what the backend actually permits.
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
 
   const [activeTab, setActiveTab] = useState<"boards" | "discovered">("boards");
   const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
@@ -416,17 +424,57 @@ export function PlatformsPage() {
                 </div>
               </div>
 
+              {/* F250: per-platform "last run" inline summary. Pre-fix
+                  the only signal here was a relative timestamp ("4h ago")
+                  which left admins guessing what came back from that
+                  run — was it 175 jobs, 0 jobs with an error, a fresh
+                  scan that found 0 new because nothing posted?  Now the
+                  card shows ``found · new (Xm ago)`` from the actual
+                  most-recent ScanLog row. Falls back to the legacy
+                  timestamp-only line when the backend doesn't supply
+                  ``last_run`` (older API), so old client/new server and
+                  vice-versa both render cleanly. */}
               <div className="mt-3 flex items-center justify-between border-t border-gray-100 pt-3">
                 <div className="flex items-center gap-1.5 text-xs text-gray-500">
                   <Clock className="h-3 w-3" />
-                  Last scan: {formatTime(p.last_scan)}
+                  {p.last_run ? (
+                    <span>
+                      Last run:{" "}
+                      <span className="font-medium text-gray-700">
+                        {p.last_run.jobs_found.toLocaleString()} found
+                      </span>
+                      {p.last_run.new_jobs > 0 && (
+                        <>
+                          {" · "}
+                          <span className="font-medium text-green-600">
+                            {p.last_run.new_jobs.toLocaleString()} new
+                          </span>
+                        </>
+                      )}
+                      {" · "}
+                      <span>{formatTime(p.last_run.completed_at || p.last_run.started_at)}</span>
+                    </span>
+                  ) : (
+                    <span>Last scan: {formatTime(p.last_scan)}</span>
+                  )}
                 </div>
-                {p.total_errors > 0 && (
-                  <div className="flex items-center gap-1 text-xs text-red-500">
+                {(p.last_run?.errors ?? 0) > 0 ? (
+                  <div
+                    className="flex items-center gap-1 text-xs text-red-500"
+                    title={p.last_run?.error_message || "Last run had errors"}
+                  >
                     <AlertCircle className="h-3 w-3" />
-                    {p.total_errors} errors
+                    {p.last_run?.errors} err
                   </div>
-                )}
+                ) : p.total_errors > 0 ? (
+                  <div
+                    className="flex items-center gap-1 text-xs text-amber-600"
+                    title="Cumulative errors across all scans (last run was clean)"
+                  >
+                    <AlertCircle className="h-3 w-3" />
+                    {p.total_errors} total
+                  </div>
+                ) : null}
               </div>
             </div>
 
