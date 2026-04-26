@@ -73,9 +73,15 @@ export interface Job {
   geography_bucket: "global_remote" | "usa_only" | "uae_only";
   tags: string[];
   resume_score?: number | null;
-  // Team-wide best resume fit — set by /jobs/review-queue (see the
-  // handler comment in backend/app/api/v1/jobs.py for the ordering
-  // tier it drives). `null` means no resume has scored this job yet.
+  // The CURRENT reviewer's active-resume fit — set by /jobs/review-queue
+  // (per-user score after F248; pre-fix this was MAX across every team
+  // resume which surfaced wrong-role jobs to the wrong reviewer). `null`
+  // means the reviewer's active resume hasn't been scored against this
+  // job yet — the daily ``rescore_active_resumes`` task will populate.
+  your_resume_score?: number | null;
+  // Backward-compat alias for ``your_resume_score``. Older clients +
+  // tabs opened before the F248 deploy may still read this key. Set to
+  // the same per-reviewer value, NOT the team-wide max.
   max_resume_score?: number | null;
   first_seen_at?: string;
   // F97/F101: true when the backend has a populated JobDescription

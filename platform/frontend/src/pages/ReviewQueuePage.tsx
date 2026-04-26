@@ -276,10 +276,10 @@ export function ReviewQueuePage() {
               <span className="text-xs text-gray-500">Relevance:</span>
               <ScoreBar score={currentJob.relevance_score} />
             </div>
-            {typeof currentJob.max_resume_score === "number" && (
+            {typeof (currentJob.your_resume_score ?? currentJob.max_resume_score) === "number" && (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500">Best resume fit:</span>
-                <ScoreBar score={currentJob.max_resume_score} />
+                <span className="text-xs text-gray-500">Your resume fit:</span>
+                <ScoreBar score={(currentJob.your_resume_score ?? currentJob.max_resume_score) as number} />
               </div>
             )}
             {currentJob.role_cluster && <Badge variant="primary">{currentJob.role_cluster}</Badge>}
