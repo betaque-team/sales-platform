@@ -31,7 +31,20 @@ RUN pip install --no-cache-dir \
     "anthropic>=0.40" \
     "beautifulsoup4>=4.12" \
     "dnspython>=2.6" \
-    "bcrypt>=4.2"
+    "bcrypt>=4.2" \
+    "playwright>=1.45" \
+    "playwright-stealth>=2.0"
+
+# F254: install Chromium + the system libs it needs for headless rendering.
+# Used by ``app.services.playwright_browser`` for two surfaces:
+#   - scraping ATS sites that 403 plain httpx (Wellfound's DataDome wall)
+#   - filling + submitting application forms in the v6 Apply Routine
+# We pin to Chromium only (not Firefox or WebKit) to keep the image small
+# — adds ~280 MB to the layer; full multi-browser would be ~900 MB.
+# ``--with-deps`` pulls the apt packages Chromium needs (libnss3, libxkbcommon,
+# fonts, etc.); separating it from the Python install keeps Docker's layer
+# cache hits useful when only pyproject.toml changes.
+RUN playwright install --with-deps chromium
 
 # Copy app
 COPY alembic.ini .
