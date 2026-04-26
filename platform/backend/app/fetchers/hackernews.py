@@ -196,10 +196,27 @@ class HackerNewsFetcher(BaseFetcher):
 
     def _should_skip(self, thread: dict) -> bool:
         """Return True if the thread's ``descendants`` count matches
-        a previously-cached value — no new comments, nothing to do.
+        a previously-cached SUCCESSFUL fetch — no new comments,
+        nothing to do.
 
         Cache key: ``hn:whoishiring:{thread_id}:descendants`` ·
         TTL: 45 days (threads stop gaining comments after ~30 days).
+
+        F251 cache schema bump: cached value is now a JSON dict
+        ``{"descendants": N, "ok": true}`` (was a raw int). A pre-F249
+        deploy could write the int form when a 0-job parse occurred,
+        which permanently locked the fetcher into the short-circuit
+        path until upstream descendants changed. The new schema:
+
+          - missing key                      → fall through, fetch
+          - JSON dict with ``ok=true``        → trust, maybe skip
+          - JSON dict with ``ok=false``       → never skip; re-fetch
+          - raw int (legacy / poisoned)       → treat as untrusted;
+                                                refetch + overwrite
+          - any unparseable value             → safe-default to refetch
+
+        The legacy-int branch is what auto-heals the existing poisoned
+        cache in prod without needing a manual Redis flush.
         """
         r = self._get_redis()
         if r is None:
@@ -212,19 +229,55 @@ class HackerNewsFetcher(BaseFetcher):
             return False
         if cached is None:
             return False
-        try:
-            cached_val = int(cached)
-        except (TypeError, ValueError):
-            return False
-        return cached_val == thread["descendants"]
 
-    def _remember_descendants(self, thread: dict) -> None:
+        # New JSON-dict schema. ``ok=False`` means the prior fetch came
+        # back empty — never short-circuit on that.
+        import json
+        try:
+            payload = json.loads(cached.decode() if isinstance(cached, (bytes, bytearray)) else cached)
+        except (TypeError, ValueError, AttributeError):
+            payload = None
+
+        if isinstance(payload, dict):
+            if not payload.get("ok"):
+                logger.info(
+                    "HN cache marked ok=False for thread %s — refetching",
+                    thread["id"],
+                )
+                return False
+            cached_descendants = payload.get("descendants")
+            if isinstance(cached_descendants, int) and cached_descendants == thread["descendants"]:
+                return True
+            return False
+
+        # Legacy / poisoned int form: treat as untrusted, force refetch.
+        # The next ``_remember_descendants`` call will overwrite it with
+        # the new JSON-dict schema, so this branch self-heals on first hit.
+        logger.info(
+            "HN cache for thread %s in legacy int format (%r) — refetching to upgrade schema",
+            thread["id"], cached,
+        )
+        return False
+
+    def _remember_descendants(self, thread: dict, ok: bool) -> None:
+        """Cache the descendants count + success flag.
+
+        ``ok=True`` is set when ``len(jobs) > 0`` — the steady-state
+        happy path that benefits from the rate-limit short-circuit.
+        ``ok=False`` is set on a 0-job run so the next tick re-attempts
+        the full fetch (self-healing instead of permanently stuck).
+        """
         r = self._get_redis()
         if r is None:
             return
         key = f"hn:whoishiring:{thread['id']}:descendants"
+        import json
         try:
-            r.set(key, thread["descendants"], ex=45 * 24 * 3600)
+            r.set(
+                key,
+                json.dumps({"descendants": int(thread["descendants"]), "ok": bool(ok)}),
+                ex=45 * 24 * 3600,
+            )
         except Exception as exc:
             logger.warning("HN Redis set failed (%s) — cache will miss next run", exc)
 
@@ -436,32 +489,21 @@ class HackerNewsFetcher(BaseFetcher):
             "HN whoishiring: thread %s → %d jobs (skipped %d unparseable of %d)",
             thread["id"], len(jobs), skipped_parse, len(kids),
         )
-        # F249 regression fix: only cache the descendants count when we
-        # actually emitted at least one job. A 0-job result is highly
-        # suspicious — it means either the parser regressed across the
-        # board, the upstream API returned mostly deleted comments, or
-        # we hit a transient failure mid-fetch and Celery retried but
-        # we'd already pushed empty results forward. Pre-fix the cache
-        # was set unconditionally, so a single dry run silently locked
-        # the fetcher into a "nothing new" short-circuit until the
-        # thread's descendants count changed upstream — which on
-        # multi-week-old threads can be hours/days. Live verification
-        # on 2026-04-26: HN had been registered for hours, every scan
-        # returned 0 jobs (cache hit), prod ``hackernews`` platform had
-        # zero rows in ``Job``. Refusing to cache the empty result
-        # makes the next scheduled tick re-attempt the full fetch.
-        # Real successful runs (the steady-state happy path) still get
-        # the rate-limit benefit because they emit jobs.
-        if jobs:
-            self._remember_descendants(thread)
-        else:
+        # F249 + F251: cache the run with ``ok=`` reflecting whether we
+        # actually emitted jobs. The next ``_should_skip`` call refuses
+        # to short-circuit on ``ok=False`` so a transient zero-result run
+        # is self-healing — the next tick retries instead of getting
+        # permanently stuck until upstream descendants change. A 0-job
+        # WARNING also lands in container logs so persistent zeros are
+        # visible without inspecting Redis state.
+        if not jobs:
             logger.warning(
                 "HN whoishiring: thread %s emitted 0 jobs (skipped %d of %d) — "
-                "NOT caching descendants so the next tick retries. If this "
-                "persists across multiple ticks the parser likely needs "
-                "investigation.",
+                "caching ok=False so next tick retries. If this persists "
+                "the parser likely needs investigation.",
                 thread["id"], skipped_parse, len(kids),
             )
+        self._remember_descendants(thread, ok=bool(jobs))
         return jobs
 
     # Mandatory override of `_normalize` since the base flags it
