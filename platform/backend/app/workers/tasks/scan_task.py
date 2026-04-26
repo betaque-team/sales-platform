@@ -477,6 +477,26 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
         raw_jobs = fetcher.fetch(board.slug)
         stats["jobs_found"] = len(raw_jobs)
 
+        # F252 diagnostic plumbing: when a fetcher exposes
+        # ``last_diagnostic`` (HackerNewsFetcher does today; future
+        # aggregator fetchers can opt in by setting the same
+        # attribute), persist its hint to ``ScanLog.error_message``
+        # for any 0-job run. ``error_message`` doubles as a debug
+        # channel for "why was this scan empty?" in the admin
+        # Scan Logs UI without needing SSH access to container logs.
+        # No-op for fetchers that don't set the attribute, and
+        # never overwrites a real error_message set later in the
+        # except block (we only populate when stats["error_message"]
+        # is still empty AND raw_jobs is empty).
+        diagnostic = getattr(fetcher, "last_diagnostic", None)
+        if not raw_jobs and diagnostic and not stats.get("error_message"):
+            import json as _json
+            try:
+                hint = _json.dumps(diagnostic, default=str)[:500]
+            except Exception:
+                hint = str(diagnostic)[:500]
+            stats["error_message"] = f"diagnostic: {hint}"
+
         # Aggregator platforms fetch jobs from many companies — resolve per-job
         # "hackernews" and "yc_waas" also register as aggregators:
         # each uses a single synthetic board (slug=`__all__`) where

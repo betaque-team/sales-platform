@@ -103,6 +103,21 @@ class HackerNewsFetcher(BaseFetcher):
     def __init__(self, client: httpx.Client | None = None, redis_client: Any = None):
         super().__init__(client=client)
         self._redis = redis_client
+        # F252 diagnostic: populated by ``fetch()`` on every exit so
+        # callers (scan_task) can persist the WHY behind a 0-job run
+        # without parsing logs. Shape:
+        #   {
+        #     "exit_path": "no_thread" | "cache_skip" | "no_kids" | "fetched",
+        #     "thread_id": "...",
+        #     "descendants": int,
+        #     "kids_total": int,
+        #     "kids_fetched": int,
+        #     "skipped_parse": int,
+        #     "emitted": int,
+        #     "note": "human-readable hint"
+        #   }
+        # Reset at the top of every ``fetch()`` call.
+        self.last_diagnostic: dict[str, Any] = {}
 
     def _get_redis(self) -> Any:
         """Lazy-get a Redis client for the descendants cache.
@@ -446,11 +461,24 @@ class HackerNewsFetcher(BaseFetcher):
         convention is to register a single board with slug
         ``__all__``. Returning ``[]`` is always safe: either no new
         comments since last run, or an upstream error we've logged.
+
+        F252 diagnostic: every exit populates ``self.last_diagnostic``
+        with structured info so scan_task can persist a human-readable
+        hint to ``ScanLog.error_message`` when the fetcher returns
+        empty. This makes it possible to see WHY HN ran 1-second-
+        no-jobs runs in prod without SSH access to logs.
         """
+        # Reset diagnostic on every call.
+        self.last_diagnostic = {}
+
         client = self._get_client()
         thread = self._find_latest_thread(client)
         if not thread:
             logger.info("HN whoishiring: no thread found")
+            self.last_diagnostic = {
+                "exit_path": "no_thread",
+                "note": "Algolia returned no whoishiring stories or thread head fetch failed",
+            }
             return []
 
         if self._should_skip(thread):
@@ -458,6 +486,18 @@ class HackerNewsFetcher(BaseFetcher):
                 "HN whoishiring: thread %s unchanged (descendants=%d) — skip",
                 thread["id"], thread["descendants"],
             )
+            self.last_diagnostic = {
+                "exit_path": "cache_skip",
+                "thread_id": thread["id"],
+                "descendants": thread["descendants"],
+                "note": (
+                    "cache says descendants unchanged + ok=True — short-"
+                    "circuiting. If the platform has 0 jobs in DB but "
+                    "this keeps firing, the cache was poisoned by a "
+                    "prior 0-job run with ok=true (shouldn't be possible "
+                    "post-F249/F251 — investigate)."
+                ),
+            }
             return []
 
         kids = thread["kids"][:_MAX_KIDS_PER_RUN]
@@ -489,6 +529,20 @@ class HackerNewsFetcher(BaseFetcher):
             "HN whoishiring: thread %s → %d jobs (skipped %d unparseable of %d)",
             thread["id"], len(jobs), skipped_parse, len(kids),
         )
+        self.last_diagnostic = {
+            "exit_path": "fetched",
+            "thread_id": thread["id"],
+            "descendants": thread["descendants"],
+            "kids_total": len(thread["kids"]),
+            "kids_fetched": len(kids),
+            "skipped_parse": skipped_parse,
+            "emitted": len(jobs),
+            "note": (
+                "fetched + parsed; emitted N of K kids. If emitted=0 "
+                "and kids_fetched > 0, the parser is dropping every "
+                "comment — investigate the comment shape on this thread."
+            ) if len(jobs) == 0 else "healthy",
+        }
         # F249 + F251: cache the run with ``ok=`` reflecting whether we
         # actually emitted jobs. The next ``_should_skip`` call refuses
         # to short-circuit on ``ok=False`` so a transient zero-result run
