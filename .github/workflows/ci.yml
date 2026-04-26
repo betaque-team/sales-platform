@@ -80,7 +80,15 @@ jobs:
             "pdfplumber>=0.11" "python-docx>=1.1" "anthropic>=0.40" \
             "beautifulsoup4>=4.12" "dnspython>=2.6" \
             "bcrypt>=4.2" \
+            "playwright>=1.45" \
+            "playwright-stealth>=2.0" \
             pytest pytest-asyncio
+          # F254: install Chromium so any test that imports the playwright
+          # service module doesn't blow up at the ``async_playwright()``
+          # call. Browser-driving tests (if any) are mocked at the
+          # ``BrowserSession`` boundary, so this is precaution against
+          # an accidental import-time launch by a future test.
+          playwright install --with-deps chromium
 
       - name: Bootstrap DB schema (create_all + alembic stamp head)
         # Why not ``alembic upgrade head``? The first migration

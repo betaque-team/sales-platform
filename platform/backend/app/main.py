@@ -79,7 +79,19 @@ async def _seed_remote_companies_if_enabled() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _seed_remote_companies_if_enabled()
-    yield
+    try:
+        yield
+    finally:
+        # F254: shut Chromium down cleanly when the container rotates so
+        # we don't leak browser processes between deploys. ``shutdown_pool``
+        # is a no-op when nothing was ever launched, so this is safe even
+        # for backends that never touched Playwright (the ``api`` service —
+        # only ``celery-worker`` typically uses it for scrapes / applies).
+        try:
+            from app.services.playwright_browser import shutdown_pool
+            await shutdown_pool()
+        except Exception as exc:
+            logger.warning("playwright shutdown failed (non-fatal): %s", exc)
 
 
 app = FastAPI(
