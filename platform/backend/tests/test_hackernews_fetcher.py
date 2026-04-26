@@ -216,14 +216,21 @@ class _FakeRedis:
 
 def test_fetch_short_circuits_when_descendants_unchanged():
     """Cache-hit path: if the thread's `descendants` count matches
-    what we stored on the previous run, `fetch` returns [] without
-    fetching any comments. Protects HN Firebase from 500 unnecessary
-    HTTPS calls every 30 min during the quiet weeks of the month.
+    what we stored on the previous SUCCESSFUL run, `fetch` returns []
+    without fetching any comments. Protects HN Firebase from 500
+    unnecessary HTTPS calls every 30 min during the quiet weeks of
+    the month.
+
+    F251 cache schema: value is a JSON dict ``{descendants, ok}``.
+    Only ``ok=true`` runs are trusted for short-circuit.
     """
+    import json
     from app.fetchers.hackernews import HackerNewsFetcher
 
     fake_redis = _FakeRedis({
-        "hn:whoishiring:40000000:descendants": 523,
+        "hn:whoishiring:40000000:descendants": json.dumps(
+            {"descendants": 523, "ok": True}
+        ),
     })
 
     client = MagicMock()
@@ -268,8 +275,11 @@ def test_fetch_proceeds_when_descendants_changed():
     """
     from app.fetchers.hackernews import HackerNewsFetcher
 
+    import json
     fake_redis = _FakeRedis({
-        "hn:whoishiring:40000000:descendants": 10,  # stale
+        "hn:whoishiring:40000000:descendants": json.dumps(
+            {"descendants": 10, "ok": True}  # stale count, prior run was successful
+        ),
     })
 
     client = MagicMock()
@@ -332,8 +342,12 @@ def test_fetch_proceeds_when_descendants_changed():
     assert "Infra Engineer" in job["title"]
     assert job["url"] == "https://acme.example.com/careers"
     assert job["remote_scope"] == "remote"
-    # Cache was updated to the new descendants count.
-    assert int(fake_redis._store["hn:whoishiring:40000000:descendants"]) == 42
+    # Cache was updated to the new JSON-dict schema with the new
+    # descendants count and ok=True (run produced 1 job).
+    cached = fake_redis._store["hn:whoishiring:40000000:descendants"]
+    payload = json.loads(cached)
+    assert payload["descendants"] == 42
+    assert payload["ok"] is True
     # HN comment id propagated into raw_json.
     assert job["raw_json"]["hn_comment_id"] == "40000001"
     assert job["raw_json"]["hn_thread_id"] == "40000000"
@@ -407,15 +421,105 @@ def test_fetch_does_not_cache_descendants_when_zero_jobs_emitted():
     fetcher = HackerNewsFetcher(client=client, redis_client=fake_redis)
     jobs = fetcher.fetch("__all__")
 
-    # 0 jobs emitted — and crucially, the cache must NOT carry the
-    # descendants count forward, so the next tick retries.
+    # 0 jobs emitted. Under F251 we DO write the cache, but with
+    # ``ok=False`` — the next ``_should_skip`` will refuse to short-
+    # circuit on that flag. The cache key existing isn't enough to
+    # cause the regression; what matters is whether ``ok`` is True.
+    import json
     assert jobs == []
     cache_key = "hn:whoishiring:40000000:descendants"
-    assert cache_key not in fake_redis._store, (
-        f"F249: cache was poisoned with the descendants count after a "
-        f"zero-job run. Next scheduled tick would short-circuit and "
-        f"the fetcher would never recover until upstream descendants "
-        f"changed. Saw cache value: {fake_redis._store.get(cache_key)!r}"
+    cached = fake_redis._store.get(cache_key)
+    assert cached is not None, (
+        "Expected the cache to record the run with ok=False so the "
+        "tick cadence stays observable in Redis. Got missing key."
+    )
+    payload = json.loads(cached)
+    assert payload.get("ok") is False, (
+        f"F251: 0-job run must cache ok=False so next tick refetches. "
+        f"Got payload={payload!r}"
+    )
+
+
+def test_legacy_int_cache_value_triggers_refetch_and_schema_upgrade():
+    """F251 auto-heal — pre-F251 prod runs wrote the descendants count
+    as a raw int. Those rows can outlive the deploy that introduced
+    the JSON-dict schema. The new ``_should_skip`` must:
+
+      1. Recognise the legacy int form.
+      2. NOT short-circuit on it (untrusted).
+      3. Force a full fetch.
+      4. Overwrite the cache with the new JSON-dict schema after the
+         fetch completes, so subsequent ticks use the modern path.
+
+    This is the path that unsticks prod hackernews from a cache
+    poisoned by a pre-F249 0-job run, without needing manual Redis
+    intervention.
+    """
+    import json
+    from app.fetchers.hackernews import HackerNewsFetcher
+
+    # Legacy int form, descendants count matches upstream — pre-F251
+    # this would have been a hit-and-skip.
+    fake_redis = _FakeRedis({
+        "hn:whoishiring:40000000:descendants": "474",
+    })
+
+    client = MagicMock()
+
+    def _stub(url, params=None, timeout=None):  # noqa: ARG001
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        if "algolia" in url:
+            resp.json.return_value = {
+                "hits": [
+                    {
+                        "objectID": "40000000",
+                        "title": "Ask HN: Who is hiring? (April 2026)",
+                        "_tags": ["story", "author_whoishiring"],
+                        "created_at": "2026-04-01T00:00:00Z",
+                        "created_at_i": 1743465600,
+                    }
+                ]
+            }
+        elif url.endswith("/40000000.json"):
+            resp.json.return_value = {
+                "id": 40000000,
+                "title": "Ask HN: Who is hiring? (April 2026)",
+                "descendants": 474,  # SAME as legacy cache
+                "kids": [40000001],
+                "time": 1743465600,
+            }
+        elif url.endswith("/40000001.json"):
+            resp.json.return_value = {
+                "id": 40000001,
+                "by": "u",
+                "time": 1743466000,
+                "text": (
+                    "Acme | Senior Infra Engineer | Remote | "
+                    "<a href=\"https://acme.example.com/careers\">apply</a>"
+                ),
+            }
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    client.get.side_effect = _stub
+
+    fetcher = HackerNewsFetcher(client=client, redis_client=fake_redis)
+    jobs = fetcher.fetch("__all__")
+
+    # Despite the legacy int matching upstream descendants, the fetcher
+    # treats it as untrusted and DID fetch the comment.
+    assert len(jobs) == 1, (
+        "F251 regression: legacy int cache form short-circuited the "
+        "fetch, so prod stays stuck in the poisoned-cache state."
+    )
+    # And the cache has been upgraded to the new JSON-dict schema with
+    # ok=True (run produced 1 job).
+    cached_after = fake_redis._store["hn:whoishiring:40000000:descendants"]
+    payload = json.loads(cached_after)
+    assert payload == {"descendants": 474, "ok": True}, (
+        f"Expected schema upgrade on cache write; got {payload!r}"
     )
 
 
