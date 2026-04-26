@@ -493,3 +493,167 @@ def test_upload_doc_label_form_field_capped_to_column_width():
         f"max_length ({declared}). Keep them in sync or the bug pattern "
         "re-opens on the wider side."
     )
+
+
+def test_profile_update_rejects_explicit_null_for_not_null_columns():
+    """F242(a) regression — PATCH /profiles/{id} must 422, not 500,
+    when the body sets a NOT-NULL column to explicit null.
+
+    Pre-fix boundary (tester-verified, commit 6512f6a):
+        PATCH {"name": null}     → **500** ← unhandled IntegrityError
+        PATCH {"email": null}    → **500**
+        PATCH {"name": ""}       → 422 string_too_short ✓ (min_length=1)
+        PATCH {} (empty body)    → 200 no-op ✓
+        PATCH (no body at all)   → 422 missing ✓
+
+    The schema declared ``name: str | None`` so the field could be
+    OMITTED from a partial update, but the underlying Postgres column
+    is NOT NULL. An explicit JSON null sailed past Pydantic, the
+    handler ``setattr(profile, "name", None)``'d it, and asyncpg
+    raised ``IntegrityError`` which escaped as a bare HTTP 500.
+
+    Two independent guarantees this test locks:
+      (1) every NOT-NULL column declared on the model is enumerated
+          in ``ProfileUpdate.NOT_NULL_FIELDS`` — drift between the
+          model and the schema would silently re-open the bug for
+          newly-NOT-NULL columns.
+      (2) explicit-null on each NOT-NULL field 422s with an
+          actionable message; nullable fields still accept None;
+          omit-the-field still no-ops cleanly.
+    """
+    from pydantic import ValidationError
+    import pytest
+
+    from app.models.profile import Profile
+    from app.schemas.profile import ProfileUpdate
+
+    # (1) Schema's NOT_NULL_FIELDS must mirror the model's NOT NULL
+    # columns. Compute the model's NOT NULL set from the SQLAlchemy
+    # column metadata, then take the intersection with fields the
+    # PATCH schema actually exposes — anything in the intersection
+    # MUST be in ``NOT_NULL_FIELDS``.
+    schema_field_names = set(ProfileUpdate.model_fields.keys())
+    model_not_null_fields = {
+        c.name for c in Profile.__table__.columns
+        if not c.nullable
+        # Exclude system columns the PATCH schema can't touch — id, FKs,
+        # timestamps. Restrict to columns the admin can actually PATCH.
+        and c.name in schema_field_names
+    }
+    declared_guard = set(ProfileUpdate.NOT_NULL_FIELDS)
+    assert model_not_null_fields == declared_guard, (
+        f"ProfileUpdate.NOT_NULL_FIELDS ({sorted(declared_guard)}) drifted "
+        f"from the model's PATCH-able NOT NULL columns "
+        f"({sorted(model_not_null_fields)}). Newly NOT-NULL columns must be "
+        "added to NOT_NULL_FIELDS or PATCH-null re-opens as a 500 (F242(a))."
+    )
+
+    # (2) Each NOT-NULL field rejects explicit null with a clear msg.
+    for field in sorted(ProfileUpdate.NOT_NULL_FIELDS):
+        with pytest.raises(ValidationError, match=f"{field}.*null"):
+            ProfileUpdate(**{field: None})
+
+    # Combined null also rejects (first hit fails — order is iteration
+    # order, but ANY hit is enough to 422).
+    with pytest.raises(ValidationError):
+        ProfileUpdate(name=None, email=None)
+
+    # Nullable fields STILL accept None — those are clear-the-field ops
+    # against a nullable column, which is legitimate.
+    accepted = ProfileUpdate(father_name=None, uan_number=None, pf_number=None, dob=None)
+    dump = accepted.model_dump(exclude_unset=True)
+    assert dump == {
+        "father_name": None,
+        "uan_number": None,
+        "pf_number": None,
+        "dob": None,
+    }, f"nullable fields lost their null-clears semantics: {dump}"
+
+    # Empty body — the no-op patch — must still validate to {} so the
+    # handler's ``model_dump(exclude_unset=True)`` produces an empty
+    # patch dict and the row stays untouched.
+    assert ProfileUpdate().model_dump(exclude_unset=True) == {}
+
+    # Real updates still pass through.
+    p = ProfileUpdate(name="Bob", email="bob@example.com")
+    assert p.name == "Bob"
+    assert p.email == "bob@example.com"
+
+
+def test_upload_handler_caps_filename_before_downstream_consumers():
+    """F242(b) regression — the upload handler MUST cap ``file.filename``
+    at the boundary, before either ``validate_and_store`` or the DB
+    write sees the raw value.
+
+    Tester observed an empirical 501-char filename → HTTP 500 against
+    deployed backend even after F240(c)'s ``[:200]`` cap landed at the
+    DB-write site. We can't reproduce the crash in-process, but the
+    fix is to cap at the FIRST consumer (``validate_and_store``'s
+    ``original_filename`` arg) so every downstream path sees a bounded
+    value. Single source of truth, no surprises.
+
+    This test inspects the handler source rather than spinning a live
+    DB:
+      (1) the line that calls ``validate_and_store`` must pass a
+          capped filename, NOT ``file.filename`` directly;
+      (2) the line that constructs ``ProfileDocument(filename=...)``
+          must use the same capped value (or a derivative bounded by
+          it), not ``file.filename`` directly.
+    """
+    import inspect
+
+    from app.api.v1 import profiles as profiles_module
+
+    src = inspect.getsource(profiles_module.upload_document)
+
+    # (1) The pre-validate cap must exist with a numeric upper bound
+    # at most equal to the column width (500).
+    # We accept any of: ``[:200]``, ``[:500]``, etc. — anything that's
+    # a Python slice cap on the raw filename feeding into the storage
+    # call counts as the fix. Bare ``file.filename`` passed to
+    # ``original_filename=`` (no cap) is the regression.
+    assert "original_filename=file.filename" not in src, (
+        "upload_document passes the RAW ``file.filename`` to "
+        "validate_and_store — that's the F242(b) regression. The "
+        "filename must be capped at the handler boundary first."
+    )
+
+    # The handler must contain a slice on file.filename somewhere.
+    # The sentinel pattern: ``(file.filename or ...)[:N]``.
+    import re
+    slice_pattern = re.compile(r"file\.filename[^\[\n]*\)\s*\[\s*:\s*(\d+)\s*\]")
+    matches = slice_pattern.findall(src)
+    assert matches, (
+        "upload_document does not slice ``file.filename`` anywhere — "
+        "F240(c) and F242(b) both require an explicit cap. Pattern "
+        "expected: ``(file.filename or default)[:N]``."
+    )
+    # Every cap must be ≤500 (the DB column width).
+    for cap_str in matches:
+        cap = int(cap_str)
+        assert cap <= 500, (
+            f"upload_document caps file.filename at [:{cap}], but the "
+            "DB column is String(500). A cap > 500 would still overflow."
+        )
+
+    # (2) The ProfileDocument constructor must NOT receive
+    # ``file.filename`` directly — it must reference the capped local
+    # (``safe_filename`` or similar). If anyone refactors the cap out
+    # without realising, this catches it. We can't use a single regex
+    # to span the whole multiline constructor (kwargs include
+    # parenthesised expressions), so scan for the ``filename=`` kwarg
+    # line by line within the source.
+    filename_kwarg_lines = [
+        line.strip()
+        for line in src.splitlines()
+        if re.match(r"^\s*filename\s*=", line)
+    ]
+    assert filename_kwarg_lines, (
+        "Could not find a ``filename=`` kwarg in upload_document; "
+        "the handler shape changed — review F240(c)/F242(b) coverage."
+    )
+    for line in filename_kwarg_lines:
+        assert "file.filename" not in line, (
+            f"ProfileDocument is built with raw ``file.filename`` here: "
+            f"{line!r}. Use the capped local instead (F242(b) regression)."
+        )

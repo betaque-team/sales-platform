@@ -412,6 +412,25 @@ action_deploy() {
     die "Migration failure"
   fi
 
+  # F246(a) regression fix — seed the synthetic platform boards (HN
+  # "Who is Hiring?", YC Work at a Startup, etc.) so Track B fetchers
+  # have rows to scan. Pre-fix, ``seed_remote_companies`` was only run
+  # manually post-deploy; new aggregator-style platforms shipped to
+  # prod with zero boards and silently produced 0 jobs until someone
+  # noticed. The seed module is fully idempotent — it does
+  # check-then-insert against ``companies.name`` and the
+  # ``(company_id, platform, slug)`` triple — so re-running on every
+  # deploy adds only the genuinely new rows.
+  #
+  # Failure is non-fatal: an existing prod backend with stale seeds
+  # is still functional, and a human can re-run the command manually
+  # if the seed step ever stalls. We log loudly so the on-call
+  # reviewer sees the gap in the deploy summary.
+  log "Seeding synthetic platform boards (idempotent)"
+  if ! $COMPOSE run --rm --no-deps backend python -m app.seed_remote_companies; then
+    log "WARN: seed_remote_companies failed — Track B platforms (HN/YC WaaS) may have 0 boards. Run manually post-deploy: docker compose -f docker-compose.prod.yml run --rm --no-deps backend python -m app.seed_remote_companies"
+  fi
+
   log "Rolling restart: backend"
   $COMPOSE up -d --no-deps backend
 

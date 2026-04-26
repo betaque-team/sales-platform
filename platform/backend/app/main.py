@@ -34,6 +34,18 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    # F242(c) regression fix: keep the OpenAPI spec under the ``/api``
+    # prefix that nginx proxies to the backend. Pre-fix, ``docs_url``
+    # and ``redoc_url`` were prefixed but ``openapi_url`` defaulted to
+    # ``/openapi.json``. In prod, nginx's ``/api/*`` rule routes to the
+    # backend while ``/openapi.json`` (no ``/api`` prefix) fell through
+    # to the React SPA — Swagger loaded the HTML shell, then the
+    # ``url: '/openapi.json'`` reference returned the index.html bundle,
+    # and the browser console showed ``Failed to load API definition``.
+    # Aligning the OpenAPI URL with the docs prefix means EVERY OpenAPI
+    # consumer (Swagger UI, ReDoc, third-party clients pointed at the
+    # spec) sees the JSON spec without infra changes.
+    openapi_url="/api/openapi.json",
 )
 
 
