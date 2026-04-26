@@ -225,6 +225,13 @@ async def admin_reset_password(
     target.password_hash = _hash_password(temp_password)
     target.password_reset_token = None
     target.password_reset_expires = None
+    # F247 regression fix: flag the user so the next login forces a
+    # change-password screen. Without this, the temp password stays
+    # valid indefinitely — the admin shares it, the user logs in,
+    # and the deterministic credential remains in circulation. The
+    # ``change_password`` handler clears the flag once the user
+    # picks a new password.
+    target.must_change_password = True
     await db.commit()
 
     await log_action(

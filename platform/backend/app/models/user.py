@@ -23,3 +23,18 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_reset_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_reset_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # F247 regression fix: when a super_admin force-resets a user's
+    # password (``POST /users/{id}/reset-password``), the user must be
+    # made to change the temporary password on next login. Pre-fix, the
+    # admin endpoint set the temp password but no flag was persisted, so
+    # the login response had no way to tell the frontend "redirect to
+    # the change-password screen". Defaults to ``False`` so existing
+    # rows on prod don't suddenly get prompted; only the admin-reset
+    # path flips it to ``True``, and a successful change-password call
+    # flips it back to ``False``.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )

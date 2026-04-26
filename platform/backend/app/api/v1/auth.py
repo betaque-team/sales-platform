@@ -199,6 +199,10 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
             "name": user.name,
             "role": user.role,
             "avatar_url": user.avatar_url,
+            # F247: include the force-change flag so the frontend can
+            # route straight to the change-password screen after a
+            # super-admin reset, without a separate /auth/me round-trip.
+            "must_change_password": bool(getattr(user, "must_change_password", False)),
         },
     })
     response.set_cookie(
@@ -272,6 +276,11 @@ async def change_password(
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
     user.password_hash = _hash_password(body.new_password)
+    # F247 regression fix: clear the force-change flag so subsequent
+    # logins don't re-trigger the change-password redirect. Set unconditionally
+    # so a user who lands here for a normal voluntary change (flag was
+    # already false) is a no-op write — keeps the flow uniform.
+    user.must_change_password = False
     await db.commit()
     return {"ok": True, "message": "Password changed successfully"}
 

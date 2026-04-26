@@ -9,6 +9,7 @@ import { CompaniesPage } from "./pages/CompaniesPage";
 import { PipelinePage } from "./pages/PipelinePage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { ChangePasswordRequiredPage } from "./pages/ChangePasswordRequiredPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { PlatformsPage } from "./pages/PlatformsPage";
 import { MonitoringPage } from "./pages/MonitoringPage";
@@ -41,6 +42,17 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/*
+        F247: the change-password gate is itself authenticated (the
+        backend `POST /auth/change-password` requires a valid session
+        cookie + the temp password to verify), but it must NOT be
+        wrapped in <ProtectedRoute>. ProtectedRoute redirects to
+        /change-password when must_change_password is true; if the
+        gate page itself were inside ProtectedRoute, it would infinite-
+        loop. The page renders its own session check (via useAuth)
+        and bounces unauth users to /login.
+      */}
+      <Route path="/change-password" element={<ChangePasswordRequiredPage />} />
       <Route
         path="/"
         element={
