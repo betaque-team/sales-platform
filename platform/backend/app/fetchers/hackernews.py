@@ -436,9 +436,32 @@ class HackerNewsFetcher(BaseFetcher):
             "HN whoishiring: thread %s → %d jobs (skipped %d unparseable of %d)",
             thread["id"], len(jobs), skipped_parse, len(kids),
         )
-        # Only update the cache after a successful full fetch so a
-        # mid-run crash doesn't poison the "nothing to do" short-circuit.
-        self._remember_descendants(thread)
+        # F249 regression fix: only cache the descendants count when we
+        # actually emitted at least one job. A 0-job result is highly
+        # suspicious — it means either the parser regressed across the
+        # board, the upstream API returned mostly deleted comments, or
+        # we hit a transient failure mid-fetch and Celery retried but
+        # we'd already pushed empty results forward. Pre-fix the cache
+        # was set unconditionally, so a single dry run silently locked
+        # the fetcher into a "nothing new" short-circuit until the
+        # thread's descendants count changed upstream — which on
+        # multi-week-old threads can be hours/days. Live verification
+        # on 2026-04-26: HN had been registered for hours, every scan
+        # returned 0 jobs (cache hit), prod ``hackernews`` platform had
+        # zero rows in ``Job``. Refusing to cache the empty result
+        # makes the next scheduled tick re-attempt the full fetch.
+        # Real successful runs (the steady-state happy path) still get
+        # the rate-limit benefit because they emit jobs.
+        if jobs:
+            self._remember_descendants(thread)
+        else:
+            logger.warning(
+                "HN whoishiring: thread %s emitted 0 jobs (skipped %d of %d) — "
+                "NOT caching descendants so the next tick retries. If this "
+                "persists across multiple ticks the parser likely needs "
+                "investigation.",
+                thread["id"], skipped_parse, len(kids),
+            )
         return jobs
 
     # Mandatory override of `_normalize` since the base flags it
