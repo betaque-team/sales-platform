@@ -479,13 +479,32 @@ async def upload_document(
     file_bytes = await file.read()
     doc_id = uuid.uuid4()
 
+    # F242(b) defence-in-depth: cap the raw filename at the handler
+    # boundary, BEFORE any downstream consumer touches it. F240(c)
+    # already caps the value that reaches the DB column (200 ≤ 500), but
+    # the tester's round-4 sweep claimed an empirical 501-char filename
+    # still produced HTTP 500 against the deployed backend even after
+    # the [:200] cap landed. We couldn't repro the crash locally with
+    # FastAPI/Starlette/python-multipart's UploadFile path, so the most
+    # likely surface is something further down (an nginx max-header
+    # rule, a logging middleware that persists request metadata, a
+    # response-render path that round-trips the original filename).
+    # Slicing here means EVERY downstream consumer — including
+    # ``validate_and_store``'s ``original_filename`` parameter and the
+    # response-model serialisation — sees a value that fits in the
+    # ``String(500)`` column. Single source of truth, no further
+    # surprises possible. 200 chars is the same limit the download
+    # handler's ``safe_name`` already imposes, so display semantics
+    # don't change.
+    safe_upload_filename = (file.filename or "")[:200] or None
+
     try:
         storage_meta = validate_and_store(
             profile_id=profile.id,
             doc_id=doc_id,
             file_bytes=file_bytes,
             content_type=file.content_type,
-            original_filename=file.filename,
+            original_filename=safe_upload_filename,
         )
     except DocValidationError as exc:
         # Validation failure — 400 with the error message (safe to
@@ -503,16 +522,11 @@ async def upload_document(
             detail="Document storage is temporarily unavailable. Try again later.",
         )
 
-    # F240(c): cap the stored filename so it actually fits the
-    # ``String(500)`` column *and* the Content-Disposition header we
-    # later build off it. Pre-fix, the column accepted whatever the
-    # browser sent; a 251+ char filename got persisted as-is and the
-    # download handler's separate ``[:200]`` truncation meant DB and
-    # on-disk/header disagreed. One cap, one source of truth — set it
-    # at the vault boundary. 200 is the same limit the download handler
-    # already applied, so existing rows are unaffected.
-    raw_filename = file.filename or f"{doc_id}.{storage_meta['file_type']}"
-    safe_filename = raw_filename[:200]
+    # F240(c) + F242(b): use the already-capped ``safe_upload_filename``
+    # from the top of the handler (200-char cap applied BEFORE the
+    # validate_and_store call). Falling back to the UUID-derived default
+    # when the multipart had no filename at all.
+    safe_filename = safe_upload_filename or f"{doc_id}.{storage_meta['file_type']}"
 
     doc = ProfileDocument(
         id=doc_id,

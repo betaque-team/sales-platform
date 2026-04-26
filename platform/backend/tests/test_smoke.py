@@ -63,6 +63,35 @@ def test_fastapi_app_imports() -> None:
     assert app.title, "FastAPI app has no title — schema broke"
 
 
+def test_openapi_docs_redoc_all_under_api_prefix() -> None:
+    """F242(c) regression — every doc-related URL must sit under the
+    ``/api`` prefix that nginx proxies to the backend.
+
+    Pre-fix, ``docs_url`` and ``redoc_url`` were prefixed but
+    ``openapi_url`` defaulted to ``/openapi.json``. Prod nginx routes
+    ``/api/*`` to the backend; ``/openapi.json`` (no prefix) fell
+    through to the React SPA, so Swagger UI loaded the HTML shell and
+    then failed to fetch the JSON spec. Aligning all three under one
+    prefix means Swagger / ReDoc / third-party OpenAPI consumers all
+    work without an nginx-config change.
+    """
+    from app.main import app
+
+    assert app.docs_url == "/api/docs", (
+        f"docs_url drifted to {app.docs_url!r} — Swagger UI mount path "
+        "must stay under /api so nginx proxies it to the backend."
+    )
+    assert app.redoc_url == "/api/redoc", (
+        f"redoc_url drifted to {app.redoc_url!r} — ReDoc mount path "
+        "must stay under /api for the same reason."
+    )
+    assert app.openapi_url == "/api/openapi.json", (
+        f"openapi_url is {app.openapi_url!r}; Swagger UI's HTML shell "
+        "loads but the spec fetch falls through to the React SPA in prod "
+        "(F242(c) regression). Keep this aligned with docs_url's prefix."
+    )
+
+
 def test_celery_worker_imports() -> None:
     """Celery bootstrap doesn't raise.
 

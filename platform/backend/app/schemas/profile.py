@@ -9,10 +9,10 @@ lets admins store docs outside the predefined set with a free-text
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 # F240(a) regression fix: DOB calendar-plausibility range.
@@ -130,6 +130,48 @@ class ProfileUpdate(BaseModel):
 
     # F240(a): same calendar-sanity guard as ProfileCreate.
     _validate_dob = field_validator("dob")(lambda cls, v: _validate_dob_range(v))
+
+    # F242(a) regression fix: reject ``{"name": null}`` / ``{"email": null}``
+    # / ``{"notes": null}`` at parse time. Pre-fix, the schema declared
+    # these fields as ``str | None`` (so the field could be OMITTED from
+    # a partial-update body) but the underlying Postgres columns are
+    # ``NOT NULL``. An explicit JSON null sailed past Pydantic, the
+    # handler ``setattr(profile, "name", None)``'d it, and asyncpg raised
+    # ``IntegrityError`` which escaped as a bare HTTP 500 plain-text
+    # body — same shape as F239's pre-fix crash.
+    #
+    # We use ``model_validator(mode="before")`` rather than per-field
+    # validators because Pydantic V2 cannot distinguish "field omitted"
+    # from "field explicitly null" inside a normal ``field_validator``
+    # — both look like ``None``. The raw input dict CAN distinguish
+    # them: the key is either present or absent. So we walk the raw
+    # input and reject only the explicit-null case.
+    #
+    # The set of NOT-NULL columns is mirrored from
+    # ``app.models.profile.Profile`` — keep them in sync if you add a
+    # NOT-NULL column or relax one to nullable. Declared as a
+    # ``ClassVar`` so Pydantic doesn't treat it as a model field
+    # (a leading-underscore attr would otherwise be parsed as a private
+    # ``ModelPrivateAttr`` and become non-iterable inside the validator).
+    NOT_NULL_FIELDS: ClassVar[tuple[str, ...]] = ("name", "email", "notes")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_not_null(cls, data):
+        # ``data`` is whatever the body parser produced — a dict for a
+        # JSON body, but Pydantic also passes through model instances
+        # in nested-construction paths. Only the dict path is relevant
+        # here (PATCH body is always JSON), but be defensive.
+        if not isinstance(data, dict):
+            return data
+        for field in cls.NOT_NULL_FIELDS:
+            if field in data and data[field] is None:
+                raise ValueError(
+                    f"{field!r} cannot be explicitly null — omit the field "
+                    f"to leave it unchanged, or send a non-empty value to "
+                    f"update it. The {field!r} column is NOT NULL."
+                )
+        return data
 
 
 class ProfileDocumentOut(BaseModel):
