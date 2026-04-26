@@ -29,7 +29,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, func
+from sqlalchemy import case, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
@@ -115,8 +115,23 @@ async def list_product_insights(
         query = query.where(ProductInsight.actioned_status.in_(["dismissed", "duplicate"]))
     # status == "all": no filter
 
-    # Sort: severity DESC (high first), then generated_at DESC (newest first)
-    severity_rank = func.case(
+    # Sort: severity DESC (high first), then generated_at DESC (newest first).
+    #
+    # F245 regression fix: this used to read ``func.case(...)``, which is
+    # NOT the SQLAlchemy CASE expression — ``func.X`` builds a SQL function
+    # call ``X(...)``, and PostgreSQL has no function called ``case``. The
+    # query rendered as ``ORDER BY case(severity = 'high', 3, ...)`` and
+    # blew up at execute time with a bare 500 ("Internal Server Error",
+    # no JSON envelope — same shape as F239 / F241(b)). Sibling endpoints
+    # ``/insights/me``, ``POST /insights/run``, and the 403 path all worked
+    # because none of them touch this CASE expression. The correct form is
+    # the top-level ``case`` factory imported from ``sqlalchemy`` —
+    # consistent with every other ranked-aggregation in the codebase
+    # (``platforms.py``, ``analytics.py``, ``jobs.py``, etc.). Severity
+    # values mirror the model's ``String(20)`` column writes from
+    # ``ai_insights_task``: ``high`` / ``medium`` / ``low``; anything else
+    # (defensive) sorts to the bottom via ``else_=0``.
+    severity_rank = case(
         (ProductInsight.severity == "high", 3),
         (ProductInsight.severity == "medium", 2),
         (ProductInsight.severity == "low", 1),
