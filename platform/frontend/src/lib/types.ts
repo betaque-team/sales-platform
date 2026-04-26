@@ -6,6 +6,13 @@ export interface User {
   role: "super_admin" | "admin" | "reviewer" | "viewer";
   active_resume_id?: string;
   has_password?: boolean;
+  // F247: when a super_admin force-resets the user's password via
+  // POST /users/{id}/reset-password, this flag is set to true. The
+  // app routes to the change-password screen on the very next page
+  // load and locks navigation until the user picks a new password.
+  // Optional in the type so older API responses (without the field)
+  // default to "no force-change required".
+  must_change_password?: boolean;
   created_at: string;
 }
 

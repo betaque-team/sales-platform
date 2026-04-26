@@ -79,5 +79,18 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
+  // F247 regression fix: a super-admin force-reset on this account
+  // sets ``must_change_password=true``. Until the user picks a new
+  // password, every protected route bounces them to the dedicated
+  // ``/change-password`` gate. Done at the route layer (not via a
+  // dismissible modal) so address-bar typing, the Esc key, or a
+  // direct deep-link can't bypass the prompt and leave a known
+  // temp credential in circulation. The gate page itself is NOT
+  // wrapped in a ProtectedRoute so it doesn't infinite-loop on
+  // itself; we just don't redirect when we're already there.
+  if (user.must_change_password && location.pathname !== "/change-password") {
+    return <Navigate to="/change-password" replace />;
+  }
+
   return <>{children}</>;
 }
