@@ -92,6 +92,60 @@ def test_openapi_docs_redoc_all_under_api_prefix() -> None:
     )
 
 
+def test_init_ci_db_imports_match_alembic_env() -> None:
+    """Drift guard between ``scripts/init_ci_db.py`` and ``alembic/env.py``.
+
+    Both files import the project's models so ``Base.metadata`` is fully
+    populated. ``init_ci_db.py`` uses that to ``create_all`` for CI;
+    ``alembic/env.py`` uses it for autogenerate-comparison. If a future
+    model addition is wired into env.py but not init_ci_db (or vice
+    versa), the bootstrap script would create a partial schema and
+    CI would silently miss tables.
+
+    This test reads BOTH files as text and compares the set of
+    ``from app.models...`` import lines. Mismatch fails CI loud.
+    Cheap, no-DB, future-proof against quietly-introduced drift.
+
+    See ``scripts/init_ci_db.py`` module docstring for why we have
+    two import blocks instead of one shared helper (env.py can't be
+    imported outside an alembic command's context).
+    """
+    import re
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parent.parent
+    env_lines = (backend_root / "alembic" / "env.py").read_text().splitlines()
+    init_lines = (backend_root / "scripts" / "init_ci_db.py").read_text().splitlines()
+
+    # Match ``from app.models.<x> import ...`` and ``from app.models import (...)``.
+    # We don't compare the multi-line ``from app.models import (...)`` block
+    # contents directly — that's done implicitly because both files paste
+    # the same block. We DO compare every per-module ``from app.models.foo``
+    # line, since those are one-liners and the high-frequency drift surface.
+    pattern = re.compile(r"^from app\.models\.[\w.]+ import")
+
+    env_imports = sorted({
+        line.strip().rstrip()
+        for line in env_lines
+        if pattern.match(line.strip())
+    })
+    init_imports = sorted({
+        line.strip().rstrip()
+        for line in init_lines
+        if pattern.match(line.strip())
+    })
+
+    assert env_imports == init_imports, (
+        "Model imports drifted between alembic/env.py and "
+        "scripts/init_ci_db.py.\n"
+        f"  in env.py only:        {sorted(set(env_imports) - set(init_imports))}\n"
+        f"  in init_ci_db.py only: {sorted(set(init_imports) - set(env_imports))}\n"
+        "Add the missing line(s) to whichever file is behind. CI's "
+        "fresh-DB bootstrap depends on init_ci_db importing every model "
+        "alembic's env.py knows about."
+    )
+
+
 def test_celery_worker_imports() -> None:
     """Celery bootstrap doesn't raise.
 
