@@ -599,14 +599,40 @@ class HackerNewsFetcher(BaseFetcher):
         # not the HN thread.
         hn_permalink = f"https://news.ycombinator.com/item?id={comment_id}"
 
+        # F253 regression fix: cap every string field to fit the DB
+        # column it lands in. Pre-fix the parser sometimes returned the
+        # entire HN comment body as ``title`` when the poster didn't
+        # follow the pipe-separated convention — e.g. a paragraph-style
+        # comment with no ``Company | Role | Location | URL`` header.
+        # ``Job.title_normalized`` is ``String(500)`` and any 501+ char
+        # title triggered ``psycopg2.errors.StringDataRightTruncation``
+        # → SQLAlchemy session entered a rolled-back state →
+        # PendingRollbackError on every subsequent job in the same
+        # scan → ALL 298 jobs were lost on the first overflow.
+        # Truncating at 200 (well under both the 500-char column AND
+        # the 200-char cap most fetchers use for clean display) is
+        # safe — long titles wrap awkwardly in the UI anyway and a
+        # 200-char prefix carries the role intent. The full comment
+        # body remains queryable via ``raw_json["parsed_header"]``.
+        raw_title = parsed.get("title") or "Multiple roles"
+        safe_title = raw_title.strip()[:200] or "Multiple roles"
+        # Defensive: also cap ``location_raw`` (Job.location_raw is
+        # String(255)) and ``url`` (Job.url is String(2048)). HN
+        # parser occasionally bundles a multi-line address into the
+        # location segment.
+        raw_location = parsed.get("location", "")
+        safe_location = raw_location.strip()[:255] if raw_location else ""
+        raw_url = parsed["url"]
+        safe_url = raw_url.strip()[:2048] if raw_url else ""
+
         return {
             "external_id": external_id,
             "company_slug": company_slug,
             "company_name": company_name,
-            "title": parsed.get("title") or "Multiple roles",
-            "url": parsed["url"],
+            "title": safe_title,
+            "url": safe_url,
             "platform": self.PLATFORM,
-            "location_raw": parsed.get("location", ""),
+            "location_raw": safe_location,
             "remote_scope": parsed.get("remote_scope", ""),
             "department": "",
             "employment_type": "",
