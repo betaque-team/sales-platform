@@ -52,6 +52,7 @@ import {
 } from "@/lib/api";
 import { ApplicationQuestionsPreview } from "@/components/ApplicationQuestionsPreview";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
+import { RoutineQueueToggle } from "@/components/RoutineQueueToggle";
 import type { ReviewPayload, PreparedAnswer, CoverLetterResult, InterviewPrepResult } from "@/lib/types";
 
 export function JobDetailPage() {
@@ -958,6 +959,17 @@ export function JobDetailPage() {
                 )}
               </div>
             )}
+            {/* F257: Apply Routine queue / exclude controls. Lets the
+                operator pin this specific job to the routine's
+                top-to-apply list (above auto-picks) OR permanently
+                skip it. Independent of the "Prepare Application"
+                manual flow above — both can coexist. */}
+            <div className="mt-3 border-t border-gray-100 pt-3">
+              <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                Apply Routine
+              </p>
+              <RoutineQueueToggle jobId={job.id} />
+            </div>
           </Card>
 
           {["greenhouse", "lever", "ashby"].includes(job.source_platform.toLowerCase()) && job.status !== "expired" && (

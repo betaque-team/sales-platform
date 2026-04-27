@@ -48,8 +48,10 @@ from app.models.company import Company
 from app.models.humanization_corpus import HumanizationCorpus
 from app.models.job import Job
 from app.models.role_config import RoleClusterConfig
+from app.models.resume import ResumeScore
 from app.models.routine_kill_switch import RoutineKillSwitch
 from app.models.routine_run import RoutineRun, ROUTINE_STATUSES
+from app.models.routine_target import RoutineTarget, ROUTINE_TARGET_INTENTS
 from app.models.user import User
 from app.schemas.routine import (
     CreateRoutineRunRequest,
@@ -58,8 +60,12 @@ from app.schemas.routine import (
     HumanizeResponse,
     KillSwitchRequest,
     KillSwitchResponse,
+    RoutinePreferences,
+    RoutineQueueResponse,
     RoutineRunDetail,
     RoutineRunOut,
+    RoutineTargetCreate,
+    RoutineTargetOut,
     SubmissionDetail,
     TopToApplyJob,
     TopToApplyResponse,
@@ -214,6 +220,25 @@ async def _kill_switch_disabled(db: AsyncSession, user_id: UUID) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _load_user_preferences(user: User) -> RoutinePreferences:
+    """Parse ``users.routine_preferences`` JSONB into a typed object.
+
+    A fresh user has ``{}`` from the migration default → returns
+    ``RoutinePreferences()`` with all-empty defaults (legacy behaviour).
+    Anything unparseable (someone hand-mutated the column with junk)
+    is logged and treated as empty so a bad row never wedges
+    top-to-apply.
+    """
+    raw = getattr(user, "routine_preferences", None) or {}
+    if not isinstance(raw, dict):
+        return RoutinePreferences()
+    try:
+        return RoutinePreferences.model_validate(raw)
+    except Exception:
+        # Don't 500 the picker for one user with a bad JSONB value.
+        return RoutinePreferences()
+
+
 @router.get("/top-to-apply", response_model=TopToApplyResponse)
 async def top_to_apply(
     limit: int = Query(10, ge=1, le=25),
@@ -222,27 +247,62 @@ async def top_to_apply(
 ):
     """Pick the next N jobs for the routine to target.
 
-    Filters applied (in order):
-      * ``Job.platform NOT IN excluded`` (LinkedIn excluded)
-      * ``Job.role_cluster IN relevant_clusters`` (infra/security by default)
-      * ``Job.geography_bucket IN routine buckets`` (global/usa/uae)
+    F257 changes — the operator now has real control via
+    ``users.routine_preferences`` JSONB and the per-job
+    ``routine_targets`` queue/exclude list:
+
+      * ``intent='queued'`` rows are surfaced FIRST, above the
+        relevance-picker rows. Pinned jobs render with ``is_queued=true``
+        in the response so the UI can badge them.
+      * ``intent='excluded'`` rows are filtered out entirely.
+      * ``preferences.only_global_remote`` / ``allowed_geographies`` /
+        ``allowed_role_clusters`` / ``min_relevance_score`` /
+        ``min_resume_score`` / ``extra_excluded_platforms`` all narrow
+        the auto-picker.
+
+    Default filters still applied (always-on hard limits):
+      * ``Job.platform NOT IN linkedin``  (Easy-Apply detection)
       * ``Job.status NOT IN ('expired', 'archived')``
       * No existing ``Application`` for (user, job)
       * No application to the same ``company_id`` in the last 30 days
-      * Ordered by ``relevance_score`` DESC
+      * Ordered by ``relevance_score`` DESC, then ``first_seen_at`` DESC
 
-    Response envelope also carries three pre-flight flags —
+    Response envelope still carries the three pre-flight flags —
     ``kill_switch_active``, ``answer_book_ready``, ``daily_cap_remaining``
     — so the routine can decide "should I even start?" from a single
-    poll. The jobs array is returned even when the flags fail; the
-    routine is responsible for not calling confirm-submitted in those
-    cases.
+    poll.
     """
+    prefs = _load_user_preferences(user)
     relevant_clusters = await _get_relevant_clusters(db)
 
-    # Jobs already in Application (any status) are skipped — the user
-    # has already engaged, and we don't want the routine to re-apply
-    # to a withdrawn/rejected job. Scope by user_id on purpose.
+    # Resolve the EFFECTIVE filter set for this picker call —
+    # preferences narrow each list, but never widen past the
+    # platform-wide allow-list.
+    if prefs.allowed_role_clusters:
+        # User-supplied clusters intersected with the platform's
+        # currently-relevant set so a user can't sneak a cluster
+        # the platform doesn't classify.
+        effective_clusters = [c for c in prefs.allowed_role_clusters if c in relevant_clusters]
+        if not effective_clusters:
+            # User picked clusters that don't intersect — fall back to
+            # the platform default so they don't end up with an empty
+            # picker silently.
+            effective_clusters = relevant_clusters
+    else:
+        effective_clusters = relevant_clusters
+
+    if prefs.only_global_remote:
+        effective_geographies = ("global_remote",)
+    elif prefs.allowed_geographies:
+        effective_geographies = tuple(prefs.allowed_geographies)
+    else:
+        effective_geographies = ROUTINE_GEOGRAPHY_BUCKETS
+
+    excluded_platforms = set(EXCLUDED_PLATFORMS) | {
+        p.lower().strip() for p in prefs.extra_excluded_platforms if p
+    }
+
+    # Jobs already in Application (any status) are skipped.
     applied_jobs_sub = select(Application.job_id).where(
         Application.user_id == user.id
     ).subquery()
@@ -259,24 +319,99 @@ async def top_to_apply(
         )
     ).subquery()
 
-    query = (
-        select(Job, Company.name.label("company_name"))
-        .join(Company, Company.id == Job.company_id, isouter=True)
-        .where(
-            Job.platform.notin_(EXCLUDED_PLATFORMS),
-            Job.role_cluster.in_(relevant_clusters),
-            Job.geography_bucket.in_(ROUTINE_GEOGRAPHY_BUCKETS),
-            Job.status.notin_(("expired", "archived")),
-            Job.id.notin_(select(applied_jobs_sub.c.job_id)),
-            and_(
-                Job.company_id.is_not(None),
-                Job.company_id.notin_(select(cooldown_companies_sub.c.company_id)),
-            ),
+    # F257: routine_targets — load both intents in one round-trip.
+    targets_rows = (await db.execute(
+        select(RoutineTarget.job_id, RoutineTarget.intent).where(
+            RoutineTarget.user_id == user.id
         )
-        .order_by(Job.relevance_score.desc(), Job.first_seen_at.desc())
-        .limit(limit)
-    )
-    rows = (await db.execute(query)).all()
+    )).all()
+    queued_job_ids = {jid for jid, intent in targets_rows if intent == "queued"}
+    excluded_job_ids = {jid for jid, intent in targets_rows if intent == "excluded"}
+
+    # Optional resume-score floor — JOIN against the user's active
+    # resume's ResumeScore row only if the user has an active resume
+    # AND a non-zero floor is configured (the JOIN cost isn't worth
+    # it otherwise).
+    resume_score_join_active = bool(prefs.min_resume_score) and bool(user.active_resume_id)
+
+    base_filters = [
+        Job.platform.notin_(excluded_platforms),
+        Job.role_cluster.in_(effective_clusters),
+        Job.geography_bucket.in_(effective_geographies),
+        Job.status.notin_(("expired", "archived")),
+        Job.id.notin_(select(applied_jobs_sub.c.job_id)),
+        and_(
+            Job.company_id.is_not(None),
+            Job.company_id.notin_(select(cooldown_companies_sub.c.company_id)),
+        ),
+    ]
+    if prefs.min_relevance_score:
+        base_filters.append(Job.relevance_score >= prefs.min_relevance_score)
+
+    # ── Phase A: queued (operator-pinned) jobs ─────────────────────
+    queued_jobs: list[tuple[Job, str | None]] = []
+    if queued_job_ids:
+        # Pinned jobs bypass the cluster / geography / score / company-
+        # cooldown filters — the operator explicitly asked for them.
+        # We DO still skip already-applied jobs and excluded platforms,
+        # because those are hard safety rails (no double-apply, no
+        # LinkedIn Easy-Apply). Pinned-but-excluded is impossible by
+        # design (excluded set is queried and removed below).
+        queued_q = (
+            select(Job, Company.name.label("company_name"))
+            .join(Company, Company.id == Job.company_id, isouter=True)
+            .where(
+                Job.id.in_(queued_job_ids - excluded_job_ids),
+                Job.platform.notin_(excluded_platforms),
+                Job.status.notin_(("expired", "archived")),
+                Job.id.notin_(select(applied_jobs_sub.c.job_id)),
+            )
+            .order_by(Job.relevance_score.desc(), Job.first_seen_at.desc())
+            .limit(limit)
+        )
+        queued_jobs = (await db.execute(queued_q)).all()
+
+    # ── Phase B: relevance-picker jobs (filling out to ``limit``) ──
+    auto_limit = max(0, limit - len(queued_jobs))
+    auto_jobs: list[tuple[Job, str | None]] = []
+    if auto_limit > 0:
+        already_picked_ids = {j.id for j, _ in queued_jobs}
+        auto_q = (
+            select(Job, Company.name.label("company_name"))
+            .join(Company, Company.id == Job.company_id, isouter=True)
+            .where(
+                *base_filters,
+                Job.id.notin_(excluded_job_ids | already_picked_ids),
+            )
+            .order_by(Job.relevance_score.desc(), Job.first_seen_at.desc())
+            .limit(auto_limit)
+        )
+        # Optional resume-score floor — apply post-query because the
+        # ResumeScore JOIN would inflate the row count and the active-
+        # resume scoring backlog is incomplete enough that an inner
+        # join could silently empty the picker. Cheap to filter in
+        # Python on a list bounded by ``limit`` (max 25 rows).
+        if resume_score_join_active:
+            score_floor = prefs.min_resume_score
+            ranked_ids = [r.id for r, _ in (await db.execute(auto_q)).all()]
+            scored = (await db.execute(
+                select(ResumeScore.job_id, ResumeScore.overall_score).where(
+                    ResumeScore.resume_id == user.active_resume_id,
+                    ResumeScore.job_id.in_(ranked_ids),
+                )
+            )).all()
+            ok_ids = {jid for jid, score in scored if (score or 0) >= score_floor}
+            # Re-fetch with the ok_ids filter so we keep the JOIN-free
+            # response shape.
+            if ok_ids:
+                auto_jobs = (await db.execute(
+                    select(Job, Company.name.label("company_name"))
+                    .join(Company, Company.id == Job.company_id, isouter=True)
+                    .where(Job.id.in_(ok_ids))
+                    .order_by(Job.relevance_score.desc(), Job.first_seen_at.desc())
+                )).all()
+        else:
+            auto_jobs = (await db.execute(auto_q)).all()
 
     # Flags for the response envelope.
     kill_active = await _kill_switch_disabled(db, user.id)
@@ -284,24 +419,193 @@ async def top_to_apply(
     used_today = await _count_recent_submissions(db, user.id, hours=24)
     remaining = max(0, DAILY_CAP - used_today)
 
+    def _to_out(job: Job, company_name: str | None, *, queued: bool) -> TopToApplyJob:
+        return TopToApplyJob(
+            job_id=job.id,
+            title=job.title,
+            company_id=job.company_id,
+            company_name=company_name or "",
+            platform=job.platform,
+            relevance_score=float(job.relevance_score or 0.0),
+            geography_bucket=job.geography_bucket or None,
+            role_cluster=job.role_cluster or None,
+            is_queued=queued,
+        )
+
+    jobs_out: list[TopToApplyJob] = []
+    jobs_out.extend(_to_out(j, c, queued=True) for j, c in queued_jobs)
+    jobs_out.extend(_to_out(j, c, queued=False) for j, c in auto_jobs)
+
     return TopToApplyResponse(
         kill_switch_active=kill_active,
         daily_cap_remaining=remaining,
         answer_book_ready=coverage_ready,
-        jobs=[
-            TopToApplyJob(
-                job_id=job.id,
-                title=job.title,
-                company_id=job.company_id,
-                company_name=company_name or "",
-                platform=job.platform,
-                relevance_score=float(job.relevance_score or 0.0),
-                geography_bucket=job.geography_bucket or None,
-                role_cluster=job.role_cluster or None,
-            )
-            for job, company_name in rows
-        ],
+        jobs=jobs_out,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# F257 — Routine preferences + manual queue
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.get("/preferences", response_model=RoutinePreferences)
+async def get_routine_preferences(
+    user: User = Depends(get_current_user),
+):
+    """Return this user's ``RoutinePreferences``.
+
+    Defaults to all-empty when the column is ``{}`` (fresh user).
+    """
+    return _load_user_preferences(user)
+
+
+@router.put("/preferences", response_model=RoutinePreferences)
+async def put_routine_preferences(
+    body: RoutinePreferences,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace this user's ``routine_preferences`` JSONB.
+
+    PUT semantics — the body fully replaces the stored prefs. Use the
+    Pydantic defaults to "reset" a field to its zero value.
+    """
+    user.routine_preferences = body.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(user)
+    return _load_user_preferences(user)
+
+
+def _hydrate_target(target: RoutineTarget, job: Job, company_name: str | None) -> RoutineTargetOut:
+    """Build the wire-shape RoutineTargetOut from ORM rows.
+
+    Pulled out so both the list endpoint and the single-job upsert
+    endpoint return the same enriched shape without code duplication.
+    """
+    return RoutineTargetOut(
+        id=target.id,
+        job_id=target.job_id,
+        intent=target.intent,
+        note=target.note or "",
+        created_at=target.created_at,
+        updated_at=target.updated_at,
+        job_title=job.title or "",
+        company_name=company_name or "",
+        job_url=job.url or "",
+        relevance_score=float(job.relevance_score or 0.0),
+        platform=job.platform or "",
+    )
+
+
+@router.get("/queue", response_model=RoutineQueueResponse)
+async def get_routine_queue(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List this user's manually-queued + manually-excluded jobs.
+
+    Both lists hydrate the job + company display fields so the UI
+    can render the cards without N+1 round-trips per row.
+    """
+    rows = (await db.execute(
+        select(RoutineTarget, Job, Company.name.label("company_name"))
+        .join(Job, Job.id == RoutineTarget.job_id)
+        .join(Company, Company.id == Job.company_id, isouter=True)
+        .where(RoutineTarget.user_id == user.id)
+        .order_by(RoutineTarget.updated_at.desc())
+    )).all()
+
+    queued: list[RoutineTargetOut] = []
+    excluded: list[RoutineTargetOut] = []
+    for target, job, company_name in rows:
+        out = _hydrate_target(target, job, company_name)
+        if target.intent == "queued":
+            queued.append(out)
+        elif target.intent == "excluded":
+            excluded.append(out)
+
+    return RoutineQueueResponse(queued=queued, excluded=excluded)
+
+
+@router.post("/queue/{job_id}", response_model=RoutineTargetOut)
+async def upsert_routine_target(
+    job_id: UUID,
+    body: RoutineTargetCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pin a job to the routine queue (``intent='queued'``) or block
+    it from auto-picks (``intent='excluded'``).
+
+    Re-posting against the same ``job_id`` updates the existing row
+    in place (UNIQUE(user_id, job_id) enforces this) — switching
+    intent or updating the note is a single PATCH-equivalent.
+    """
+    # Verify the job actually exists. Don't 404 on archived jobs —
+    # the operator may want to re-include something the auto-cull
+    # disabled. The picker's hard ``status NOT IN`` filter still
+    # protects against archived/expired jobs sneaking into runs.
+    job = (await db.execute(
+        select(Job).where(Job.id == job_id)
+    )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    company_name = None
+    if job.company_id is not None:
+        company_name = (await db.execute(
+            select(Company.name).where(Company.id == job.company_id)
+        )).scalar()
+
+    existing = (await db.execute(
+        select(RoutineTarget).where(
+            RoutineTarget.user_id == user.id,
+            RoutineTarget.job_id == job_id,
+        )
+    )).scalar_one_or_none()
+
+    if existing is not None:
+        existing.intent = body.intent
+        existing.note = body.note
+        existing.updated_at = datetime.now(timezone.utc)
+    else:
+        existing = RoutineTarget(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            job_id=job_id,
+            intent=body.intent,
+            note=body.note,
+        )
+        db.add(existing)
+
+    await db.commit()
+    await db.refresh(existing)
+    return _hydrate_target(existing, job, company_name)
+
+
+@router.delete("/queue/{job_id}", status_code=204)
+async def delete_routine_target(
+    job_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a job from the manual queue / exclude list entirely.
+
+    No-op (still 204) if the row doesn't exist — idempotent so the
+    UI can fire a delete without first checking whether the row is
+    there.
+    """
+    target = (await db.execute(
+        select(RoutineTarget).where(
+            RoutineTarget.user_id == user.id,
+            RoutineTarget.job_id == job_id,
+        )
+    )).scalar_one_or_none()
+    if target is not None:
+        await db.delete(target)
+        await db.commit()
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════

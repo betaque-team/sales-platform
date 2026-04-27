@@ -91,6 +91,7 @@ from app.models.routine_run import RoutineRun  # noqa: F401
 from app.models.application_submission import ApplicationSubmission  # noqa: F401
 from app.models.humanization_corpus import HumanizationCorpus  # noqa: F401
 from app.models.routine_kill_switch import RoutineKillSwitch  # noqa: F401
+from app.models.routine_target import RoutineTarget  # noqa: F401  # F257
 
 from app.config import get_settings
 from app.database import Base

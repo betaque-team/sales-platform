@@ -1347,6 +1347,10 @@ export interface TopToApplyJob {
   relevance_score: number;
   geography_bucket: string | null;
   role_cluster: string | null;
+  // F257: true when this row is operator-pinned via the manual queue.
+  // The UI badges these so the user can confirm the override took
+  // effect (queued rows always sort above auto-picked rows).
+  is_queued?: boolean;
 }
 
 export interface TopToApplyResponse {
@@ -1354,6 +1358,39 @@ export interface TopToApplyResponse {
   daily_cap_remaining: number;
   answer_book_ready: boolean;
   jobs: TopToApplyJob[];
+}
+
+// F257 — Apply Routine preferences + manual queue
+export type RoutineTargetIntent = "queued" | "excluded";
+
+export interface RoutinePreferences {
+  // Convenience toggle: when true, picker keeps only global_remote
+  // regardless of allowed_geographies.
+  only_global_remote: boolean;
+  allowed_geographies: ("global_remote" | "usa_only" | "uae_only")[];
+  min_relevance_score: number;  // 0-100; 0 = no floor
+  min_resume_score: number;     // 0-100; 0 = no floor
+  allowed_role_clusters: string[];
+  extra_excluded_platforms: string[];
+}
+
+export interface RoutineTargetOut {
+  id: string;
+  job_id: string;
+  intent: RoutineTargetIntent;
+  note: string;
+  created_at: string;
+  updated_at: string;
+  job_title: string;
+  company_name: string;
+  job_url: string;
+  relevance_score: number;
+  platform: string;
+}
+
+export interface RoutineQueueResponse {
+  queued: RoutineTargetOut[];
+  excluded: RoutineTargetOut[];
 }
 
 export interface RoutineRun {
