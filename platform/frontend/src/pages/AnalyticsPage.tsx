@@ -14,6 +14,8 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  AreaChart,
+  Area,
 } from "recharts";
 import {
   Briefcase,
@@ -33,6 +35,7 @@ import {
   getApplicationFunnel,
   getApplicationsByPlatform,
   getReviewInsights,
+  getRelevantJobsTrend,
 } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 
@@ -399,6 +402,9 @@ export function AnalyticsPage() {
         </div>
       </Card>
 
+      {/* F258: Relevant pipeline — per-day breakdown by cluster + geography */}
+      <RelevantPipelineCard days={days} />
+
       {/* Application Analytics */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card padding="none">
@@ -651,5 +657,250 @@ export function AnalyticsPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// F258 — Relevant pipeline card (per-day breakdown by cluster + geography)
+// ─────────────────────────────────────────────────────────────────────
+
+// Stable colour palette for cluster + geography series. Distinct from
+// PIE_COLORS so a same-page chart pair doesn't reuse the indigo for
+// two different concepts. Order is opinion-led: infra first because
+// it's the dominant cluster on the dashboard; security next; geography
+// gets its own colour family (greens / ambers / pinks) so a quick
+// glance can tell "this is cluster" vs "this is geography".
+const CLUSTER_COLORS: Record<string, string> = {
+  infra:    "#6366f1",
+  security: "#3b82f6",
+  qa:       "#f59e0b",
+  devops:   "#8b5cf6",
+  cloud:    "#14b8a6",
+  data:     "#ec4899",
+};
+const GEO_COLORS: Record<string, string> = {
+  global_remote: "#10b981",
+  usa_only:      "#f97316",
+  uae_only:      "#ec4899",
+};
+
+const _SERIES_FALLBACK = ["#64748b", "#0ea5e9", "#a855f7", "#facc15", "#22c55e", "#ef4444"];
+function _colourFor(map: Record<string, string>, key: string, idx: number): string {
+  return map[key] || _SERIES_FALLBACK[idx % _SERIES_FALLBACK.length];
+}
+
+/**
+ * F258 — daily breakdown of newly-discovered RELEVANT jobs by
+ * cluster AND geography. Two stacked-area charts side-by-side so
+ * the operator can see "what's flowing in" along both axes from a
+ * single card.
+ *
+ * Both charts share one query / one ``days`` window (driven by the
+ * page-level range selector). The stacked-area encoding is the
+ * right pick because the operator's mental model is "is the total
+ * pipeline growing AND how is the mix shifting" — a stacked
+ * representation answers both at once. A side-by-side line chart
+ * would answer the second but make total-pipeline trend require a
+ * mental sum.
+ *
+ * Empty days (zero relevant jobs added) still render as zero-height
+ * stack columns so the x-axis stays continuous and a multi-day gap
+ * in scans is visible as an obvious flat zero stretch.
+ */
+function RelevantPipelineCard({ days }: { days: number }) {
+  const trendQ = useQuery({
+    queryKey: ["relevant-jobs-trend", days],
+    queryFn: () => getRelevantJobsTrend(days),
+    staleTime: 60_000,
+  });
+
+  if (trendQ.isLoading) {
+    return (
+      <Card padding="none">
+        <div className="border-b border-gray-100 px-6 py-4">
+          <h3 className="text-base font-semibold text-gray-900">Relevant pipeline</h3>
+        </div>
+        <div className="flex items-center justify-center py-16 text-sm text-gray-500">
+          Loading relevant-jobs trend…
+        </div>
+      </Card>
+    );
+  }
+
+  if (trendQ.isError || !trendQ.data) {
+    return (
+      <Card padding="none">
+        <div className="border-b border-gray-100 px-6 py-4">
+          <h3 className="text-base font-semibold text-gray-900">Relevant pipeline</h3>
+        </div>
+        <div className="flex items-center justify-center py-16 text-sm text-red-500">
+          {(trendQ.error as Error)?.message || "Failed to load trend"}
+        </div>
+      </Card>
+    );
+  }
+
+  const { rows, clusters, geographies } = trendQ.data;
+
+  // Recharts wants a flat row shape — flatten the nested ``by_cluster``
+  // / ``by_geography`` dicts into top-level keys per series. Two
+  // separate chart-data arrays so the charts don't share a y-axis
+  // scale (a 5x bigger total in one would dwarf the other).
+  const clusterRows = rows.map((r) => ({
+    day: r.day,
+    total: r.total_relevant,
+    ...Object.fromEntries(clusters.map((c) => [c, r.by_cluster[c] ?? 0])),
+  }));
+  const geoRows = rows.map((r) => ({
+    day: r.day,
+    total: r.total_relevant,
+    ...Object.fromEntries(geographies.map((g) => [g, r.by_geography[g] ?? 0])),
+  }));
+
+  // Sum across the window for the small totals strip beneath each chart.
+  const clusterTotals = clusters.map((c) => ({
+    name: c,
+    n: rows.reduce((sum, r) => sum + (r.by_cluster[c] ?? 0), 0),
+  }));
+  const geoTotals = geographies.map((g) => ({
+    name: g,
+    n: rows.reduce((sum, r) => sum + (r.by_geography[g] ?? 0), 0),
+  }));
+  const grandTotal = rows.reduce((s, r) => s + r.total_relevant, 0);
+
+  const tickFormatter = (val: string): string => {
+    if (!val) return "";
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  return (
+    <Card padding="none">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-6 py-4">
+        <div>
+          <h3 className="text-base font-semibold text-gray-900">
+            Relevant pipeline ({days}d)
+          </h3>
+          <p className="text-xs text-gray-500">
+            New relevant jobs added per day, broken down by cluster and geography.
+          </p>
+        </div>
+        <div className="rounded-md bg-primary-50 px-3 py-1.5 text-sm font-semibold text-primary-700">
+          {grandTotal.toLocaleString()} relevant added
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-4 p-6 lg:grid-cols-2">
+        {/* By cluster */}
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              By role cluster
+            </h4>
+            <div className="flex flex-wrap gap-1.5">
+              {clusterTotals.map((t, i) => (
+                <span
+                  key={t.name}
+                  className="inline-flex items-center gap-1 rounded bg-gray-50 px-1.5 py-0.5 text-[11px] font-medium text-gray-700"
+                  title={`${t.n.toLocaleString()} relevant ${t.name} jobs in ${days}d`}
+                >
+                  <span
+                    className="h-2 w-2 rounded-sm"
+                    style={{ backgroundColor: _colourFor(CLUSTER_COLORS, t.name, i) }}
+                  />
+                  {t.name}: {t.n.toLocaleString()}
+                </span>
+              ))}
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={clusterRows} margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis
+                dataKey="day"
+                tick={{ fontSize: 10, fill: "#9ca3af" }}
+                axisLine={{ stroke: "#e5e7eb" }}
+                tickFormatter={tickFormatter}
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: "#9ca3af" }}
+                axisLine={{ stroke: "#e5e7eb" }}
+              />
+              <Tooltip
+                contentStyle={{ borderRadius: "8px", border: "1px solid #e5e7eb", fontSize: "12px" }}
+              />
+              <Legend wrapperStyle={{ paddingTop: 4, fontSize: 11 }} />
+              {clusters.map((c, i) => (
+                <Area
+                  key={c}
+                  type="monotone"
+                  dataKey={c}
+                  stackId="cluster"
+                  stroke={_colourFor(CLUSTER_COLORS, c, i)}
+                  fill={_colourFor(CLUSTER_COLORS, c, i)}
+                  fillOpacity={0.6}
+                  name={c}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* By geography */}
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              By geography
+            </h4>
+            <div className="flex flex-wrap gap-1.5">
+              {geoTotals.map((t, i) => (
+                <span
+                  key={t.name}
+                  className="inline-flex items-center gap-1 rounded bg-gray-50 px-1.5 py-0.5 text-[11px] font-medium text-gray-700"
+                  title={`${t.n.toLocaleString()} relevant jobs in ${t.name.replace(/_/g, " ")} (${days}d)`}
+                >
+                  <span
+                    className="h-2 w-2 rounded-sm"
+                    style={{ backgroundColor: _colourFor(GEO_COLORS, t.name, i) }}
+                  />
+                  {t.name.replace(/_/g, " ")}: {t.n.toLocaleString()}
+                </span>
+              ))}
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={geoRows} margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis
+                dataKey="day"
+                tick={{ fontSize: 10, fill: "#9ca3af" }}
+                axisLine={{ stroke: "#e5e7eb" }}
+                tickFormatter={tickFormatter}
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: "#9ca3af" }}
+                axisLine={{ stroke: "#e5e7eb" }}
+              />
+              <Tooltip
+                contentStyle={{ borderRadius: "8px", border: "1px solid #e5e7eb", fontSize: "12px" }}
+              />
+              <Legend wrapperStyle={{ paddingTop: 4, fontSize: 11 }} />
+              {geographies.map((g, i) => (
+                <Area
+                  key={g}
+                  type="monotone"
+                  dataKey={g}
+                  stackId="geo"
+                  stroke={_colourFor(GEO_COLORS, g, i)}
+                  fill={_colourFor(GEO_COLORS, g, i)}
+                  fillOpacity={0.6}
+                  name={g.replace(/_/g, " ")}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </Card>
   );
 }

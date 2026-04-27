@@ -1393,6 +1393,29 @@ export interface RoutineQueueResponse {
   excluded: RoutineTargetOut[];
 }
 
+// F258 — daily relevant-jobs trend by cluster + geography.
+// One row per day in the requested window (zero-filled so the chart
+// x-axis is continuous). ``by_cluster_geography`` keys are
+// ``"<cluster>:<geography>"`` so a heatmap renderer can index them
+// directly.
+export interface RelevantJobsTrendRow {
+  day: string;                                // YYYY-MM-DD
+  total_relevant: number;
+  by_cluster: Record<string, number>;
+  by_geography: Record<string, number>;
+  by_cluster_geography: Record<string, number>;
+}
+
+export interface RelevantJobsTrendResponse {
+  days: number;
+  // The dynamic relevant-cluster list at the moment of the query —
+  // returned at envelope level so the frontend doesn't have to
+  // re-derive its chart legend from the per-row keys.
+  clusters: string[];
+  geographies: string[];
+  rows: RelevantJobsTrendRow[];
+}
+
 export interface RoutineRun {
   id: string;
   user_id: string;

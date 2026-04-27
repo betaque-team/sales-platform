@@ -211,6 +211,151 @@ async def trends(
     ]
 
 
+@router.get("/relevant-jobs-trend")
+async def relevant_jobs_trend(
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-day breakdown of newly-discovered RELEVANT jobs by
+    role-cluster AND geography bucket.
+
+    Powers the Analytics page's "What's flowing in" chart — operator
+    wants to see "is the relevant pipeline trending up or sideways for
+    infra in global-remote vs USA?" without spinning up SQL.
+
+    Differs from ``/trends``:
+      * ``/trends`` hardcodes ``infra`` + ``security`` into the
+        SELECT and counts every job (including unclassified ones in
+        the totals). Stable, but blind to new clusters added via the
+        admin role-config UI (qa, devsecops, etc.) and gives no
+        geography signal.
+      * This endpoint reads the dynamic relevant-cluster list,
+        excludes the ``unclassified`` noise, and emits a nested
+        breakdown so the frontend can render either a stacked-area
+        by cluster, a stacked-area by geography, OR a heatmap of
+        ``cluster × geography`` from one query.
+
+    Response shape (one row per day in ``days`` window, including
+    days with zero rows so the chart x-axis stays continuous):
+
+      [
+        {
+          "day":              "2026-04-25",
+          "total_relevant":   23,
+          "by_cluster":       {"infra": 12, "security": 8, "qa": 3},
+          "by_geography":     {"global_remote": 9, "usa_only": 11, "uae_only": 3},
+          "by_cluster_geography": {
+            "infra:global_remote": 5, "infra:usa_only": 6, "infra:uae_only": 1,
+            "security:global_remote": 3, "security:usa_only": 4, "security:uae_only": 1,
+            ...
+          }
+        },
+        ...
+      ]
+
+    The cluster + geography ENUMS the response uses are also
+    returned at the envelope level so the frontend doesn't have to
+    walk every row to build its chart legend.
+    """
+    relevant = await _get_relevant_clusters(db)
+    if not relevant:
+        # Defensive: if the role-config table is empty (fresh DB,
+        # bad migration), return an empty-but-well-shaped response
+        # rather than a SQL syntax error from ``IN ()``.
+        return {
+            "days": days,
+            "clusters": [],
+            "geographies": [],
+            "rows": [],
+        }
+
+    # Bind the cluster list as an array — psycopg2 + asyncpg both
+    # handle ``= ANY(:clusters)`` cleanly. Geography filter is the
+    # routine's three-bucket allow-list (matches what the operator
+    # actually cares about; ``""``/null buckets are noise here).
+    geographies = ("global_remote", "usa_only", "uae_only")
+
+    sql = text(
+        """
+        WITH days AS (
+          SELECT generate_series(
+            DATE(NOW() - make_interval(days => :days)),
+            DATE(NOW()),
+            '1 day'::interval
+          )::date AS day
+        ),
+        recent_jobs AS (
+          SELECT
+            DATE(first_seen_at) AS day,
+            role_cluster,
+            geography_bucket
+          FROM jobs
+          WHERE first_seen_at >= NOW() - make_interval(days => :days)
+            AND role_cluster = ANY(:clusters)
+            AND geography_bucket = ANY(:geos)
+        ),
+        per_day AS (
+          SELECT
+            day,
+            role_cluster,
+            geography_bucket,
+            COUNT(*) AS n
+          FROM recent_jobs
+          GROUP BY day, role_cluster, geography_bucket
+        )
+        SELECT
+          d.day::text AS day,
+          COALESCE(p.role_cluster, '')   AS cluster,
+          COALESCE(p.geography_bucket, '') AS geography,
+          COALESCE(p.n, 0)               AS n
+        FROM days d
+        LEFT JOIN per_day p ON p.day = d.day
+        ORDER BY d.day
+        """
+    ).bindparams(
+        days=days,
+        clusters=list(relevant),
+        geos=list(geographies),
+    )
+
+    raw = (await db.execute(sql)).all()
+
+    # Pivot into per-day buckets. The LEFT JOIN gives us at least
+    # one row per day (with cluster='' geography='' n=0) so empty
+    # days carry a zeroed entry instead of being dropped.
+    by_day: dict[str, dict] = {}
+    for row in raw:
+        day = row[0]
+        cluster = row[1]
+        geo = row[2]
+        n = int(row[3] or 0)
+        bucket = by_day.setdefault(day, {
+            "day": day,
+            "total_relevant": 0,
+            "by_cluster": {c: 0 for c in relevant},
+            "by_geography": {g: 0 for g in geographies},
+            "by_cluster_geography": {},
+        })
+        if cluster and geo and n:
+            bucket["total_relevant"] += n
+            bucket["by_cluster"][cluster] = bucket["by_cluster"].get(cluster, 0) + n
+            bucket["by_geography"][geo] = bucket["by_geography"].get(geo, 0) + n
+            key = f"{cluster}:{geo}"
+            bucket["by_cluster_geography"][key] = (
+                bucket["by_cluster_geography"].get(key, 0) + n
+            )
+
+    rows = sorted(by_day.values(), key=lambda r: r["day"])
+
+    return {
+        "days": days,
+        "clusters": list(relevant),
+        "geographies": list(geographies),
+        "rows": rows,
+    }
+
+
 @router.get("/ai-insights")
 async def ai_insights(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Generate AI-powered insights about job and company trends using Claude."""
