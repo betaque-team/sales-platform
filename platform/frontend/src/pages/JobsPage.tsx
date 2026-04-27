@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { ScoreBar } from "@/components/ScoreBar";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
+import { RoutineQueueToggle } from "@/components/RoutineQueueToggle";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
 import { SubmitLinkModal } from "@/components/SubmitLinkModal";
 import {
@@ -1116,23 +1117,30 @@ export function JobsPage() {
                     <TableCell>{formatDate(job.created_at)}</TableCell>
                     {hasActiveResume && (
                       <TableCell onClick={(e) => e.stopPropagation()}>
-                        {applyFeedback?.jobId === job.id ? (
-                          <span className={`text-xs font-medium ${applyFeedback.ok ? "text-green-600" : "text-red-500"}`}>
-                            {applyFeedback.msg}
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              setApplyingJobId(job.id);
-                              applyMutation.mutate(job.id);
-                            }}
-                            disabled={applyingJobId === job.id}
-                            className="rounded p-1.5 text-primary-600 hover:bg-primary-50 hover:text-primary-700 disabled:opacity-50"
-                            title="Prepare & apply to this job"
-                          >
-                            <Send className="h-4 w-4" />
-                          </button>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {applyFeedback?.jobId === job.id ? (
+                            <span className={`text-xs font-medium ${applyFeedback.ok ? "text-green-600" : "text-red-500"}`}>
+                              {applyFeedback.msg}
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setApplyingJobId(job.id);
+                                applyMutation.mutate(job.id);
+                              }}
+                              disabled={applyingJobId === job.id}
+                              className="rounded p-1.5 text-primary-600 hover:bg-primary-50 hover:text-primary-700 disabled:opacity-50"
+                              title="Prepare & apply to this job"
+                            >
+                              <Send className="h-4 w-4" />
+                            </button>
+                          )}
+                          {/* F257: per-row routine queue toggle in
+                              compact mode. One small chip; click
+                              cycles through none → queued or shows
+                              the current state (queued / skipped). */}
+                          <RoutineQueueToggle jobId={job.id} compact />
+                        </div>
                       </TableCell>
                     )}
                   </TableRow>

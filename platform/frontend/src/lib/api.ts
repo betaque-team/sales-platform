@@ -69,6 +69,10 @@ import type {
   RoutineRun,
   RoutineRunDetail,
   RoutineMode,
+  RoutinePreferences,
+  RoutineQueueResponse,
+  RoutineTargetIntent,
+  RoutineTargetOut,
   RoutineStatus,
   KillSwitchState,
   HumanizeResult,
@@ -1272,6 +1276,36 @@ export async function seedRequiredAnswers(): Promise<SeedRequiredResponse> {
 
 export async function getRoutineTopToApply(limit = 10): Promise<TopToApplyResponse> {
   return request<TopToApplyResponse>(`/routine/top-to-apply?limit=${limit}`);
+}
+
+// F257 — preferences + manual queue/exclude
+export async function getRoutinePreferences(): Promise<RoutinePreferences> {
+  return request<RoutinePreferences>("/routine/preferences");
+}
+
+export async function putRoutinePreferences(prefs: RoutinePreferences): Promise<RoutinePreferences> {
+  return request<RoutinePreferences>("/routine/preferences", {
+    method: "PUT",
+    body: JSON.stringify(prefs),
+  });
+}
+
+export async function getRoutineQueue(): Promise<RoutineQueueResponse> {
+  return request<RoutineQueueResponse>("/routine/queue");
+}
+
+export async function upsertRoutineTarget(
+  jobId: string,
+  payload: { intent: RoutineTargetIntent; note?: string },
+): Promise<RoutineTargetOut> {
+  return request<RoutineTargetOut>(`/routine/queue/${jobId}`, {
+    method: "POST",
+    body: JSON.stringify({ note: "", ...payload }),
+  });
+}
+
+export async function deleteRoutineTarget(jobId: string): Promise<void> {
+  return request<void>(`/routine/queue/${jobId}`, { method: "DELETE" });
 }
 
 export async function createRoutineRun(payload: {

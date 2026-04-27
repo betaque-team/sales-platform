@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -36,5 +37,28 @@ class User(Base):
         Boolean,
         default=False,
         server_default="false",
+        nullable=False,
+    )
+    # F257: per-user filter preferences for the Apply Routine's
+    # "next jobs" picker. JSONB so the schema can evolve (new toggles,
+    # sliders) without a migration per change. Default is an empty
+    # dict — ``top-to-apply`` treats any missing key as
+    # "don't filter on this", preserving the legacy behaviour for
+    # users who haven't set anything yet.
+    #
+    # Documented shape (kept in sync with
+    # ``app.schemas.routine.RoutinePreferences``):
+    #   {
+    #     "only_global_remote":     bool,
+    #     "allowed_geographies":    list[str],
+    #     "min_relevance_score":    int (0-100),
+    #     "min_resume_score":       int (0-100),
+    #     "allowed_role_clusters":  list[str],
+    #     "extra_excluded_platforms": list[str]
+    #   }
+    routine_preferences: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default="{}",
         nullable=False,
     )

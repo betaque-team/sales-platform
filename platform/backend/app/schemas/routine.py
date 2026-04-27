@@ -198,6 +198,11 @@ class TopToApplyJob(BaseModel):
     relevance_score: float
     geography_bucket: str | None
     role_cluster: str | None
+    # F257: tells the UI which rows are operator-pinned via the manual
+    # queue (``queued`` intent) vs. auto-picked by the relevance
+    # picker. Pinned rows render with a small "queued" badge so the
+    # operator can confirm their override took effect.
+    is_queued: bool = False
 
 
 class TopToApplyResponse(BaseModel):
@@ -205,6 +210,98 @@ class TopToApplyResponse(BaseModel):
     daily_cap_remaining: int
     answer_book_ready: bool  # cached copy of required-coverage.complete
     jobs: list[TopToApplyJob]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# F257 — Routine preferences + manual queue
+# ═══════════════════════════════════════════════════════════════════
+
+
+# Allow-list for ``RoutineTarget.intent`` enforced at the API boundary.
+# Mirrors ``ROUTINE_TARGET_INTENTS`` in the model — keep them in sync.
+RoutineTargetIntent = Literal["queued", "excluded"]
+
+# Geography buckets the routine knows how to handle (must match the
+# existing ``ROUTINE_GEOGRAPHY_BUCKETS`` in the routine router). Kept
+# as a Literal so a typo on the frontend 422s at parse time instead of
+# silently emptying the picker.
+GeographyBucket = Literal["global_remote", "usa_only", "uae_only"]
+
+
+class RoutinePreferences(BaseModel):
+    """Per-user filter preferences applied by ``GET /routine/top-to-apply``.
+
+    Every field is optional with a sensible default — a fresh user
+    with an empty ``users.routine_preferences`` JSONB column gets the
+    legacy behaviour (no extra filtering).
+
+    Wire shape mirrors ``users.routine_preferences`` in the DB. New
+    fields can be added here AND read defensively in the picker
+    without a migration.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    # Convenience toggle: when True, picker keeps only
+    # ``geography_bucket="global_remote"`` regardless of
+    # ``allowed_geographies``. Default off so existing users see no
+    # behaviour change.
+    only_global_remote: bool = False
+    # Subset of geography buckets the routine should consider. Empty
+    # list means "all". A list overrides
+    # ``only_global_remote=False`` only insofar as the picker still
+    # filters to this subset.
+    allowed_geographies: list[GeographyBucket] = Field(default_factory=list)
+    # Floor on ``Job.relevance_score`` (0-100). 0 = no floor.
+    min_relevance_score: int = Field(default=0, ge=0, le=100)
+    # Floor on the user's resume-fit score for this job (0-100).
+    # 0 = no floor. The picker joins to the user's active resume's
+    # ResumeScore row; jobs without a score get treated as score=0
+    # so a non-zero floor effectively requires the resume to have
+    # been scored against them already.
+    min_resume_score: int = Field(default=0, ge=0, le=100)
+    # Allow-list of role clusters. Empty = use the platform-wide
+    # "relevant clusters" (infra/security default). Lets a security-
+    # only user exclude infra and vice versa without changing the
+    # global config.
+    allowed_role_clusters: list[str] = Field(default_factory=list, max_length=20)
+    # Additional platforms to exclude from the picker (extends the
+    # always-excluded ``EXCLUDED_PLATFORMS = {"linkedin"}`` constant).
+    # Use case: user has bad experience with a particular ATS and
+    # wants the routine to skip it without dropping the platform
+    # globally for everyone else.
+    extra_excluded_platforms: list[str] = Field(default_factory=list, max_length=20)
+
+
+class RoutineTargetCreate(BaseModel):
+    """Body for ``POST /routine/queue/{job_id}``."""
+    model_config = ConfigDict(extra="forbid")
+
+    intent: RoutineTargetIntent = "queued"
+    note: str = Field(default="", max_length=500)
+
+
+class RoutineTargetOut(BaseModel):
+    """One row from ``GET /routine/queue``."""
+    id: UUID
+    job_id: UUID
+    intent: RoutineTargetIntent
+    note: str
+    created_at: datetime
+    updated_at: datetime
+    # Job + company display fields hydrated by the handler so the UI
+    # can render the row without a second round-trip per job.
+    job_title: str = ""
+    company_name: str = ""
+    job_url: str = ""
+    relevance_score: float = 0.0
+    platform: str = ""
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoutineQueueResponse(BaseModel):
+    queued: list[RoutineTargetOut]
+    excluded: list[RoutineTargetOut]
 
 
 class CreateRoutineRunRequest(BaseModel):
