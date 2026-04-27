@@ -9,6 +9,7 @@ from the input surface entirely — the server always sets it based on
 the endpoint, eliminating the provenance-spoofing footgun.
 """
 
+import logging
 import re
 import uuid
 from uuid import UUID
@@ -18,6 +19,8 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import func
+
+logger = logging.getLogger(__name__)
 
 from app.database import get_db
 from app.models.answer_book import AnswerBookEntry
@@ -544,26 +547,22 @@ async def get_coverage(
 # Claude Routine Apply — required-setup endpoints
 # ═══════════════════════════════════════════════════════════════════
 
-@router.post("/seed-required", response_model=SeedRequiredResponse)
-async def seed_required(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Create the 16 routine-required answer-book entries for this user.
+async def _seed_required_for_user(
+    user: User,
+    db: AsyncSession,
+) -> tuple[int, int]:
+    """Idempotently create any missing routine-required entries.
 
-    Idempotent: entries that already exist for ``(user_id,
-    question_key)`` are skipped (counted in ``already_present``).
-    Safe to re-call at any time — the UI /required-setup page calls
-    this on first mount.
+    Returns ``(created, already_present)``. Extracted from the POST
+    handler so the GET ``/required-coverage`` endpoint can call it
+    inline (F256 fix — see the GET handler for why).
 
     Every row is created with ``source="manual_required"``,
     ``is_locked=True``, and ``answer=""``. The user fills in answers
-    via PATCH /answer-book/{id} on the same page. See
-    ``services/answer_book_seed.py`` for the canonical list.
+    via PATCH /answer-book/{id} on the same page.
     """
     created = 0
     already_present = 0
-
     for category, question_key, question in REQUIRED_ENTRIES:
         # Uniqueness key matches the DB constraint (user_id, resume_id
         # IS NULL, question_key). We always seed as shared entries
@@ -603,9 +602,26 @@ async def seed_required(
             is_locked=True,
         ))
         created += 1
+    if created or already_present:
+        await db.commit()
+    return created, already_present
 
-    await db.commit()
 
+@router.post("/seed-required", response_model=SeedRequiredResponse)
+async def seed_required(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create the 16 routine-required answer-book entries for this user.
+
+    Idempotent: entries that already exist for ``(user_id,
+    question_key)`` are skipped (counted in ``already_present``).
+    Safe to re-call at any time. As of F256 the seed also runs
+    automatically on first ``GET /required-coverage`` so the user
+    never has to click this button — it stays around for manual
+    re-seed after data resets.
+    """
+    created, already_present = await _seed_required_for_user(user, db)
     return SeedRequiredResponse(
         created=created,
         already_present=already_present,
@@ -625,9 +641,26 @@ async def required_coverage(
     The UI /required-setup page shows this as a progress bar +
     list of unfilled entries.
 
+    F256 regression fix: this endpoint now AUTO-SEEDS missing entries
+    on read. Pre-fix the unseeded entries were returned with
+    placeholder ``uuid.uuid4()`` ids freshly generated on every GET.
+    Those ids didn't exist in the DB, so the user typing into the
+    input + clicking Save fired ``PATCH /answer-book/{placeholder}``
+    → 404 → save mutation failed silently → "values are not saving"
+    user report (and "saved values not visible" for the same reason —
+    nothing was ever persisted). Auto-seed makes every returned id
+    real-and-PATCH-able from the very first page load. The seed is
+    idempotent so repeated reads cost only the SELECT scan when
+    everything's already present.
+
     Returns rows ordered by the canonical seed order so the UI
     renders them in a predictable sequence (comp, work-auth, EEO).
     """
+    # F256: ensure every required entry exists before computing
+    # coverage. ``_seed_required_for_user`` is idempotent and a no-op
+    # commit when nothing's missing.
+    await _seed_required_for_user(user, db)
+
     result = await db.execute(
         select(AnswerBookEntry).where(
             AnswerBookEntry.user_id == user.id,
@@ -638,17 +671,23 @@ async def required_coverage(
     entries = {e.question_key: e for e in result.scalars().all()}
 
     # Walk REQUIRED_ENTRIES in canonical order so the UI renders a
-    # stable list — independent of DB insert order. Entries that
-    # haven't been seeded yet are reported as missing with a stub
-    # row (id=uuid.uuid4 placeholder) so the UI can still render the
-    # question text; the user clicks "Seed required entries" and
-    # re-fetches.
+    # stable list — independent of DB insert order. After the
+    # auto-seed above, ``entries.get(question_key)`` should always
+    # return a real row; the placeholder branch is kept as
+    # belt-and-suspenders against a race or partial-commit scenario.
     items: list[RequiredCoverageEntry] = []
     for category, question_key, question in REQUIRED_ENTRIES:
         entry = entries.get(question_key)
         if entry is None:
+            # Auto-seed should have filled this. If we still hit it
+            # the seed transaction was somehow skipped — log but don't
+            # 500 the read; placeholder id keeps the UI list stable.
+            logger.warning(
+                "required-coverage: missing entry %s after auto-seed (user=%s)",
+                question_key, user.id,
+            )
             items.append(RequiredCoverageEntry(
-                id=uuid.uuid4(),  # placeholder — will be real after seed
+                id=uuid.uuid4(),
                 category=category,
                 question=question,
                 question_key=question_key,
