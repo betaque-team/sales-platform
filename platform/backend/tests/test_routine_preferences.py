@@ -209,6 +209,18 @@ def test_user_model_has_routine_preferences_jsonb_column():
     )
 
 
+def test_analytics_router_exposes_relevant_jobs_trend():
+    """F258 — the new ``/analytics/relevant-jobs-trend`` endpoint
+    must register on the analytics router. Renaming or losing it
+    breaks the AnalyticsPage's "Relevant pipeline" card."""
+    from app.api.v1.analytics import router
+
+    paths = {(r.path, m) for r in router.routes for m in (getattr(r, "methods", set()) or set()) if m != "HEAD"}
+    assert ("/analytics/relevant-jobs-trend", "GET") in paths, (
+        f"F258 endpoint missing — got {sorted(paths)}"
+    )
+
+
 def test_routine_target_table_has_unique_user_job():
     """One row per (user, job) — re-pinning a job updates in place
     rather than stacking duplicates. Locked by the migration's

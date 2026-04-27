@@ -73,6 +73,7 @@ import type {
   RoutineQueueResponse,
   RoutineTargetIntent,
   RoutineTargetOut,
+  RelevantJobsTrendResponse,
   RoutineStatus,
   KillSwitchState,
   HumanizeResult,
@@ -484,6 +485,16 @@ export async function getAnalyticsTrends(
   days: number = 30
 ): Promise<TrendDataPoint[]> {
   return request<TrendDataPoint[]>(`/analytics/trends?days=${days}`);
+}
+
+// F258: per-day relevant-jobs breakdown by cluster + geography.
+// Powers the AnalyticsPage "Relevant pipeline" stacked-area card.
+export async function getRelevantJobsTrend(
+  days: number = 30
+): Promise<RelevantJobsTrendResponse> {
+  return request<RelevantJobsTrendResponse>(
+    `/analytics/relevant-jobs-trend?days=${days}`
+  );
 }
 
 export async function getAnalyticsFunnel(): Promise<{ stages: FunnelStep[] }> {
