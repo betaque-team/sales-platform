@@ -38,6 +38,12 @@ export function RequiredSetupPage() {
   const queryClient = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
+  // F256: per-row save error so a 404 / 422 / 500 doesn't fail
+  // silently — pre-fix the user clicked Save, the spinner disappeared,
+  // and the value never persisted because the placeholder UUID didn't
+  // exist in the DB yet. Now we show the message inline next to the
+  // input so the user knows what went wrong.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
 
   const coverageQ = useQuery({
     queryKey: ["required-coverage"],
@@ -65,9 +71,22 @@ export function RequiredSetupPage() {
         delete next[variables.id];
         return next;
       });
+      setSaveErrors((prev) => {
+        if (!(variables.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[variables.id];
+        return next;
+      });
       setSavingId(null);
     },
-    onError: () => setSavingId(null),
+    onError: (err: unknown, variables) => {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Save failed. Please retry.";
+      setSaveErrors((prev) => ({ ...prev, [variables.id]: message }));
+      setSavingId(null);
+    },
   });
 
   if (coverageQ.isLoading) {
@@ -277,6 +296,16 @@ export function RequiredSetupPage() {
                           : "Save"}
                       </button>
                     </div>
+                    {/* F256: per-row error surface. The user used to
+                        get zero feedback when a save 404'd against a
+                        stale placeholder UUID — now the message is
+                        right under the input so the failure is
+                        visible and the user can retry / refresh. */}
+                    {saveErrors[entry.id] && (
+                      <p className="pl-6 text-xs text-red-600">
+                        {saveErrors[entry.id]}
+                      </p>
+                    )}
                   </li>
                 );
               })}
