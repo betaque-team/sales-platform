@@ -252,32 +252,52 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
   const fileRef = useRef<HTMLInputElement>(null);
 
   const queryClient = useQueryClient();
+  // F260 regression fix: pre-fix the create flow caught attachment-
+  // upload errors with a bare ``catch {}`` and threw the error away
+  // ("Non-blocking: ticket created, attachment failed"). The user
+  // saw the ticket appear with NO attachment + no explanation, then
+  // filed feedback ID 29bdf762 ("Attachments are not working").
+  // Now we collect the per-file failure reasons + display them
+  // alongside the success message so a magic-byte mismatch / wrong
+  // MIME / size violation is actually visible.
+  const [attachmentErrors, setAttachmentErrors] = useState<string[]>([]);
   const mutation = useMutation({
     mutationFn: async (data: FeedbackCreate) => {
       // Create ticket first
       const fb = await createFeedback(data);
-      // Upload pending files
+      // Upload pending files — capture each failure with a clear
+      // per-file message rather than silently swallowing.
+      const failures: string[] = [];
       for (const file of pendingFiles) {
         try {
           await uploadFeedbackAttachment(fb.id, file);
-        } catch {
-          // Non-blocking: ticket created, attachment failed
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          failures.push(`${file.name}: ${msg}`);
         }
       }
-      return fb;
+      return { fb, failures };
     },
-    onSuccess: (fb) => {
+    onSuccess: ({ fb, failures }) => {
       queryClient.invalidateQueries({ queryKey: ["feedback"] });
-      setCategory("");
-      setTitle("");
-      setDescription("");
-      setStepsToReproduce("");
-      setExpectedBehavior("");
-      setActualBehavior("");
-      setUseCase("");
-      setProposedSolution("");
-      setImpact("");
-      setPendingFiles([]);
+      // Reset the form fields ONLY if every attachment succeeded.
+      // Otherwise keep ``pendingFiles`` populated so the user can
+      // retry the failed upload(s) without re-typing the description.
+      if (failures.length === 0) {
+        setCategory("");
+        setTitle("");
+        setDescription("");
+        setStepsToReproduce("");
+        setExpectedBehavior("");
+        setActualBehavior("");
+        setUseCase("");
+        setProposedSolution("");
+        setImpact("");
+        setPendingFiles([]);
+        setAttachmentErrors([]);
+      } else {
+        setAttachmentErrors(failures);
+      }
       onSuccess(fb.id);
     },
   });
@@ -626,6 +646,32 @@ function SubmitFeedbackForm({ onSuccess }: { onSuccess: (id: string) => void }) 
             <p className="text-sm text-red-600">
               {(mutation.error as any)?.message || "Failed to submit. Please try again."}
             </p>
+          )}
+          {/* F260: surface per-file attachment errors. Pre-fix the
+              create flow swallowed every upload error silently — the
+              ticket appeared with no attachment and the user assumed
+              attachments were broken (feedback 29bdf762). The amber
+              tone (vs red mutation.isError) reflects that the ticket
+              itself was created successfully and only the upload(s)
+              failed. */}
+          {attachmentErrors.length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p className="font-medium">
+                Ticket created — {attachmentErrors.length} attachment
+                {attachmentErrors.length === 1 ? "" : "s"} failed:
+              </p>
+              <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs">
+                {attachmentErrors.map((err, idx) => (
+                  <li key={idx}>{err}</li>
+                ))}
+              </ul>
+              <p className="mt-2 text-xs text-amber-800">
+                Most common reasons: file over 10 MB, type not allowed
+                (PNG/JPG/GIF/WebP/PDF/CSV/XLSX/DOCX only), or file
+                contents don't match the declared type. Edit the
+                ticket from the list to retry the upload.
+              </p>
+            </div>
           )}
         </>
       )}

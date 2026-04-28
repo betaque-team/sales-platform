@@ -126,6 +126,11 @@ function buildInitialFilters(searchParams: URLSearchParams): JobFilters {
       status: (searchParams.get("status") || "") as JobFilters["status"],
       platform: searchParams.get("platform") || "",
       geography: searchParams.get("geography") || "",
+      // F260: ``role_cluster=any`` is the explicit "All Jobs" sentinel
+      // from the Sidebar. We keep it on the filter object so the page
+      // header and active-link checks can distinguish "user navigated
+      // to All Jobs" from "user landed on /jobs with localStorage
+      // restored." Backend treats ``any`` as no-filter (jobs.py).
       role_cluster: searchParams.get("role_cluster") || "",
       is_classified: parseIsClassified(searchParams.get("is_classified")),
       sorts,
@@ -664,7 +669,7 @@ export function JobsPage() {
               ? "Unclassified Jobs"
               : filters.role_cluster === "relevant"
                 ? "Relevant Jobs"
-                : filters.role_cluster
+                : filters.role_cluster && filters.role_cluster !== "any"
                   ? `${(activeClusters.find((c) => c.name === filters.role_cluster)?.display_name) || (filters.role_cluster.charAt(0).toUpperCase() + filters.role_cluster.slice(1))} Jobs`
                   : "All Jobs"}
           </h1>

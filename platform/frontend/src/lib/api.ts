@@ -1211,8 +1211,16 @@ export async function updateProfile(
   });
 }
 
-export async function archiveProfile(profileId: string): Promise<void> {
-  return request<void>(`/profiles/${profileId}`, { method: "DELETE" });
+// Soft-archive by default. Pass ``{hard: true, confirm: <profile.email>}``
+// for a permanent purge — the backend gates this on a case-insensitive
+// email match (typed-second-factor) and cascades the row + on-disk
+// document files. Mirrors the F238(d) document-vault pattern.
+export async function archiveProfile(
+  profileId: string,
+  opts: { hard?: boolean; confirm?: string } = {}
+): Promise<void> {
+  const query = buildQuery({ hard: opts.hard, confirm: opts.confirm });
+  return request<void>(`/profiles/${profileId}${query}`, { method: "DELETE" });
 }
 
 // Upload a document — mirrors the `uploadResume` pattern: hand-rolled

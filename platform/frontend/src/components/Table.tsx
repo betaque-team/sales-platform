@@ -8,8 +8,31 @@ export function Table({
   children: ReactNode;
   className?: string;
 }) {
+  // F260 regression fix: Mac mini users without a touchpad can't
+  // swipe-scroll horizontally, and macOS hides the scrollbar by
+  // default unless touched. The Jobs table is wider than ~1280px
+  // viewports, so half the columns become invisible-and-untouchable
+  // (feedback 9409b8b2 — "I cannot go through what is at the right
+  // side of that page"). Two fixes layered here:
+  //   1. ``[scrollbar-gutter:stable]`` reserves the gutter so the
+  //      bar is visible even when not actively scrolling. Modern
+  //      Safari + Chrome + Firefox all honour this.
+  //   2. ``[&::-webkit-scrollbar]`` styles force a 10px bar on
+  //      WebKit (macOS Safari) where the OS-level "auto-hide
+  //      scrollbars" preference would otherwise dominate.
+  // Net: a visible scrollbar appears at the bottom of every wide
+  // table — the affordance for "drag this to see more →" stays on
+  // screen, no mouse hover required.
   return (
-    <div className={clsx("overflow-x-auto", className)}>
+    <div
+      className={clsx(
+        "overflow-x-auto",
+        "[scrollbar-gutter:stable]",
+        "[&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:bg-gray-100",
+        "[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-400",
+        className,
+      )}
+    >
       <table className="min-w-full divide-y divide-gray-200">
         {children}
       </table>
