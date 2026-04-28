@@ -1,9 +1,43 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApplications, getApplicationStats, updateApplication, deleteApplication, getApplication, getApplicationSubmission, promoteAnswer } from "@/lib/api";
-import { Send, Briefcase, Clock, Trophy, Trash2, ExternalLink, ChevronLeft, ChevronRight, FileCheck, Mail, XCircle, LogOut, FileText, Bot, BookmarkPlus, Check } from "lucide-react";
+import {
+  getApplications,
+  getApplicationStats,
+  updateApplication,
+  deleteApplication,
+  getApplication,
+  getApplicationSubmission,
+  promoteAnswer,
+  // F261 — Team Pipeline Tracker. Three new helpers feed the admin
+  // "Team Pipeline" scope: the cross-user feed, the inline stage
+  // editor, and the catalog of pipeline stages used by the dropdown.
+  getTeamApplications,
+  updateApplicationStage,
+  getPipelineStages,
+} from "@/lib/api";
+import {
+  Send,
+  Briefcase,
+  Clock,
+  Trophy,
+  Trash2,
+  ExternalLink,
+  ChevronLeft,
+  ChevronRight,
+  FileCheck,
+  Mail,
+  XCircle,
+  LogOut,
+  FileText,
+  Bot,
+  BookmarkPlus,
+  Check,
+  Users,
+  User as UserIcon,
+} from "lucide-react";
 import { BackendErrorBanner } from "@/components/BackendErrorBanner";
+import { useAuth } from "@/lib/auth";
 import type { ApplicationDetail, SubmissionDetail } from "@/lib/types";
 
 const STATUS_TABS: { label: string; value: string }[] = [
@@ -39,6 +73,16 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 
 export function ApplicationsPage() {
   const navigate = useNavigate();
+  // F261 — scope toggle. Default is "mine" (the original page).
+  // Admin / super_admin see a "Team Pipeline" tab that swaps in the
+  // cross-user feed; the toggle is hidden for reviewer/viewer to
+  // avoid presenting an option that would 403 on click. The backend
+  // is the source of truth (require_role("admin") on the route), so
+  // this UI gate is purely UX.
+  const { user: authUser } = useAuth();
+  const isAdmin =
+    authUser?.role === "admin" || authUser?.role === "super_admin";
+  const [scope, setScope] = useState<"mine" | "team">("mine");
   const [statusFilter, setStatusFilter] = useState("");
   // F228 — provenance filter. "" = all, "review_queue" | "manual_prepare" |
   // "routine" = narrow to that source. Matches the backend Literal values
@@ -118,6 +162,39 @@ export function ApplicationsPage() {
       {/* F222: surfaces stats/list failures. */}
       <BackendErrorBanner queries={[statsQ, applicationsQ]} />
 
+      {/* F261 — scope tabs. Admin/super_admin only. Switches the page
+          between "my applications" and "team pipeline". The team view
+          is rendered as a separate sub-component below so the per-user
+          path stays unchanged for non-admin users. */}
+      {isAdmin && (
+        <div className="flex gap-1 rounded-lg border border-gray-200 bg-white p-1 w-fit">
+          <button
+            onClick={() => setScope("mine")}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              scope === "mine"
+                ? "bg-primary-100 text-primary-700"
+                : "text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            <UserIcon className="h-3.5 w-3.5" />
+            My applications
+          </button>
+          <button
+            onClick={() => setScope("team")}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              scope === "team"
+                ? "bg-primary-100 text-primary-700"
+                : "text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            <Users className="h-3.5 w-3.5" />
+            Team pipeline
+          </button>
+        </div>
+      )}
+
+      {scope === "team" && isAdmin ? <TeamPipelineView /> : (
+      <>
       {/* Stats */}
       <div className="grid grid-cols-4 gap-3 lg:grid-cols-8">
         {statCards.map((s) => (
@@ -365,6 +442,8 @@ export function ApplicationsPage() {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {/* Feature C — apply-time snapshot modal. Fetches the full detail
           payload on demand (the list endpoint doesn't ship the resume
@@ -389,6 +468,260 @@ export function ApplicationsPage() {
           onClose={() => setRoutineOpenFor(null)}
         />
       )}
+    </div>
+  );
+}
+
+
+// F261 — Team Pipeline view. Shown when an admin/super_admin flips
+// the scope toggle to "team". Cross-user feed of every application
+// with applicant identity, status, and stage_key. The stage column
+// is editable via inline dropdown — admins use this to manually
+// move applications through the configurable funnel ("Interview 1",
+// "Final round", etc.) without touching the per-user status enum.
+//
+// Two queries:
+//   - getTeamApplications: the rows (admin-gated 403 → falls through
+//     to the BackendErrorBanner just like any other failure).
+//   - getPipelineStages: the catalog used by the inline dropdown.
+//     Cached because stages don't change often; same key as the
+//     PipelinePage so the data is shared.
+function TeamPipelineView() {
+  const queryClient = useQueryClient();
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [stageFilter, setStageFilter] = useState<string>("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+
+  const teamQ = useQuery({
+    queryKey: ["applications-team", statusFilter, stageFilter, search, page],
+    queryFn: () =>
+      getTeamApplications({
+        status: statusFilter || undefined,
+        stage_key: stageFilter || undefined,
+        search: search || undefined,
+        page,
+        page_size: 25,
+      }),
+  });
+  const stagesQ = useQuery({
+    queryKey: ["pipeline-stages"],
+    queryFn: getPipelineStages,
+  });
+  const stages = stagesQ.data?.items.filter((s) => s.is_active) || [];
+
+  const stageMutation = useMutation({
+    mutationFn: ({ id, stageKey }: { id: string; stageKey: string | null }) =>
+      updateApplicationStage(id, stageKey),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["applications-team"] });
+      queryClient.invalidateQueries({ queryKey: ["pipeline"] });
+    },
+  });
+
+  const data = teamQ.data;
+  const items = data?.items ?? [];
+
+  return (
+    <div className="space-y-4">
+      <BackendErrorBanner queries={[teamQ, stagesQ]} />
+
+      {/* Filters: status (apply-state), stage (funnel), search */}
+      <div className="flex flex-wrap items-center gap-3">
+        <select
+          value={statusFilter}
+          onChange={(e) => {
+            setStatusFilter(e.target.value);
+            setPage(1);
+          }}
+          className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm"
+          aria-label="Filter by status"
+        >
+          {STATUS_TABS.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.value === "" ? "All statuses" : t.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={stageFilter}
+          onChange={(e) => {
+            setStageFilter(e.target.value);
+            setPage(1);
+          }}
+          className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm"
+          aria-label="Filter by pipeline stage"
+        >
+          <option value="">All stages</option>
+          {stages.map((s) => (
+            <option key={s.key} value={s.key}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          placeholder="Search job, company, or applicant…"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
+          className="w-72 rounded-lg border border-gray-200 px-3 py-1.5 text-sm"
+        />
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white">
+        {/* Horizontal scroll wrapper — F260 mac-mini fix style:
+            scrollbar-gutter:stable + visible WebKit thumb so admins
+            on macOS without a touchpad can still see every column. */}
+        <div className="overflow-x-auto [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:bg-gray-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-400">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Applied</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Applicant</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Job</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Company</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Resume</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Status</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Stage</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Source</th>
+                <th className="px-4 py-3 text-left font-medium text-gray-500">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teamQ.isLoading ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
+                    Loading…
+                  </td>
+                </tr>
+              ) : items.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-12 text-center">
+                    <Users className="mx-auto h-10 w-10 text-gray-300" />
+                    <p className="mt-3 text-sm font-medium text-gray-900">
+                      No team applications match these filters
+                    </p>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Once a teammate applies to a job, the row appears here.
+                    </p>
+                  </td>
+                </tr>
+              ) : (
+                items.map((row) => (
+                  <tr key={row.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
+                      {row.applied_at
+                        ? new Date(row.applied_at).toLocaleDateString()
+                        : new Date(row.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-4 py-3">
+                      {/* Applicant identity is the headline column on
+                          the team feed — when HR replies later, this
+                          is the row that lets the operator see "Sarthak
+                          applied with Resume A from Account X". */}
+                      <div className="font-medium text-gray-900">{row.applicant_name}</div>
+                      <div className="text-xs text-gray-500">{row.applicant_email}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-gray-900">{row.job_title}</div>
+                      <div className="text-xs text-gray-500">{row.platform}</div>
+                    </td>
+                    <td className="px-4 py-3 text-gray-600">{row.company_name || "—"}</td>
+                    <td className="px-4 py-3 text-gray-600">{row.resume_label || "—"}</td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_COLORS[row.status] || ""}`}>
+                        {STATUS_TABS.find((t) => t.value === row.status)?.label || row.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {/* Inline stage selector — admins move the
+                          application through the configurable funnel
+                          here. ``stage_key=null`` clears it (the
+                          empty-option below). */}
+                      <select
+                        value={row.stage_key ?? ""}
+                        onChange={(e) =>
+                          stageMutation.mutate({
+                            id: row.id,
+                            stageKey: e.target.value || null,
+                          })
+                        }
+                        disabled={stageMutation.isPending}
+                        className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs"
+                      >
+                        <option value="">— no stage —</option>
+                        {stages.map((s) => (
+                          <option key={s.key} value={s.key}>
+                            {s.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.submission_source === "review_queue" ? (
+                        <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-200">
+                          Review queue
+                        </span>
+                      ) : row.submission_source === "routine" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200">
+                          <Bot className="h-3 w-3" />
+                          Routine
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
+                          Manual
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.job_url && (
+                        <a
+                          href={row.job_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                          title="Open ATS posting"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </a>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {data && (data.total_pages ?? 1) > 1 && (
+          <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3">
+            <span className="text-sm text-gray-500">
+              Page {data.page} of {data.total_pages} ({data.total} total)
+            </span>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setPage(Math.max(1, page - 1))}
+                disabled={page <= 1}
+                className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-30"
+              >
+                <ChevronLeft className="h-5 w-5" />
+              </button>
+              <button
+                onClick={() =>
+                  setPage(Math.min(data.total_pages ?? 1, page + 1))
+                }
+                disabled={page >= (data.total_pages ?? 1)}
+                className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-30"
+              >
+                <ChevronRight className="h-5 w-5" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

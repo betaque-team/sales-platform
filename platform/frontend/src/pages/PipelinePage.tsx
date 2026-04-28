@@ -11,6 +11,8 @@ import {
   Trash2,
   Check,
   X,
+  Users,
+  ExternalLink,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Card } from "@/components/Card";
@@ -24,6 +26,10 @@ import {
   createPipelineStage,
   updatePipelineStage,
   deletePipelineStage,
+  // F261 — drill-down: list every application under a pipeline card
+  // and let the admin reassign their funnel stage from the side panel.
+  getClientApplications,
+  updateApplicationStage,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type { PipelineItem } from "@/lib/types";
@@ -62,12 +68,18 @@ function PipelineCard({
   isMoving,
   isAdmin,
   stageOrder,
+  // F261 — drill-down handler. When set, the card renders a small
+  // "applications" button that opens the side panel for this client.
+  // Optional so the prop is opt-in for any future caller that doesn't
+  // need the affordance.
+  onOpenApplications,
 }: {
   item: PipelineItem;
   onMove: (id: string, stage: string) => void;
   isMoving: boolean;
   isAdmin: boolean;
   stageOrder: string[];
+  onOpenApplications?: (clientId: string) => void;
 }) {
   const currentIdx = stageOrder.indexOf(item.stage);
   const canMoveLeft = currentIdx > 0;
@@ -162,12 +174,27 @@ function PipelineCard({
         >
           <ChevronLeft className="h-4 w-4" />
         </button>
-        <span className="text-xs text-gray-400">
-          {new Date(item.created_at).toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          })}
-        </span>
+        <div className="flex items-center gap-2">
+          {/* F261 — drill-down trigger. Only renders for admins (the
+              parent gates ``onOpenApplications``) so non-admins
+              never see a button that would 403 on click. */}
+          {onOpenApplications && (
+            <button
+              onClick={() => onOpenApplications(item.id)}
+              className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-700 hover:bg-gray-200 transition-colors"
+              title="View applications under this company"
+            >
+              <Users className="h-3 w-3" />
+              Apps
+            </button>
+          )}
+          <span className="text-xs text-gray-400">
+            {new Date(item.created_at).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })}
+          </span>
+        </div>
         <button
           onClick={() => canMoveRight && onMove(item.id, stageOrder[currentIdx + 1])}
           disabled={!canMoveRight || isMoving}
@@ -289,6 +316,11 @@ export function PipelinePage() {
   const isAdmin = user?.role === "admin" || user?.role === "super_admin";
   const queryClient = useQueryClient();
   const [showAddStage, setShowAddStage] = useState(false);
+  // F261 — id of the pipeline client whose applications side-panel is
+  // currently open. null = panel closed. Admin-only; the
+  // ``onOpenApplications`` prop on PipelineCard is gated on isAdmin
+  // below so non-admins can never trigger this state.
+  const [drillClientId, setDrillClientId] = useState<string | null>(null);
 
   // F222: previously only destructured `data` — a 500/network error on
   // /pipeline silently rendered blank kanban columns with no error state.
@@ -429,6 +461,9 @@ export function PipelinePage() {
                       isMoving={moveMutation.isPending}
                       isAdmin={isAdmin}
                       stageOrder={stageOrder}
+                      onOpenApplications={
+                        isAdmin ? (id) => setDrillClientId(id) : undefined
+                      }
                     />
                   ))
                 ) : (
@@ -464,6 +499,176 @@ export function PipelinePage() {
           </div>
         </Card>
       )}
+
+      {/* F261 — applications drill-down panel. Slides in from the right
+          when an admin clicks "Apps" on a card. Lists every application
+          across the team for the card's company, with the same inline
+          stage selector used in the Team Pipeline tab. */}
+      {drillClientId && (
+        <ClientApplicationsPanel
+          clientId={drillClientId}
+          stagesConfig={stagesConfig}
+          onClose={() => setDrillClientId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+
+// F261 — Slide-out side panel listing applications under a single
+// pipeline card. Opened from PipelineCard's "Apps" button. The panel
+// is admin-only by virtue of:
+//   1. The "Apps" button only renders when ``onOpenApplications`` is
+//      passed (we gate that prop on ``isAdmin``).
+//   2. The backend route ``GET /pipeline/{id}/applications`` requires
+//      ``require_role("admin")``, so even a hand-crafted request from
+//      a viewer's browser 403s.
+function ClientApplicationsPanel({
+  clientId,
+  stagesConfig,
+  onClose,
+}: {
+  clientId: string;
+  stagesConfig: { key: string; label: string; color: string }[];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const drillQ = useQuery({
+    queryKey: ["pipeline-applications", clientId],
+    queryFn: () => getClientApplications(clientId),
+  });
+  const stageMut = useMutation({
+    mutationFn: ({ id, stageKey }: { id: string; stageKey: string | null }) =>
+      updateApplicationStage(id, stageKey),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pipeline-applications", clientId] });
+      queryClient.invalidateQueries({ queryKey: ["applications-team"] });
+    },
+  });
+  const items = drillQ.data?.items ?? [];
+
+  return (
+    // Backdrop on click closes the panel — common modal pattern.
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/30"
+      onClick={onClose}
+    >
+      <div
+        className="h-full w-full max-w-2xl bg-white shadow-xl flex flex-col"
+        // Stop click-through so clicking inside the panel doesn't close it.
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">
+              Applications under this company
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {drillQ.isLoading
+                ? "Loading…"
+                : `${items.length} application${items.length === 1 ? "" : "s"}`}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            title="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          <BackendErrorBanner queries={[drillQ]} />
+          {!drillQ.isLoading && items.length === 0 && (
+            <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 py-10 text-center">
+              <Briefcase className="mx-auto h-10 w-10 text-gray-300" />
+              <p className="mt-3 text-sm font-medium text-gray-900">
+                No applications yet
+              </p>
+              <p className="mt-1 text-sm text-gray-500">
+                Once a teammate applies to a role at this company, the
+                row will appear here.
+              </p>
+            </div>
+          )}
+          {items.map((row) => (
+            <div
+              key={row.id}
+              className="rounded-lg border border-gray-200 bg-white p-3 shadow-sm"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-gray-900 truncate">
+                    {row.job_title}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {row.applicant_name} · {row.applicant_email}
+                  </p>
+                </div>
+                {row.job_url && (
+                  <a
+                    href={row.job_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                    title="Open ATS posting"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500">
+                <span>
+                  Resume:{" "}
+                  <span className="font-medium text-gray-700">
+                    {row.resume_label || "—"}
+                  </span>
+                </span>
+                <span>
+                  Applied:{" "}
+                  <span className="font-medium text-gray-700">
+                    {row.applied_at
+                      ? new Date(row.applied_at).toLocaleDateString()
+                      : new Date(row.created_at).toLocaleDateString()}
+                  </span>
+                </span>
+                <span>
+                  Status:{" "}
+                  <span className="font-medium text-gray-700">{row.status}</span>
+                </span>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-[11px] text-gray-500">Stage:</span>
+                <select
+                  value={row.stage_key ?? ""}
+                  onChange={(e) =>
+                    stageMut.mutate({
+                      id: row.id,
+                      stageKey: e.target.value || null,
+                    })
+                  }
+                  disabled={stageMut.isPending}
+                  className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs"
+                >
+                  <option value="">— no stage —</option>
+                  {stagesConfig.map((s) => (
+                    <option key={s.key} value={s.key}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {row.notes && (
+                <p className="mt-2 text-xs text-gray-600 line-clamp-2">
+                  {row.notes}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

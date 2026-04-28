@@ -38,6 +38,8 @@ import type {
   AnswerBookEntry,
   Application,
   ApplicationStats,
+  TeamApplicationItem,
+  TeamApplicationsResponse,
   ApplyReadiness,
   JobQuestionsPreview,
   Feedback,
@@ -997,6 +999,50 @@ export async function deleteApplication(id: string): Promise<void> {
 
 export async function getApplicationStats(): Promise<ApplicationStats> {
   return request<ApplicationStats>("/applications/stats");
+}
+
+// F261 — Team Pipeline Tracker. Three helpers:
+//
+// (1) ``getTeamApplications`` — admin/super_admin only. Cross-user
+//     feed used by the Team tab on ApplicationsPage. Returns 403 for
+//     reviewer/viewer; the page hides the tab for non-admins so
+//     that error path should be unreachable in normal use.
+// (2) ``updateApplicationStage`` — admin/super_admin only. Manual
+//     stage move. ``stage_key=null`` clears the stage. ``note`` is
+//     optional but useful for audit ("candidate ghosted, reverting").
+// (3) ``getClientApplications`` — drill-down list under a pipeline
+//     card. Same row shape as (1) so the frontend can reuse the row
+//     component on both surfaces.
+export async function getTeamApplications(
+  params: {
+    status?: string;
+    stage_key?: string;
+    company_id?: string;
+    user_id?: string;
+    search?: string;
+    page?: number;
+    page_size?: number;
+  } = {},
+): Promise<TeamApplicationsResponse> {
+  const query = buildQuery(params);
+  return request<TeamApplicationsResponse>(`/applications/team${query}`);
+}
+
+export async function updateApplicationStage(
+  appId: string,
+  stageKey: string | null,
+  note?: string,
+): Promise<{ id: string; stage_key: string | null; old_stage: string | null }> {
+  return request(`/applications/${appId}/stage`, {
+    method: "PATCH",
+    body: JSON.stringify({ stage_key: stageKey, note: note ?? null }),
+  });
+}
+
+export async function getClientApplications(
+  clientId: string,
+): Promise<{ items: TeamApplicationItem[]; total: number }> {
+  return request(`/pipeline/${clientId}/applications`);
 }
 
 // Analytics -- application funnel

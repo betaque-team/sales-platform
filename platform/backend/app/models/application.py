@@ -63,6 +63,31 @@ class Application(Base):
         nullable=True,
     )
 
+    # F261 — Team Pipeline Tracker. Two columns:
+    #
+    # ``company_id`` is denormalised from ``jobs.company_id`` so the
+    # team feed (which lists applications across users + filters by
+    # company) doesn't pay an Application⨝Job join on every page-load.
+    # The value is set at apply-time and never edited; on company
+    # delete we ``SET NULL`` so the application history is preserved.
+    #
+    # ``stage_key`` is a soft reference to ``pipeline_stages.key``.
+    # ``status`` already covers the apply-state machine (prepared →
+    # submitted → applied → interview → offer / rejected / withdrawn)
+    # but admins want a finer funnel position ("Interview 1",
+    # "Interview 2", "Final round") that's configurable without code
+    # changes. Soft reference (no DB FK) because pipeline_stages rows
+    # can be soft-deleted via ``is_active=false`` and we don't want
+    # that to be blocked by an Application referencing it.
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("companies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    stage_key: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, index=True
+    )
+
     job: Mapped["Job"] = relationship()
     resume: Mapped["Resume"] = relationship()
 

@@ -364,6 +364,11 @@ async def apply_from_review(
         new_app = Application(
             user_id=user.id,
             job_id=job.id,
+            # F261: denormalise company_id at apply-time so the team
+            # feed can filter/group by company without an Application⨝
+            # Job join. job.company_id is the source of truth; the
+            # value never changes for an existing application.
+            company_id=job.company_id,
             resume_id=resume.id,
             status="applied",
             apply_method="manual_copy",
