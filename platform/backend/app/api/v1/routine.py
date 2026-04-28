@@ -56,6 +56,7 @@ from app.models.user import User
 from app.schemas.routine import (
     CreateRoutineRunRequest,
     CreateRoutineRunResponse,
+    ExcludedCompany,
     HumanizeRequest,
     HumanizeResponse,
     KillSwitchRequest,
@@ -302,6 +303,12 @@ async def top_to_apply(
         p.lower().strip() for p in prefs.extra_excluded_platforms if p
     }
 
+    # F259: per-user company-level exclude list. A no-fly list of
+    # company UUIDs the picker drops outright. Coerced via ``set`` so a
+    # caller passing duplicates from a buggy frontend doesn't bloat the
+    # NOT IN clause.
+    excluded_company_ids = {cid for cid in (prefs.excluded_company_ids or []) if cid is not None}
+
     # Jobs already in Application (any status) are skipped.
     applied_jobs_sub = select(Application.job_id).where(
         Application.user_id == user.id
@@ -345,6 +352,10 @@ async def top_to_apply(
             Job.company_id.notin_(select(cooldown_companies_sub.c.company_id)),
         ),
     ]
+    # F259: company-level exclude (per-user no-fly list). ``notin_([])``
+    # is a no-op in SQL, so guard the empty-list case explicitly.
+    if excluded_company_ids:
+        base_filters.append(Job.company_id.notin_(excluded_company_ids))
     if prefs.min_relevance_score:
         base_filters.append(Job.relevance_score >= prefs.min_relevance_score)
 
@@ -606,6 +617,100 @@ async def delete_routine_target(
         await db.delete(target)
         await db.commit()
     return None
+
+
+# ── F259: company-level exclude list ────────────────────────────────
+
+
+def _save_preferences(user: User, prefs: RoutinePreferences) -> None:
+    """Mutate ``users.routine_preferences`` in-place from a
+    ``RoutinePreferences`` object. Caller commits the session."""
+    user.routine_preferences = prefs.model_dump(mode="json")
+
+
+@router.get("/excluded-companies", response_model=list[ExcludedCompany])
+async def list_excluded_companies(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hydrate the user's ``excluded_company_ids`` list with company
+    names + slugs so the UI doesn't need a second per-id round-trip
+    to render the exclude card.
+
+    Stale-id resilience: if the user's prefs reference a company id
+    that's been deleted from the ``companies`` table, the row is
+    simply omitted from the response (the picker side already
+    tolerates stale ids — ``Job.company_id NOT IN (stale_id)`` is
+    a no-op when no live job has that company_id).
+    """
+    prefs = _load_user_preferences(user)
+    ids = list({cid for cid in (prefs.excluded_company_ids or []) if cid is not None})
+    if not ids:
+        return []
+    rows = (await db.execute(
+        select(Company.id, Company.name, Company.slug).where(Company.id.in_(ids))
+    )).all()
+    return [
+        ExcludedCompany(id=cid, name=name or "", slug=slug or "")
+        for cid, name, slug in rows
+    ]
+
+
+@router.post(
+    "/excluded-companies/{company_id}",
+    response_model=list[ExcludedCompany],
+)
+async def add_excluded_company(
+    company_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a company to the user's no-fly list. Idempotent — adding
+    a company that's already excluded is a no-op (still returns 200).
+
+    Verifies the company exists so a typoed UUID 404s instead of
+    silently bloating the JSONB list with dead ids.
+    """
+    company = (await db.execute(
+        select(Company).where(Company.id == company_id)
+    )).scalar_one_or_none()
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    prefs = _load_user_preferences(user)
+    ids = set(prefs.excluded_company_ids or [])
+    if company_id not in ids:
+        ids.add(company_id)
+        prefs = prefs.model_copy(update={"excluded_company_ids": sorted(ids, key=str)})
+        _save_preferences(user, prefs)
+        await db.commit()
+        await db.refresh(user)
+
+    # Return the full hydrated list so the caller can update its
+    # local cache in one round-trip.
+    return await list_excluded_companies(user=user, db=db)
+
+
+@router.delete(
+    "/excluded-companies/{company_id}",
+    response_model=list[ExcludedCompany],
+)
+async def remove_excluded_company(
+    company_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Drop a company from the user's no-fly list. Idempotent — a
+    company that isn't on the list is a no-op."""
+    prefs = _load_user_preferences(user)
+    ids = set(prefs.excluded_company_ids or [])
+    if company_id in ids:
+        ids.discard(company_id)
+        prefs = prefs.model_copy(update={"excluded_company_ids": sorted(ids, key=str)})
+        _save_preferences(user, prefs)
+        await db.commit()
+        await db.refresh(user)
+    return await list_excluded_companies(user=user, db=db)
 
 
 # ═══════════════════════════════════════════════════════════════════

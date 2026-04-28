@@ -209,6 +209,48 @@ def test_user_model_has_routine_preferences_jsonb_column():
     )
 
 
+def test_routine_router_exposes_excluded_companies_endpoints():
+    """F259 — three new excluded-companies endpoints. Renaming or
+    losing one breaks the SPA's ``Exclude from Routine`` button on
+    Company Detail."""
+    from app.api.v1.routine import router
+
+    paths_methods = {(r.path, m) for r in router.routes for m in (getattr(r, "methods", set()) or set()) if m != "HEAD"}
+    expected = {
+        ("/routine/excluded-companies", "GET"),
+        ("/routine/excluded-companies/{company_id}", "POST"),
+        ("/routine/excluded-companies/{company_id}", "DELETE"),
+    }
+    missing = expected - paths_methods
+    assert not missing, f"F259 endpoints missing: {sorted(missing)}"
+
+
+def test_routine_preferences_carries_excluded_company_ids():
+    """The ``RoutinePreferences`` schema must carry ``excluded_company_ids``
+    as a UUID list with a 200-entry cap. Pre-fix the field didn't exist
+    and ``top-to-apply`` had no way to apply a company-level exclude.
+    """
+    from uuid import uuid4
+
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.routine import RoutinePreferences
+
+    p = RoutinePreferences()
+    assert p.excluded_company_ids == []
+
+    # Up to 200 entries — verify the cap by exceeding it.
+    too_many = [uuid4() for _ in range(201)]
+    with pytest.raises(ValidationError, match="200"):
+        RoutinePreferences(excluded_company_ids=too_many)
+
+    # Round-trip sanity at the boundary.
+    valid = [uuid4() for _ in range(200)]
+    p2 = RoutinePreferences(excluded_company_ids=valid)
+    assert len(p2.excluded_company_ids) == 200
+
+
 def test_analytics_router_exposes_relevant_jobs_trend():
     """F258 — the new ``/analytics/relevant-jobs-trend`` endpoint
     must register on the analytics router. Renaming or losing it

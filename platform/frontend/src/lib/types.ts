@@ -1372,6 +1372,17 @@ export interface RoutinePreferences {
   min_resume_score: number;     // 0-100; 0 = no floor
   allowed_role_clusters: string[];
   extra_excluded_platforms: string[];
+  // F259: per-user company-level exclude list. Any job whose
+  // ``Job.company_id`` is in this list is dropped from auto-picks
+  // regardless of cluster/geography/score. Capped at 200 entries
+  // server-side.
+  excluded_company_ids: string[];
+}
+
+export interface ExcludedCompany {
+  id: string;
+  name: string;
+  slug: string;
 }
 
 export interface RoutineTargetOut {

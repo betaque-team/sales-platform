@@ -74,6 +74,7 @@ import type {
   RoutineTargetIntent,
   RoutineTargetOut,
   RelevantJobsTrendResponse,
+  ExcludedCompany,
   RoutineStatus,
   KillSwitchState,
   HumanizeResult,
@@ -1317,6 +1318,24 @@ export async function upsertRoutineTarget(
 
 export async function deleteRoutineTarget(jobId: string): Promise<void> {
   return request<void>(`/routine/queue/${jobId}`, { method: "DELETE" });
+}
+
+// F259 — per-user company-level exclude list. Returned hydrated
+// (joined with companies) so the UI doesn't N+1 to render the card.
+export async function getExcludedCompanies(): Promise<ExcludedCompany[]> {
+  return request<ExcludedCompany[]>("/routine/excluded-companies");
+}
+
+export async function addExcludedCompany(companyId: string): Promise<ExcludedCompany[]> {
+  return request<ExcludedCompany[]>(`/routine/excluded-companies/${companyId}`, {
+    method: "POST",
+  });
+}
+
+export async function removeExcludedCompany(companyId: string): Promise<ExcludedCompany[]> {
+  return request<ExcludedCompany[]>(`/routine/excluded-companies/${companyId}`, {
+    method: "DELETE",
+  });
 }
 
 export async function createRoutineRun(payload: {
