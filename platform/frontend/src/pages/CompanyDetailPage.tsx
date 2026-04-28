@@ -5,6 +5,7 @@ import {
   ArrowLeft, Building2, Globe, ExternalLink, RefreshCw, Users, MapPin,
   Linkedin, Twitter, MessageCircle, Plus, Pencil, Trash2,
   CheckCircle2, AlertCircle, Clock, Shield, Star, Briefcase, Zap, X, Mail,
+  Ban,
 } from "lucide-react";
 import { Card } from "@/components/Card";
 import { Badge } from "@/components/Badge";
@@ -14,6 +15,7 @@ import {
   getCompanyDetail, triggerCompanyEnrichment,
   createCompanyContact, updateCompanyContact, deleteCompanyContact,
   updateContactOutreach, draftContactEmail,
+  getExcludedCompanies, addExcludedCompany, removeExcludedCompany,
 } from "@/lib/api";
 import type { CompanyContact } from "@/lib/types";
 
@@ -273,14 +275,17 @@ export function CompanyDetailPage() {
             </div>
           </div>
         </div>
-        <button
-          onClick={() => enrichMutation.mutate()}
-          disabled={isEnriching}
-          className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50 transition-colors"
-        >
-          <RefreshCw className={`h-4 w-4 ${isEnriching ? "animate-spin" : ""}`} />
-          {isEnriching ? "Enriching..." : "Enrich Now"}
-        </button>
+        <div className="flex items-center gap-2">
+          <CompanyExcludeRoutineButton companyId={company.id} companyName={company.name} />
+          <button
+            onClick={() => enrichMutation.mutate()}
+            disabled={isEnriching}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50 transition-colors"
+          >
+            <RefreshCw className={`h-4 w-4 ${isEnriching ? "animate-spin" : ""}`} />
+            {isEnriching ? "Enriching..." : "Enrich Now"}
+          </button>
+        </div>
       </div>
 
       {/* Enrichment status banner */}
@@ -782,5 +787,90 @@ function ContactFormModal({
         </div>
       </div>
     </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// F259 — Exclude this company from the Apply Routine
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-company toggle for the Apply Routine's no-fly list.
+ *
+ * Adds the current company's id to ``RoutinePreferences.excluded_company_ids``.
+ * The picker will then skip ANY job from this company regardless of
+ * cluster/score/geography. Useful for companies you've already
+ * applied to off-platform, or where you don't want repeat suggestions.
+ *
+ * Three states:
+ *   * unknown — query loading
+ *   * excluded — show "Excluded from routine" chip + Undo
+ *   * not excluded — show "Exclude from Apply Routine" outline button
+ */
+function CompanyExcludeRoutineButton({
+  companyId,
+  companyName,
+}: {
+  companyId: string;
+  companyName: string;
+}) {
+  const queryClient = useQueryClient();
+  const excludedQ = useQuery({
+    queryKey: ["routine-excluded-companies"],
+    queryFn: getExcludedCompanies,
+    staleTime: 60_000,
+  });
+
+  const isExcluded = (excludedQ.data ?? []).some((c) => c.id === companyId);
+
+  const addMutation = useMutation({
+    mutationFn: () => addExcludedCompany(companyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["routine-excluded-companies"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-top-to-apply"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-preferences"] });
+    },
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: () => removeExcludedCompany(companyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["routine-excluded-companies"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-top-to-apply"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-preferences"] });
+    },
+  });
+
+  const busy = addMutation.isPending || removeMutation.isPending;
+
+  if (excludedQ.isLoading) {
+    return null; // Don't render the affordance until we know the state — avoids flash.
+  }
+
+  if (isExcluded) {
+    return (
+      <button
+        onClick={() => removeMutation.mutate()}
+        disabled={busy}
+        className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-800 hover:bg-red-100 disabled:opacity-50 transition-colors"
+        title={`Stop excluding ${companyName} from the Apply Routine`}
+      >
+        <Ban className="h-4 w-4" />
+        Excluded from Routine
+        <X className="h-3.5 w-3.5" />
+      </button>
+    );
+  }
+  return (
+    <button
+      onClick={() => addMutation.mutate()}
+      disabled={busy}
+      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+      title={`Tell the Apply Routine to never auto-pick ANY job at ${companyName}`}
+    >
+      <Ban className="h-4 w-4" />
+      Exclude from Routine
+    </button>
   );
 }

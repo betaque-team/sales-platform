@@ -270,6 +270,14 @@ class RoutinePreferences(BaseModel):
     # wants the routine to skip it without dropping the platform
     # globally for everyone else.
     extra_excluded_platforms: list[str] = Field(default_factory=list, max_length=20)
+    # F259: company-level exclude. Any job whose ``Job.company_id``
+    # appears in this list is dropped from auto-picks regardless of
+    # its score / cluster / geography. Companion to the per-job
+    # ``routine_targets`` exclude (which is for "skip THIS specific
+    # job"); this one is for "never apply to ANY job at this company"
+    # — useful after a bad reviewer experience or a no-fly-list
+    # decision. Capped at 200 entries to keep the IN-clause fast.
+    excluded_company_ids: list[UUID] = Field(default_factory=list, max_length=200)
 
 
 class RoutineTargetCreate(BaseModel):
@@ -302,6 +310,16 @@ class RoutineTargetOut(BaseModel):
 class RoutineQueueResponse(BaseModel):
     queued: list[RoutineTargetOut]
     excluded: list[RoutineTargetOut]
+
+
+class ExcludedCompany(BaseModel):
+    """Hydrated row from ``GET /routine/excluded-companies`` —
+    ``RoutinePreferences.excluded_company_ids`` joined with the
+    ``companies`` table so the UI can render names + slugs without
+    a second per-id round-trip."""
+    id: UUID
+    name: str
+    slug: str = ""
 
 
 class CreateRoutineRunRequest(BaseModel):

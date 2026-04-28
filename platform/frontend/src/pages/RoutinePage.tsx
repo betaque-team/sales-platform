@@ -10,8 +10,12 @@ import {
   putRoutinePreferences,
   getRoutineQueue,
   deleteRoutineTarget,
+  getRoleClusters,
+  getExcludedCompanies,
+  removeExcludedCompany,
 } from "@/lib/api";
 import type { RoutineRun, RoutinePreferences } from "@/lib/types";
+// ``Link`` already imported from react-router-dom at the top of the file.
 import {
   ShieldAlert,
   ShieldCheck,
@@ -245,11 +249,17 @@ export function RoutinePage() {
         </div>
       </div>
 
+      {/* ── F259: How-to-run help banner ─────────────────────────── */}
+      <HowToRunCard />
+
       {/* ── F257: Preferences card ───────────────────────────────── */}
       <PreferencesCard />
 
       {/* ── F257: Manual queue + excluded list ───────────────────── */}
       <ManualQueueCard />
+
+      {/* ── F259: Excluded companies (no-fly list) ───────────────── */}
+      <ExcludedCompaniesCard />
 
       {/* ── Top to apply ──────────────────────────────────────────── */}
       <div className="rounded-lg border border-neutral-200 bg-white shadow-sm">
@@ -647,31 +657,17 @@ function PreferencesCard() {
           />
         </div>
 
-        {/* Free-text list: allowed_role_clusters */}
-        <div>
-          <label className="text-sm font-medium text-neutral-900">
-            Allowed role clusters
-          </label>
-          <p className="mb-2 text-xs text-neutral-500">
-            Comma-separated cluster names. Empty = all platform-relevant
-            clusters (infra, security by default). Example: ``security``.
-          </p>
-          <input
-            type="text"
-            value={draft.allowed_role_clusters.join(", ")}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                allowed_role_clusters: e.target.value
-                  .split(",")
-                  .map((s) => s.trim().toLowerCase())
-                  .filter(Boolean),
-              })
-            }
-            placeholder="infra, security"
-            className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
-          />
-        </div>
+        {/* F259 — Allowed role clusters: chip multi-select.
+            Pre-fix this was a comma-separated free-text input that
+            invited typos (a misspelled cluster name silently filtered
+            the picker to zero rows). Reading the canonical cluster
+            list from ``GET /role-config`` lets the user pick from
+            the same names the platform actually classifies against.
+            Empty selection = "all platform-relevant clusters". */}
+        <RoleClusterMultiSelect
+          selected={draft.allowed_role_clusters}
+          onChange={(next) => setDraft({ ...draft, allowed_role_clusters: next })}
+        />
 
         {saveMutation.isError && (
           <p className="text-xs text-red-600">
@@ -819,6 +815,255 @@ function ManualQueueCard() {
             ))}
           </ul>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// F259 — RoleClusterMultiSelect
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Chip-style multi-select for ``allowed_role_clusters`` populated from
+ * the canonical role-config list (``GET /role-config``). Replaces the
+ * old comma-separated text input which invited typos — a misspelled
+ * cluster name silently filtered the picker to zero rows.
+ *
+ * Empty selection = "all platform-relevant clusters" (the picker's
+ * default). The cluster catalog is admin-curated; ``getRoleClusters``
+ * also returns the ``relevant_clusters`` derived list so we can hint
+ * which ones the auto-picker would default to.
+ */
+function RoleClusterMultiSelect({
+  selected,
+  onChange,
+}: {
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const clustersQ = useQuery({
+    queryKey: ["role-clusters"],
+    queryFn: getRoleClusters,
+    staleTime: 5 * 60_000,
+  });
+
+  const items = clustersQ.data?.items ?? [];
+  const relevantSet = new Set(clustersQ.data?.relevant_clusters ?? []);
+  const selectedSet = new Set(selected);
+
+  return (
+    <div>
+      <label className="text-sm font-medium text-neutral-900">
+        Allowed role clusters
+      </label>
+      <p className="mb-2 text-xs text-neutral-500">
+        Pick from the platform's classified clusters. Empty = all
+        platform-relevant clusters (the auto-picker's default).
+      </p>
+      {clustersQ.isLoading ? (
+        <p className="text-xs text-neutral-400">Loading clusters…</p>
+      ) : items.length === 0 ? (
+        <p className="text-xs text-neutral-400">
+          No clusters configured yet — ask an admin to seed Role Clusters.
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {items.map((cluster) => {
+            const active = selectedSet.has(cluster.name);
+            const isRelevantDefault = relevantSet.has(cluster.name);
+            return (
+              <button
+                key={cluster.id}
+                type="button"
+                onClick={() => {
+                  const next = active
+                    ? selected.filter((c) => c !== cluster.name)
+                    : [...selected, cluster.name];
+                  onChange(next);
+                }}
+                className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  active
+                    ? "bg-primary-100 text-primary-800 ring-1 ring-primary-300"
+                    : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"
+                }`}
+                title={
+                  isRelevantDefault
+                    ? `${cluster.display_name || cluster.name} — included by default when no clusters are picked`
+                    : `${cluster.display_name || cluster.name} — not relevant by default; pick to include`
+                }
+              >
+                {cluster.display_name || cluster.name}
+                {isRelevantDefault && !active && (
+                  <span className="text-[10px] font-normal text-neutral-400">★</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {selectedSet.size > 0 && (
+        <button
+          type="button"
+          onClick={() => onChange([])}
+          className="mt-2 text-[11px] font-medium text-neutral-500 hover:text-neutral-700"
+        >
+          Clear ({selectedSet.size})
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// F259 — Excluded companies (no-fly list)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-user "never apply to ANY job at this company" list. Rendered
+ * as a card with one row per company + an Undo X. Companies are added
+ * here from the Company Detail page's "Exclude from Routine" button —
+ * the only entry point so the user is looking at the company they're
+ * excluding while they make the decision.
+ *
+ * Empty state explains how to add a company so the user knows the
+ * feature exists even before they've used it.
+ */
+function ExcludedCompaniesCard() {
+  const queryClient = useQueryClient();
+  const excludedQ = useQuery({
+    queryKey: ["routine-excluded-companies"],
+    queryFn: getExcludedCompanies,
+    staleTime: 60_000,
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (companyId: string) => removeExcludedCompany(companyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["routine-excluded-companies"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-top-to-apply"] });
+      queryClient.invalidateQueries({ queryKey: ["routine-preferences"] });
+    },
+  });
+
+  if (excludedQ.isLoading) {
+    return (
+      <div className="rounded-lg border border-neutral-200 bg-white p-6 shadow-sm">
+        <p className="text-sm text-neutral-500">Loading excluded companies…</p>
+      </div>
+    );
+  }
+
+  const excluded = excludedQ.data ?? [];
+
+  return (
+    <div className="rounded-lg border border-red-200 bg-white shadow-sm">
+      <div className="flex items-center justify-between border-b border-red-100 bg-red-50 px-5 py-3">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-red-800">
+          <Ban className="h-4 w-4" />
+          Excluded companies ({excluded.length})
+        </h3>
+        <p className="text-xs text-red-700">
+          The routine never auto-picks ANY job from these companies.
+        </p>
+      </div>
+      {excluded.length === 0 ? (
+        <p className="p-5 text-sm text-neutral-500">
+          No companies excluded. Open any{" "}
+          <Link to="/companies" className="text-primary-600 hover:underline">
+            company
+          </Link>{" "}
+          page and click &ldquo;Exclude from Apply Routine&rdquo; to add them
+          here. Useful for companies you've already applied to off-platform
+          or where you don't want repeat suggestions.
+        </p>
+      ) : (
+        <ul className="divide-y divide-neutral-100">
+          {excluded.map((co) => (
+            <li
+              key={co.id}
+              className="flex items-center justify-between gap-3 px-5 py-3"
+            >
+              <Link
+                to={`/companies/${co.id}`}
+                className="min-w-0 flex-1 truncate text-sm font-medium text-neutral-900 hover:text-primary-700"
+              >
+                {co.name || "(unnamed)"}
+              </Link>
+              <button
+                onClick={() => removeMutation.mutate(co.id)}
+                disabled={removeMutation.isPending}
+                className="rounded p-1 text-red-700 hover:bg-red-100 disabled:opacity-50"
+                aria-label={`Remove ${co.name} from exclude list`}
+                title="Remove from exclude list"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// F259 — How to run the routine
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Help card explaining how the operator actually KICKS OFF a run.
+ *
+ * The routine isn't a backend Celery task — it's an MCP-Chrome browser
+ * session driven by Claude that polls these endpoints. There's no
+ * "Run now" button on this page because pressing one wouldn't start
+ * a browser. The user has to open Claude with MCP-Chrome enabled and
+ * say "run the apply routine."
+ *
+ * Pre-F259 this contract was only documented in the file's top
+ * comment. Operators reading the page asked "how do I trigger this?"
+ * The card surfaces the answer inline + links to the runs history so
+ * they can verify a run started after they triggered it externally.
+ */
+function HowToRunCard() {
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50 px-5 py-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <Bot className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-700" />
+        <div className="flex-1">
+          <h3 className="text-sm font-semibold text-blue-900">
+            How to start a run
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-blue-900">
+            The routine is a Claude-driven browser session, not a backend job —
+            there's no &ldquo;Run now&rdquo; button. To trigger it:
+          </p>
+          <ol className="mt-2 list-inside list-decimal space-y-1 text-xs text-blue-900">
+            <li>Make sure preferences below are saved + answer book is complete + kill-switch is OFF.</li>
+            <li>
+              Open <span className="font-mono text-[11px]">Claude Desktop</span>{" "}
+              with the <span className="font-mono text-[11px]">MCP-Chrome</span>{" "}
+              extension enabled.
+            </li>
+            <li>
+              Say: <span className="rounded bg-white/60 px-1.5 py-0.5 font-mono text-[11px]">
+                &ldquo;Run the Apply Routine on{" "}
+                {typeof window !== "undefined" ? window.location.host : "this platform"}&rdquo;
+              </span>
+            </li>
+            <li>
+              Claude will poll{" "}
+              <span className="font-mono text-[11px]">/api/v1/routine/top-to-apply</span>,
+              load each job, fill the form, and call{" "}
+              <span className="font-mono text-[11px]">POST /routine/runs</span>{" "}
+              for the run row. Every step shows in &ldquo;Recent runs&rdquo;
+              below within ~30 seconds.
+            </li>
+          </ol>
+          <p className="mt-2 text-[11px] text-blue-800/80">
+            Hit the kill-switch above to abort an in-flight run within ~60 seconds.
+          </p>
+        </div>
       </div>
     </div>
   );
