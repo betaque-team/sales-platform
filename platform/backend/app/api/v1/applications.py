@@ -17,10 +17,18 @@ from app.models.job import Job
 from app.models.company import Company, CompanyATSBoard
 from app.models.resume import Resume, ResumeScore
 from app.models.answer_book import AnswerBookEntry
+from app.models.pipeline_stage import PipelineStage
 from app.models.platform_credential import PlatformCredential
 from app.models.user import User
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
+from app.utils.audit import log_action
 from app.utils.sql import escape_like
+
+# F261 — admin gate for the team-pipeline endpoints. ``require_role(
+# "admin")`` admits both admin and super_admin via the role hierarchy
+# in app/api/deps.py. Reviewers + viewers see only their own
+# applications via the existing user-scoped routes.
+_TEAM_PIPELINE_GUARD = require_role("admin")
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -304,11 +312,16 @@ async def prepare_application(
         .limit(1)
     )).scalar_one_or_none()
 
-    # Create application record
+    # Create application record. F261 — denormalise company_id at
+    # apply-time so the team-pipeline feed doesn't pay an
+    # Application⨝Job join on every page-load. The value is immutable
+    # post-apply (the underlying job's company doesn't change), so
+    # snapshotting here is safe.
     application = Application(
         id=uuid.uuid4(),
         user_id=user.id,
         job_id=job.id,
+        company_id=job.company_id,
         resume_id=resume.id,
         status="prepared",
         apply_method="manual_copy",
@@ -449,6 +462,234 @@ async def get_application_stats(
         "offer": counts.get("offer", 0),
         "rejected": counts.get("rejected", 0),
         "withdrawn": counts.get("withdrawn", 0),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# F261 — Team Pipeline Tracker
+# ═══════════════════════════════════════════════════════════════════
+#
+# When the team applies to a job we need a single shared timeline:
+# who applied, when, with which resume, to which company, and where
+# is each application now in the funnel. The existing per-user list
+# at GET /applications doesn't surface other users' applications, so
+# when an HR contact replies the team can't easily map the reply
+# back to the originating applicant.
+#
+# Two admin-gated endpoints support the new feed:
+#   * GET /applications/team — cross-user list with applicant
+#     identity (name, email) denormalised into the row so a recruiter
+#     reply can be triaged without a second fetch.
+#   * PATCH /applications/{id}/stage — manual funnel-stage move,
+#     audited. ``status`` is the apply-state machine (prepared →
+#     applied → interview → offer); ``stage_key`` is the configurable
+#     pipeline stage (Interview 1, Final round, etc.) admins manage
+#     via /pipeline/stages. Auto-advance was explicitly out of scope
+#     for v1 — every stage move is a deliberate admin action.
+#
+# RBAC: ``require_role("admin")`` admits admin + super_admin via the
+# role hierarchy. Reviewers and viewers continue to see only their
+# own applications via GET /applications (no scope change there).
+
+
+@router.get("/team")
+async def list_team_applications(
+    # Reuse the same Literal allow-list as the per-user endpoint so
+    # ``?status=Rejected`` (capital R) parse-422s instead of silently
+    # returning total=0. F220(B) regression class.
+    status: ApplicationStatus | None = None,
+    # ``stage_key`` filters by the configurable pipeline stage. Free-
+    # form string here (no Literal) because pipeline_stages is admin-
+    # configurable at runtime; we soft-validate against the table on
+    # PATCH but accept any value here so a deactivated stage's
+    # historical rows remain queryable.
+    stage_key: str | None = None,
+    # Filter by company so the side-panel under a pipeline card can
+    # call ``GET /applications/team?company_id=...`` directly.
+    company_id: UUID | None = None,
+    # Filter by applicant — admin-only "show me Sarthak's pipeline"
+    # view. Frontend feeds this from the user-management list.
+    user_id: UUID | None = None,
+    search: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    user: User = Depends(_TEAM_PIPELINE_GUARD),
+    db: AsyncSession = Depends(get_db),
+):
+    """Team-wide application feed (admin / super_admin only).
+
+    Returns one row per Application across every user, joined with
+    enough context that a row standing alone tells the full story:
+    applicant identity, job, company, resume, stage, and timestamps.
+    Pagination + filters mirror the per-user endpoint to keep the
+    frontend's filter logic shared.
+    """
+    # The team-feed query is structurally identical to the per-user
+    # query except for (a) no ``user_id == user.id`` filter and (b)
+    # an extra User join to surface applicant name/email. We left-
+    # join on Company so applications whose Company row was deleted
+    # (denormalised company_id became NULL via ON DELETE SET NULL)
+    # still surface — they'd otherwise vanish from the feed.
+    query = (
+        select(
+            Application,
+            Job,
+            Company.name.label("co_name"),
+            Resume.label.label("resume_label"),
+            Resume.filename.label("resume_filename"),
+            User.name.label("applicant_name"),
+            User.email.label("applicant_email"),
+        )
+        .join(Job, Application.job_id == Job.id)
+        .join(User, Application.user_id == User.id)
+        .join(Resume, Application.resume_id == Resume.id)
+        .outerjoin(Company, Application.company_id == Company.id)
+    )
+
+    if status:
+        query = query.where(Application.status == status)
+    if stage_key:
+        query = query.where(Application.stage_key == stage_key)
+    if company_id:
+        query = query.where(Application.company_id == company_id)
+    if user_id:
+        query = query.where(Application.user_id == user_id)
+    if search and search.strip():
+        # Findings 84+85: escape LIKE metachars + drop whitespace-only
+        # input. Same pattern as the per-user list endpoint.
+        term = f"%{escape_like(search.strip())}%"
+        query = query.where(or_(
+            Job.title.ilike(term, escape="\\"),
+            Company.name.ilike(term, escape="\\"),
+            User.name.ilike(term, escape="\\"),
+            User.email.ilike(term, escape="\\"),
+        ))
+
+    count_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    # Order by most-recent-activity first. ``COALESCE`` so a row with
+    # ``applied_at`` set sorts by that; otherwise by created_at.
+    query = query.order_by(
+        func.coalesce(Application.applied_at, Application.created_at).desc()
+    )
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    rows = (await db.execute(query)).all()
+
+    items = []
+    for app, job, co_name, resume_label, resume_filename, applicant_name, applicant_email in rows:
+        items.append({
+            "id": str(app.id),
+            "job_id": str(app.job_id),
+            "job_title": job.title,
+            "job_url": job.url,
+            "platform": job.platform,
+            "company_id": str(app.company_id) if app.company_id else None,
+            "company_name": co_name or "",
+            "user_id": str(app.user_id),
+            "applicant_name": applicant_name,
+            "applicant_email": applicant_email,
+            "resume_id": str(app.resume_id),
+            "resume_label": resume_label or resume_filename or "",
+            "status": app.status,
+            "stage_key": app.stage_key,
+            "apply_method": app.apply_method,
+            "submission_source": app.submission_source,
+            "applied_at": app.applied_at.isoformat() if app.applied_at else None,
+            "submitted_at": app.submitted_at.isoformat() if app.submitted_at else None,
+            "created_at": app.created_at.isoformat(),
+            "notes": app.notes,
+        })
+
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+class ApplicationStageUpdate(BaseModel):
+    """Body for PATCH /applications/{id}/stage. ``stage_key=null``
+    clears the stage (e.g. when an admin reverts a wrongly-tagged
+    application). Notes optional — useful to log why a stage moved
+    backwards (e.g. "candidate ghosted, moving back from Interview 2
+    to Applied").
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage_key: str | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.patch("/{app_id}/stage")
+async def update_application_stage(
+    app_id: UUID,
+    body: ApplicationStageUpdate,
+    user: User = Depends(_TEAM_PIPELINE_GUARD),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually move an application's funnel stage (admin only).
+
+    Soft-validates ``stage_key`` against the ``pipeline_stages``
+    catalog so a typo (``"Inteview 1"``) gets a 400 instead of being
+    silently persisted. ``stage_key=null`` is allowed — it clears the
+    stage on the application without requiring a catalog lookup.
+
+    Audited as ``application.stage_changed`` so the team can trace
+    "who moved this app to Interview 2 last Tuesday." The audit
+    metadata captures both the old and new stage so reverts are
+    explicit in the log.
+    """
+    app = (await db.execute(
+        select(Application).where(Application.id == app_id)
+    )).scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    new_stage = body.stage_key
+    if new_stage is not None:
+        # Catalog check — must reference an active stage. Inactive
+        # stages stay queryable on existing rows (so historical
+        # reports keep working) but new writes can't pin to one.
+        stage_row = (await db.execute(
+            select(PipelineStage).where(
+                PipelineStage.key == new_stage,
+                PipelineStage.is_active.is_(True),
+            )
+        )).scalar_one_or_none()
+        if not stage_row:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown or inactive pipeline stage '{new_stage}'. "
+                    "Manage stages at /pipeline/stages."
+                ),
+            )
+
+    old_stage = app.stage_key
+    app.stage_key = new_stage
+    await db.commit()
+
+    await log_action(
+        db, user,
+        action="application.stage_changed",
+        resource="application",
+        metadata={
+            "application_id": str(app.id),
+            "old_stage": old_stage,
+            "new_stage": new_stage,
+            "note": (body.note or "").strip() or None,
+        },
+    )
+
+    return {
+        "id": str(app.id),
+        "stage_key": app.stage_key,
+        "old_stage": old_stage,
     }
 
 
@@ -813,7 +1054,10 @@ from app.schemas.routine import (  # noqa: E402
     PromoteAnswerResponse,
     SubmissionDetail,
 )
-from app.utils.audit import log_action  # noqa: E402
+# F261: ``log_action`` is now imported at the top of the file because
+# the team-pipeline endpoints (added before this block) need it. The
+# routine endpoints below also use it via the same module-level
+# binding.
 
 
 # Keys we refuse to store in payload_json under any circumstance. The

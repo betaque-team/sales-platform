@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.database import get_db
+from app.models.application import Application
 from app.models.pipeline import PotentialClient
 from app.models.pipeline_stage import PipelineStage
 from app.models.company import Company
@@ -439,6 +440,80 @@ async def get_client(client_id: UUID, user: User = Depends(get_current_user), db
         item.accepted_jobs_count = 0
 
     return item
+
+
+@router.get("/{client_id}/applications")
+async def list_client_applications(
+    client_id: UUID,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Drill-down: every application under this pipeline card.
+
+    F261 — Team Pipeline Tracker. The kanban view shows one card per
+    company; clicking a card opens a side panel that needs to list
+    every application the team has submitted under that company so
+    the operator can see "we have 3 active applications here, two
+    are in Interview 1, one is still Applied".
+
+    Admin-gated to match the team-pipeline RBAC. The per-user
+    Applications page (GET /applications) covers the non-admin case.
+
+    Returns the same row shape as GET /applications/team so the
+    frontend can reuse one row component.
+    """
+    # Resolve the pipeline entry so we have the company_id. We don't
+    # accept ``company_id`` directly in the URL because the side
+    # panel sits under a pipeline card, and the operator's mental
+    # model is "applications under THIS card" not "applications
+    # under company X" (companies can have multiple cards over time
+    # if the pipeline entry is hard-deleted and recreated).
+    client = (await db.execute(
+        select(PotentialClient).where(PotentialClient.id == client_id)
+    )).scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    rows = (await db.execute(
+        select(
+            Application,
+            Job,
+            Resume.label.label("resume_label"),
+            Resume.filename.label("resume_filename"),
+            User.name.label("applicant_name"),
+            User.email.label("applicant_email"),
+        )
+        .join(Job, Application.job_id == Job.id)
+        .join(User, Application.user_id == User.id)
+        .join(Resume, Application.resume_id == Resume.id)
+        .where(Application.company_id == client.company_id)
+        .order_by(
+            func.coalesce(Application.applied_at, Application.created_at).desc()
+        )
+    )).all()
+
+    items = []
+    for app, job, resume_label, resume_filename, applicant_name, applicant_email in rows:
+        items.append({
+            "id": str(app.id),
+            "job_id": str(app.job_id),
+            "job_title": job.title,
+            "job_url": job.url,
+            "platform": job.platform,
+            "user_id": str(app.user_id),
+            "applicant_name": applicant_name,
+            "applicant_email": applicant_email,
+            "resume_id": str(app.resume_id),
+            "resume_label": resume_label or resume_filename or "",
+            "status": app.status,
+            "stage_key": app.stage_key,
+            "submission_source": app.submission_source,
+            "applied_at": app.applied_at.isoformat() if app.applied_at else None,
+            "submitted_at": app.submitted_at.isoformat() if app.submitted_at else None,
+            "created_at": app.created_at.isoformat(),
+            "notes": app.notes,
+        })
+    return {"items": items, "total": len(items)}
 
 
 @router.patch("/{client_id}", response_model=PipelineItemOut)

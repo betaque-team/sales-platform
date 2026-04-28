@@ -850,6 +850,48 @@ export interface ApplicationStats {
   withdrawn: number;
 }
 
+// F261 — Team Pipeline Tracker. Row shape returned by both
+// ``GET /applications/team`` (admin team feed) and
+// ``GET /pipeline/{client_id}/applications`` (drill-down under a
+// pipeline card). Same shape so one row component can render both.
+//
+// Differs from ``Application`` (per-user list) in two ways:
+//   - applicant identity is denormalised into the row so an HR-
+//     reply triage doesn't need a second fetch
+//   - ``stage_key`` is present (the configurable pipeline stage,
+//     e.g. ``"interview_1"``) — separate from ``status`` (the
+//     apply-state machine).
+export interface TeamApplicationItem {
+  id: string;
+  job_id: string;
+  job_title: string;
+  job_url: string;
+  platform: string;
+  company_id: string | null;
+  company_name?: string; // present on /applications/team, omitted on drill-down (caller knows the company)
+  user_id: string;
+  applicant_name: string;
+  applicant_email: string;
+  resume_id: string;
+  resume_label: string;
+  status: ApplicationStatus;
+  stage_key: string | null;
+  apply_method?: ApplyMethod;
+  submission_source?: ApplicationSubmissionSource;
+  applied_at: string | null;
+  submitted_at: string | null;
+  created_at: string;
+  notes: string;
+}
+
+export interface TeamApplicationsResponse {
+  items: TeamApplicationItem[];
+  total: number;
+  page?: number;
+  page_size?: number;
+  total_pages?: number;
+}
+
 export interface PreparedAnswer {
   field_key: string;
   label: string;
