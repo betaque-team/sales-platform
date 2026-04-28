@@ -203,6 +203,14 @@ function ProfileHeader({
 }) {
   const queryClient = useQueryClient();
   const [confirmArchive, setConfirmArchive] = useState(false);
+  // F260 (feedback "Profile Vault delete — UI button missing"): a soft
+  // archive sets archived_at but leaves the row + on-disk files in
+  // place, which doesn't satisfy DPDP/GDPR erasure requests. We add a
+  // separate "Delete permanently" path that mirrors the F238(d)
+  // document-level pattern: typed-email second factor + cascade.
+  const [hardMode, setHardMode] = useState(false);
+  const [typedEmail, setTypedEmail] = useState("");
+  const [hardErr, setHardErr] = useState<string | null>(null);
 
   const archiveMutation = useMutation({
     mutationFn: () => archiveProfile(profile.id),
@@ -212,49 +220,138 @@ function ProfileHeader({
     },
   });
 
+  const hardDeleteMutation = useMutation({
+    mutationFn: () =>
+      archiveProfile(profile.id, { hard: true, confirm: typedEmail }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["profiles"] });
+      onArchived();
+    },
+    onError: (e: any) => setHardErr(e?.message || "Permanent delete failed"),
+  });
+
+  // The backend does its own case-insensitive equality check, but we
+  // mirror it client-side so the "Delete permanently" button stays
+  // disabled until the operator has typed the exact profile email —
+  // small friction so the action is never accidental.
+  const emailMatches =
+    typedEmail.trim().toLowerCase() === profile.email.toLowerCase();
+
   return (
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
-        <p className="mt-1 text-sm text-gray-500">{profile.email}</p>
-        {profile.archived_at && (
-          <span className="mt-2 inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
-            <Archive className="h-3 w-3" /> Archived{" "}
-            {new Date(profile.archived_at).toLocaleDateString()}
-          </span>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button variant="secondary" onClick={onToggleEdit}>
-          <Edit3 className="mr-1.5 h-4 w-4" />
-          {editing ? "Cancel edit" : "Edit fields"}
-        </Button>
-        {!profile.archived_at &&
-          (confirmArchive ? (
-            <>
-              <Button
-                variant="danger"
-                onClick={() => archiveMutation.mutate()}
-                loading={archiveMutation.isPending}
-              >
-                Confirm archive
-              </Button>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
+          <p className="mt-1 text-sm text-gray-500">{profile.email}</p>
+          {profile.archived_at && (
+            <span className="mt-2 inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+              <Archive className="h-3 w-3" /> Archived{" "}
+              {new Date(profile.archived_at).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={onToggleEdit}>
+            <Edit3 className="mr-1.5 h-4 w-4" />
+            {editing ? "Cancel edit" : "Edit fields"}
+          </Button>
+          {!profile.archived_at &&
+            (confirmArchive ? (
+              <>
+                <Button
+                  variant="danger"
+                  onClick={() => archiveMutation.mutate()}
+                  loading={archiveMutation.isPending}
+                >
+                  Confirm archive
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => setConfirmArchive(false)}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
               <Button
                 variant="secondary"
-                onClick={() => setConfirmArchive(false)}
+                onClick={() => setConfirmArchive(true)}
               >
-                Cancel
+                <Archive className="mr-1.5 h-4 w-4" /> Archive profile
               </Button>
-            </>
-          ) : (
+            ))}
+          {/* Hard delete is always available — even on already-archived
+              profiles — because erasure requests can come in for soft-
+              archived rows too. Distinguishing the two buttons with
+              different copy + the typed-email gate avoids the "I clicked
+              archive thinking it would purge" failure mode. */}
+          {!hardMode ? (
+            <Button
+              variant="danger"
+              onClick={() => {
+                setHardMode(true);
+                setHardErr(null);
+                setTypedEmail("");
+              }}
+            >
+              <Trash2 className="mr-1.5 h-4 w-4" /> Delete permanently
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      {hardMode && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm">
+          <p className="font-semibold text-red-800">
+            Permanently delete this profile?
+          </p>
+          <p className="mt-1 text-red-700">
+            This will remove the row and unlink every uploaded document
+            file from disk. This cannot be undone — soft-archive
+            (above) is the reversible path. Reserved for DPDP / GDPR
+            erasure requests.
+          </p>
+          <p className="mt-3 text-red-700">
+            Type{" "}
+            <code className="rounded bg-white px-1.5 py-0.5 font-mono text-xs text-red-900">
+              {profile.email}
+            </code>{" "}
+            to confirm:
+          </p>
+          <input
+            type="text"
+            autoFocus
+            className="input mt-2 w-full max-w-md"
+            placeholder={profile.email}
+            value={typedEmail}
+            onChange={(e) => setTypedEmail(e.target.value)}
+          />
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              variant="danger"
+              onClick={() => hardDeleteMutation.mutate()}
+              loading={hardDeleteMutation.isPending}
+              disabled={!emailMatches || hardDeleteMutation.isPending}
+            >
+              <Trash2 className="mr-1.5 h-4 w-4" /> Confirm permanent delete
+            </Button>
             <Button
               variant="secondary"
-              onClick={() => setConfirmArchive(true)}
+              onClick={() => {
+                setHardMode(false);
+                setTypedEmail("");
+                setHardErr(null);
+              }}
+              disabled={hardDeleteMutation.isPending}
             >
-              <Archive className="mr-1.5 h-4 w-4" /> Archive profile
+              Cancel
             </Button>
-          ))}
-      </div>
+            {hardErr && (
+              <p className="text-sm font-medium text-red-700">{hardErr}</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

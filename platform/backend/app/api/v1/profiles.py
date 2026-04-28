@@ -347,15 +347,99 @@ async def update_profile(
 async def archive_profile(
     profile_id: UUID,
     request: Request,
+    hard: bool = Query(
+        default=False,
+        description=(
+            "If true, hard-delete the profile + every attached document "
+            "(unlinks the on-disk files AND removes the rows). Intended "
+            "for GDPR / DPDP erasure requests only. Default soft-delete "
+            "(``archived_at`` timestamp) is reversible."
+        ),
+    ),
+    confirm: str | None = Query(
+        default=None,
+        description=(
+            "Required when ``hard=true`` — must exactly match the "
+            "profile's email (case-insensitive). Acts as a typed "
+            "second factor against accidental wipe."
+        ),
+        max_length=320,
+    ),
     user: User = Depends(_ADMIN_GUARD),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete — sets ``archived_at`` on the profile AND on every
-    attached document. No filesystem unlink; a separate retention
-    sweep is responsible for hard-deleting after the retention window.
+    """Remove a profile.
+
+    Default ``hard=false`` — soft-delete via ``archived_at`` timestamp
+    on the profile AND every attached document. Reversible by an admin
+    via direct DB edit; the records remain queryable for audit
+    obligations.
+
+    F260 regression fix (feedback 5787fe53 — "the profile cannot be
+    deleted, as this option is not currently available"): adds a
+    ``?hard=true&confirm=<email>`` mode that physically removes the
+    profile + every attached document row + every on-disk file. Mirror
+    of the document-level hard-delete pattern shipped in F238(d) so
+    the operator gets the same "type the email" second-factor against
+    accidental clicks. No partial deletes — either everything goes or
+    nothing does (a single transaction).
     """
-    profile = await _get_profile_or_404(profile_id, db)
+    profile = await _get_profile_or_404(
+        profile_id, db, include_archived=True
+    )
     from datetime import datetime, timezone
+
+    if hard:
+        # Second-factor: typed email match. Defeats accidental clicks.
+        # Comparison is case-insensitive on both sides since the
+        # profile email is stored as entered.
+        expected = (profile.email or "").strip().lower()
+        got = (confirm or "").strip().lower()
+        if not got or got != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Hard-delete requires ?confirm=<profile email>. "
+                    "The confirm value must exactly match the profile's "
+                    "email on file."
+                ),
+            )
+
+        # Unlink every attached doc's file from disk before the row
+        # cascades. ``unlink_if_exists`` returns the count for audit;
+        # we sum them so the audit metadata reflects what was wiped.
+        docs = (await db.execute(
+            select(ProfileDocument).where(ProfileDocument.profile_id == profile.id)
+        )).scalars().all()
+        unlinked = 0
+        for d in docs:
+            if d.storage_path and unlink_if_exists(d.storage_path):
+                unlinked += 1
+
+        # Cascade-delete via the FK relationship — all ProfileDocument
+        # rows for this profile go with it.
+        await db.delete(profile)
+        await db.commit()
+        await log_action(
+            db, user,
+            action="profile.hard_delete",
+            resource="profile",
+            request=request,
+            metadata={
+                "profile_id": str(profile_id),
+                "docs_count": len(docs),
+                "files_unlinked": unlinked,
+            },
+        )
+        return Response(status_code=204)
+
+    # ── Soft-delete (default) ───────────────────────────────────────
+    if profile.archived_at is not None:
+        # Already archived — idempotent no-op rather than 400. Lets
+        # the UI fire delete on a row in the "archived" view without
+        # extra checks.
+        return Response(status_code=204)
+
     now = datetime.now(timezone.utc)
     profile.archived_at = now
     # Cascade the archive to docs so the list endpoint filters them

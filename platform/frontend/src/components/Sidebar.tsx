@@ -33,7 +33,19 @@ import { logout } from "@/lib/api";
 const navigation = [
   { name: "Dashboard", to: "/", icon: LayoutDashboard },
   { name: "Relevant Jobs", to: "/jobs?role_cluster=relevant", icon: Star },
-  { name: "All Jobs", to: "/jobs", icon: List },
+  // F260 regression fix: pre-fix this was ``/jobs`` (no query params).
+  // JobsPage's filter-restore logic (line 137-159) falls back to
+  // localStorage when the URL has no filter params. Users coming
+  // from "Relevant Jobs" had ``role_cluster=relevant`` saved in
+  // localStorage, so clicking "All Jobs" silently re-applied that
+  // filter — both pages showed identical data (feedback fc0a750b
+  // "Relevant Jobs and All jobs section has the same URL and
+  // functionality"). Adding the explicit ``role_cluster=any`` token
+  // forces the URL-precedence branch in JobsPage so the localStorage
+  // fallback can't poison the navigation. The backend translates
+  // ``any`` → no role-cluster filter (matches the legacy "" empty
+  // value), so the wire shape of the request is unchanged.
+  { name: "All Jobs", to: "/jobs?role_cluster=any", icon: List },
   { name: "Review Queue", to: "/review", icon: ClipboardCheck },
   { name: "Companies", to: "/companies", icon: Building2 },
   { name: "Platforms", to: "/platforms", icon: Radio },
@@ -113,12 +125,30 @@ export function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () =>
       */}
       <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 px-3 py-4">
         {navigation.map((item) => {
-          // Custom active check for items with query params
-          const isActive = item.to.includes("?")
-            ? location.pathname + location.search === item.to
-            : item.to === "/"
-              ? location.pathname === "/"
-              : location.pathname === item.to && !location.search.includes("role_cluster=relevant");
+          // Custom active check for items with query params.
+          //
+          // F260 regression fix: pre-fix the "All Jobs" link was
+          // ``/jobs`` (no query params), and the active check at the
+          // bottom branch (``pathname === item.to && !search.includes(
+          // "role_cluster=relevant")``) handled it. After flipping
+          // "All Jobs" to ``/jobs?role_cluster=any`` to defeat the
+          // localStorage filter-restore (feedback fc0a750b), both
+          // Jobs links now have query params. We disambiguate here
+          // by walking the role_cluster value: relevant → "Relevant
+          // Jobs", any (or absent) → "All Jobs".
+          const itemPath = item.to.split("?")[0];
+          let isActive: boolean;
+          if (itemPath === "/jobs" && location.pathname === "/jobs") {
+            const isRelevantLink = item.to.includes("role_cluster=relevant");
+            const onRelevantPage = location.search.includes("role_cluster=relevant");
+            isActive = isRelevantLink ? onRelevantPage : !onRelevantPage;
+          } else if (item.to.includes("?")) {
+            isActive = location.pathname + location.search === item.to;
+          } else if (item.to === "/") {
+            isActive = location.pathname === "/";
+          } else {
+            isActive = location.pathname === item.to;
+          }
 
           return (
             <NavLink

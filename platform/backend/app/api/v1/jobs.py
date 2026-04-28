@@ -251,27 +251,40 @@ async def list_jobs(
     if geo:
         query = query.where(Job.geography_bucket == geo)
     if role_cluster:
-        # F218: validate role_cluster against the configured cluster catalog
-        # before filtering. Clusters are admin-configurable, so we load the
-        # allowed set from the DB instead of hard-coding a Literal. The
-        # "relevant" pseudo-value is a UI alias for "all clusters marked
-        # relevant" (F106) and must be allow-listed explicitly. Before this
-        # check, role_cluster=infraa silently returned total=0; now it 400s
-        # with the catalog in the detail so the caller can self-correct.
-        allowed_clusters = set(await _get_all_cluster_names(db)) | {"relevant"}
-        if role_cluster not in allowed_clusters:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid role_cluster. Must be one of: "
-                    + ", ".join(sorted(allowed_clusters))
-                ),
-            )
-        if role_cluster == "relevant":
-            relevant_clusters = await _get_relevant_clusters(db)
-            query = query.where(Job.role_cluster.in_(relevant_clusters))
+        # F260 regression fix: ``role_cluster=any`` is the explicit
+        # "no filter" sentinel introduced for the Sidebar's "All Jobs"
+        # link (feedback fc0a750b — pre-fix that link had no query
+        # params, fell into JobsPage's localStorage-restore branch,
+        # silently re-applied any prior ``role_cluster=relevant``
+        # filter, and made "All Jobs" indistinguishable from "Relevant
+        # Jobs"). Treating ``any`` as a no-op keeps the wire shape
+        # of the request explicit while preserving the legacy
+        # behaviour of an empty-string ``role_cluster`` value.
+        if role_cluster == "any":
+            pass  # Explicit "no role-cluster filter" — fall through.
         else:
-            query = query.where(Job.role_cluster == role_cluster)
+            # F218: validate role_cluster against the configured cluster
+            # catalog before filtering. Clusters are admin-configurable, so
+            # we load the allowed set from the DB instead of hard-coding a
+            # Literal. The "relevant" pseudo-value is a UI alias for "all
+            # clusters marked relevant" (F106) and must be allow-listed
+            # explicitly. Before this check, role_cluster=infraa silently
+            # returned total=0; now it 400s with the catalog in the detail
+            # so the caller can self-correct.
+            allowed_clusters = set(await _get_all_cluster_names(db)) | {"relevant", "any"}
+            if role_cluster not in allowed_clusters:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid role_cluster. Must be one of: "
+                        + ", ".join(sorted(allowed_clusters))
+                    ),
+                )
+            if role_cluster == "relevant":
+                relevant_clusters = await _get_relevant_clusters(db)
+                query = query.where(Job.role_cluster.in_(relevant_clusters))
+            else:
+                query = query.where(Job.role_cluster == role_cluster)
 
     # Regression finding 87: let callers filter the (huge — ~90% of rows)
     # unclassified pool without hand-crafting `role_cluster=` URLs that
