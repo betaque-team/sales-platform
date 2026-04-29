@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · ffb8f66 · sha-ffb8f66
+Merge feat/f274-jobs-title-trigram-index into main
+
+
 ## 2026-04-29 · c3ee2df · sha-c3ee2df
 Merge feat/f273-uvicorn-multi-worker into main
 
