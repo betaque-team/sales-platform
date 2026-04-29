@@ -23,7 +23,7 @@ needing an allowlist.
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # Keep in lockstep with `api/v1/answer_book.py::VALID_CATEGORIES`.
@@ -57,7 +57,13 @@ class AnswerUpdate(BaseModel):
     All fields optional so the caller can update one attribute in
     isolation. When `question` is updated, the endpoint also
     recomputes `question_key` via `normalize_question_key`.
+
+    F268 — extra="forbid" so a typo like ``categry`` 422s instead of
+    silently no-op-ing. Same regression-class as the F194 PATCH
+    /applications fix and the F268 sweep across other admin schemas.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     category: ANSWER_CATEGORY_LITERALS | None = None
     question: str | None = Field(default=None, min_length=1, max_length=_QUESTION_MAX)

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 from datetime import datetime
 from uuid import UUID
 
@@ -45,11 +45,19 @@ class UserOut(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    # F268 — extra="forbid" on user-mutation schemas. These are super_admin
+    # surfaces, so the audience is small + trusted, but typos still hide
+    # bugs (e.g. ``is_acitve`` would silent-no-op pre-fix). Same regression
+    # class as the F194 PATCH /applications fix.
+    model_config = ConfigDict(extra="forbid")
+
     role: str | None = None
     is_active: bool | None = None
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     name: str
     password: str
@@ -57,14 +65,20 @@ class UserCreate(BaseModel):
 
 
 class ChangePassword(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     current_password: str
     new_password: str
 
 
 class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
 
 
 class ResetPasswordConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     token: str
     new_password: str
