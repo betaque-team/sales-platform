@@ -256,19 +256,34 @@ def reclassify_and_rescore():
                 new_matched_role = role_match["matched_role"]
                 new_title_norm = role_match["title_normalized"]
 
-                # Re-run geography classification
-                new_geo = classify_geography(
+                # Re-run geography + remote-policy classification.
+                # Both columns are updated together — the legacy
+                # ``geography_bucket`` is derived from the new
+                # ``(policy, countries)`` pair via ``legacy_bucket_for``
+                # so they can never diverge.
+                from app.workers.tasks._role_matching import classify_remote_policy
+                from app.utils.remote_policy import legacy_bucket_for, normalise_countries
+
+                new_policy, new_policy_countries = classify_remote_policy(
                     job.location_raw or "", job.remote_scope or ""
                 )
+                new_policy_countries = normalise_countries(new_policy_countries)
+                new_geo = legacy_bucket_for(new_policy, new_policy_countries)
 
                 cluster_changed = new_cluster != (job.role_cluster or "")
                 geo_changed = new_geo != (job.geography_bucket or "")
+                policy_changed = new_policy != (job.remote_policy or "unknown")
+                countries_changed = list(new_policy_countries) != list(
+                    job.remote_policy_countries or []
+                )
 
-                if cluster_changed or geo_changed:
+                if cluster_changed or geo_changed or policy_changed or countries_changed:
                     job.role_cluster = new_cluster
                     job.matched_role = new_matched_role
                     job.title_normalized = new_title_norm
                     job.geography_bucket = new_geo
+                    job.remote_policy = new_policy
+                    job.remote_policy_countries = new_policy_countries
                     chunk_reclassified += 1
 
                 # Rescore using the (possibly updated) classification

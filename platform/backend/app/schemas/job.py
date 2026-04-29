@@ -43,6 +43,17 @@ JobStatusFilter = Literal[
 # Values mirror the `Job.geography_bucket` column comment in models/job.py.
 GeographyBucketFilter = Literal["global_remote", "usa_only", "uae_only"]
 
+# d0e1f2g3h4i5: new ``remote_policy`` filter that replaces the legacy
+# ``geography_bucket``. Same parse-time validation pattern.
+RemotePolicyFilter = Literal[
+    "worldwide",
+    "country_restricted",
+    "region_restricted",
+    "hybrid",
+    "onsite",
+    "unknown",
+]
+
 # Regression finding 191 (moved here in F218 for reuse): the platform set
 # is fixed in code (BaseFetcher subclasses under `app/fetchers/`), so a
 # Literal catches typos like `platform=GREENHOUSE` (uppercase) at parse
@@ -88,6 +99,11 @@ class JobOut(BaseModel):
     employment_type: str | None = None
     salary_range: str | None = None
     geography_bucket: str
+    # Remote-policy classification (d0e1f2g3h4i5). Replaces the
+    # legacy ``geography_bucket`` for new code paths; both columns
+    # are shadow-written by the classifier.
+    remote_policy: str = "unknown"
+    remote_policy_countries: list[str] = []
     matched_role: str
     role_cluster: str
     relevance_score: float
@@ -127,11 +143,35 @@ class JobOut(BaseModel):
     @computed_field
     @property
     def tags(self) -> list[str]:
-        """Auto-generate tags from job metadata."""
+        """Auto-generate tags from job metadata.
+
+        Prefers the new ``remote_policy`` rendering when present —
+        falls back to the legacy ``geography_bucket`` for old rows
+        not yet re-classified by the maintenance task.
+        """
         t = []
         if self.role_cluster:
             t.append(self.role_cluster)
-        if self.geography_bucket:
+        # New vocabulary first. ``country_restricted`` with a single
+        # country reads as "US-restricted remote" rather than the
+        # generic "Country-restricted remote" — matches what the
+        # frontend ``renderRemotePolicyLabel`` helper produces.
+        if self.remote_policy and self.remote_policy != "unknown":
+            from app.utils.remote_policy import POLICY_LABELS
+            if (
+                self.remote_policy == "country_restricted"
+                and self.remote_policy_countries
+            ):
+                codes = self.remote_policy_countries
+                if len(codes) == 1:
+                    t.append(f"{codes[0]}-restricted remote")
+                elif len(codes) <= 2:
+                    t.append(f"{'/'.join(codes)}-restricted remote")
+                else:
+                    t.append(f"{len(codes)} countries restricted")
+            else:
+                t.append(POLICY_LABELS.get(self.remote_policy, self.remote_policy))
+        elif self.geography_bucket:
             t.append(self.geography_bucket.replace("_", " "))
         if self.matched_role and self.matched_role != self.title:
             t.append(self.matched_role)

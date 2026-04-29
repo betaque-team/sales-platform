@@ -357,13 +357,13 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      {/* Global Remote section */}
+      {/* Worldwide remote section (formerly "Global Remote") */}
       <Card padding="none">
         <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
           <div className="flex items-center gap-2">
             <Globe className="h-4 w-4 text-green-500" />
             <h3 className="text-base font-semibold text-gray-900">
-              Global Remote Openings
+              Worldwide remote openings
             </h3>
           </div>
           <Badge variant="success">{formatCount(globalRemoteJobs?.total)} jobs</Badge>
@@ -376,7 +376,7 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="py-8 text-center text-sm text-gray-400">
-            No global remote jobs classified yet. Jobs are being scanned and classified continuously.
+            No worldwide-remote jobs classified yet. Jobs are being scanned and classified continuously.
           </div>
         )}
         <div className="border-t border-gray-100 px-5 py-2">
@@ -384,7 +384,7 @@ export function DashboardPage() {
             onClick={() => navigate("/jobs?geography=global_remote")}
             className="text-xs font-medium text-primary-600 hover:text-primary-700"
           >
-            View all global remote jobs →
+            View all worldwide-remote jobs →
           </button>
         </div>
       </Card>

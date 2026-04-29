@@ -109,6 +109,18 @@ export interface Job {
   relevance_score: number;
   role_cluster: "infra" | "security";
   geography_bucket: "global_remote" | "usa_only" | "uae_only";
+  // d0e1f2g3h4i5: replaces ``geography_bucket`` with a richer
+  // vocabulary. Both columns are populated by the classifier during
+  // the transition window. Optional because older API responses
+  // (before the rolling deploy completes) won't have it.
+  remote_policy?:
+    | "worldwide"
+    | "country_restricted"
+    | "region_restricted"
+    | "hybrid"
+    | "onsite"
+    | "unknown";
+  remote_policy_countries?: string[];
   tags: string[];
   resume_score?: number | null;
   // The CURRENT reviewer's active-resume fit — set by /jobs/review-queue
@@ -409,6 +421,18 @@ export interface JobFilters {
   status?: JobStatus | "";
   platform?: string;
   geography?: string;
+  // d0e1f2g3h4i5: new filter vocabulary. Both legacy (`geography`)
+  // and new (`remote_policy` + `remote_country`) are accepted by the
+  // backend during the transition window. New code should prefer the
+  // new fields.
+  remote_policy?:
+    | "worldwide"
+    | "country_restricted"
+    | "region_restricted"
+    | "hybrid"
+    | "onsite"
+    | "unknown";
+  remote_country?: string; // ISO-3166 alpha-2, e.g. "US"
   role_cluster?: string;
   // Regression finding 87: mirrors the backend `is_classified` query
   // param added alongside the configurable role-cluster catalog.

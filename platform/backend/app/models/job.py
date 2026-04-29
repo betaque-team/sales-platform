@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, DateTime, ForeignKey, JSON, Float, Integer, Index
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -16,15 +17,39 @@ class Job(Base):
     url: Mapped[str] = mapped_column(String(1000), nullable=False)
     platform: Mapped[str] = mapped_column(String(50), nullable=False)
     location_raw: Mapped[str] = mapped_column(String(500), default="")
+    # Raw remote-scope text from the ATS API (e.g. "Remote", "Fully
+    # Remote", "Hybrid"). Input to the classifier — distinct from
+    # ``remote_policy`` which is the classified bucket.
     remote_scope: Mapped[str] = mapped_column(String(500), default="")
     department: Mapped[str] = mapped_column(String(300), default="")
     employment_type: Mapped[str] = mapped_column(String(100), default="")
     salary_range: Mapped[str] = mapped_column(String(200), default="")
 
-    # Classification
-    geography_bucket: Mapped[str] = mapped_column(String(50), default="")  # global_remote | usa_only | uae_only
+    # Classification (legacy)
+    # ``geography_bucket`` is kept for one release after migration
+    # d0e1f2g3h4i5 ships so out-of-tree analytics queries keep working.
+    # New code reads ``remote_policy`` + ``remote_policy_countries``;
+    # the classifier shadow-writes both columns. A follow-up migration
+    # will drop this column.
+    geography_bucket: Mapped[str] = mapped_column(String(50), default="")  # legacy: global_remote | usa_only | uae_only
     matched_role: Mapped[str] = mapped_column(String(200), default="")
     role_cluster: Mapped[str] = mapped_column(String(50), default="")  # infra | security
+
+    # Classification (new — d0e1f2g3h4i5)
+    # ``remote_policy``: enum on the "where can the candidate work
+    # from" axis. Values: worldwide | country_restricted |
+    # region_restricted | hybrid | onsite | unknown. See
+    # ``app/utils/remote_policy.py`` for the canonical definitions.
+    # ``remote_policy_countries``: ISO-3166 alpha-2 codes when
+    # ``remote_policy="country_restricted"``; empty list otherwise.
+    # Sorted, de-duped, upper-cased on write — keeps the GIN index
+    # hit rate high.
+    remote_policy: Mapped[str] = mapped_column(
+        String(32), default="unknown", server_default="unknown", nullable=False
+    )
+    remote_policy_countries: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
 
     # Scoring
     relevance_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -62,6 +87,11 @@ class Job(Base):
         Index("idx_jobs_company", "company_id"),
         Index("idx_jobs_platform", "platform"),
         Index("idx_jobs_geography", "geography_bucket"),
+        Index("idx_jobs_remote_policy", "remote_policy"),
+        # GIN index on remote_policy_countries created in the
+        # migration directly — declarative form would need
+        # postgresql_using="gin" + a list of expressions, but a plain
+        # Index() doesn't render GIN. Migration owns the DDL.
         Index("idx_jobs_score", relevance_score.desc()),
         Index("idx_jobs_first_seen", "first_seen_at"),
     )

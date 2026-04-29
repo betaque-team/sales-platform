@@ -209,6 +209,8 @@ export async function getJobs(
     status: filters.status,
     platform: filters.platform,
     geography: filters.geography,
+    remote_policy: filters.remote_policy,
+    remote_country: filters.remote_country,
     role_cluster: filters.role_cluster,
     // F87: wire the backend `is_classified` param so the JobsPage
     // dropdown's synthetic "Unclassified" option can actually filter
