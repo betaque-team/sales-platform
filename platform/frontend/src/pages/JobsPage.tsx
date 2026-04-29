@@ -678,13 +678,53 @@ export function JobsPage() {
                   ? `${(activeClusters.find((c) => c.name === filters.role_cluster)?.display_name) || (filters.role_cluster.charAt(0).toUpperCase() + filters.role_cluster.slice(1))} Jobs`
                   : "All Jobs"}
           </h1>
+          {/* F264 — header subtitle is now generated from the live
+              cluster config instead of the pre-fix hardcoded string
+              ``"Cloud, DevOps, SRE, Compliance & Security positions"``.
+              That string was a lie the moment an admin reconfigured
+              ``is_relevant`` on any cluster — and there's no signal
+              to non-admins when admin-side reconfig happens. Now the
+              subtitle reads "Showing infra, security, qa · 7,942
+              jobs" regardless of what the admin has marked relevant
+              today. Same applies to the per-cluster header pages
+              (``/jobs?role_cluster=infra`` etc.) which now include
+              the count + the cluster's keyword preview. */}
           <p className="mt-1 text-sm text-gray-500">
-            {filters.is_classified === false
-              ? (data ? `${formatCount(data.total)} jobs without a role cluster` : "Loading jobs...")
-              : filters.role_cluster === "relevant"
-                ? "Cloud, DevOps, SRE, Compliance & Security positions"
-                : data ? `${formatCount(data.total)} jobs found` : "Loading jobs..."}
-            {data && filters.role_cluster === "relevant" ? ` · ${formatCount(data.total)} jobs found` : ""}
+            {filters.is_classified === false ? (
+              data ? `${formatCount(data.total)} jobs without a role cluster` : "Loading jobs..."
+            ) : filters.role_cluster === "relevant" ? (
+              <>
+                Showing{" "}
+                <span className="font-medium text-gray-700">
+                  {activeClusters
+                    .filter((c) => c.is_relevant)
+                    .map((c) => c.display_name || c.name)
+                    .join(" · ") || "infra · security (default)"}
+                </span>
+                {data ? ` · ${formatCount(data.total)} jobs` : ""}
+              </>
+            ) : filters.role_cluster && filters.role_cluster !== "any" ? (
+              <>
+                {(() => {
+                  const c = activeClusters.find((x) => x.name === filters.role_cluster);
+                  if (!c) return data ? `${formatCount(data.total)} jobs found` : "Loading jobs...";
+                  const kwPreview = (c.keywords || "")
+                    .split(",")
+                    .slice(0, 4)
+                    .map((k) => k.trim())
+                    .filter(Boolean)
+                    .join(", ");
+                  return (
+                    <>
+                      {kwPreview && <span className="text-gray-600">{kwPreview}…</span>}
+                      {data ? ` · ${formatCount(data.total)} jobs` : ""}
+                    </>
+                  );
+                })()}
+              </>
+            ) : (
+              data ? `${formatCount(data.total)} jobs found` : "Loading jobs..."
+            )}
           </p>
         </div>
         {/* Feature A — submit-link modal trigger. Pasting an ATS URL runs
@@ -790,7 +830,23 @@ export function JobsPage() {
             }}
           >
             <option value="">All Roles</option>
-            <option value="relevant">Relevant (configured clusters)</option>
+            {/* F264 — pre-fix this option's label was the static
+                ``"Relevant (configured clusters)"`` which never named
+                the actual clusters. Users had no idea what would
+                appear on click. Now the label lists the live cluster
+                names so the click is predictable: "Relevant: infra,
+                security, qa". When admin reconfigures is_relevant on
+                a cluster, this label auto-reflects. */}
+            <option value="relevant">
+              {(() => {
+                const names = activeClusters
+                  .filter((c) => c.is_relevant)
+                  .map((c) => c.name);
+                return names.length > 0
+                  ? `Relevant: ${names.join(", ")}`
+                  : "Relevant (default: infra, security)";
+              })()}
+            </option>
             {activeClusters.map((c) => (
               <option key={c.id} value={c.name}>
                 {c.display_name || c.name}
@@ -1085,7 +1141,34 @@ export function JobsPage() {
                           {job.title}
                         </p>
                         <div className="mt-0.5 flex gap-1">
-                          {job.role_cluster && <Badge variant="gray">{job.role_cluster}</Badge>}
+                          {/* F264 — clickable cluster badge. Pre-fix
+                              this was a passive ``<Badge>`` so a
+                              reviewer browsing All Jobs and seeing a
+                              row tagged "infra" had no fast way to
+                              filter to all infra rows. Now it's a
+                              button that swaps the role_cluster
+                              filter to that single cluster.
+                              ``stopPropagation`` so the click doesn't
+                              also trigger the row's "open detail"
+                              navigation. */}
+                          {job.role_cluster && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFilters((prev) => ({
+                                  ...prev,
+                                  role_cluster: job.role_cluster,
+                                  is_classified: undefined,
+                                  page: 1,
+                                }));
+                              }}
+                              title={`Filter to ${job.role_cluster} cluster`}
+                              className="cursor-pointer hover:opacity-75 transition-opacity"
+                            >
+                              <Badge variant="gray">{job.role_cluster}</Badge>
+                            </button>
+                          )}
                           {/* F263 (feedback 63ed0c32 — "Status under
                               All jobs is not visible after 18+ pages,
                               there is no status (worldwide, remote)"):

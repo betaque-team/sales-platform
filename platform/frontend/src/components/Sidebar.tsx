@@ -28,8 +28,9 @@ import {
   Bot,
   Clock,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
-import { logout } from "@/lib/api";
+import { logout, getRoleClusters } from "@/lib/api";
 
 const navigation = [
   { name: "Dashboard", to: "/", icon: LayoutDashboard },
@@ -90,6 +91,27 @@ const superAdminNavigation = [
 export function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () => void }) {
   const { user } = useAuth();
   const location = useLocation();
+
+  // F264 — fetch the role-cluster catalog so the "Relevant Jobs"
+  // sidebar entry can render a tooltip naming the currently-relevant
+  // clusters. Pre-fix the link said "Relevant Jobs" with zero hint
+  // about scope; users had to click and inspect results to figure
+  // out what the filter actually contained. Tooltip is set as the
+  // ``title`` attribute (no extra rendering cost; native browser
+  // tooltip on hover). 10-min staleTime matches JobsPage to avoid
+  // duplicate fetches.
+  const roleClustersQ = useQuery({
+    queryKey: ["role-clusters"],
+    queryFn: getRoleClusters,
+    staleTime: 10 * 60 * 1000,
+  });
+  const relevantClusterNames = (roleClustersQ.data?.items ?? [])
+    .filter((c) => c.is_active && c.is_relevant)
+    .map((c) => c.name);
+  const relevantTooltip =
+    relevantClusterNames.length > 0
+      ? `Filters to: ${relevantClusterNames.join(", ")}`
+      : "Filters to: infra, security (default — admin can change at /role-clusters)";
 
   // Close mobile drawer on route change
   const prevPath = location.pathname + location.search;
@@ -155,10 +177,17 @@ export function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () =>
             isActive = location.pathname === item.to;
           }
 
+          // F264 — Relevant Jobs link gets a tooltip listing the
+          // currently-configured relevant clusters. ``All Jobs`` and
+          // the rest stay tooltip-less to avoid noise.
+          const tooltip =
+            item.name === "Relevant Jobs" ? relevantTooltip : undefined;
+
           return (
             <NavLink
               key={item.name}
               to={item.to}
+              title={tooltip}
               className={clsx(
                 "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                 isActive

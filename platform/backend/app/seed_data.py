@@ -48,9 +48,16 @@ async def seed():
         # --- Seed role rules ---
         existing_rules = await session.execute(select(RoleRule))
         if not existing_rules.scalars().first():
-            # Group keywords by cluster
-            infra_kws = [kw for kw in role_keywords if not any(s in kw for s in ["security", "soc", "devsecops", "compliance", "grc", "pentest", "incident", "red team"])]
-            sec_kws = [kw for kw in role_keywords if any(s in kw for s in ["security", "soc", "devsecops", "compliance", "grc", "pentest", "incident", "red team"])]
+            # Group keywords by cluster.
+            # F264 — ``devsecops`` removed from the security splitter
+            # signal list. Per the cluster reshape it belongs in the
+            # infra bucket alongside DevOps / SRE (build-pipeline
+            # security, not SOC/GRC). Pure security signals
+            # (security/soc/compliance/grc/pentest/incident/red team)
+            # still route to the security cluster.
+            sec_signals = ("security", "soc", "compliance", "grc", "pentest", "incident", "red team")
+            infra_kws = [kw for kw in role_keywords if not any(s in kw for s in sec_signals)]
+            sec_kws = [kw for kw in role_keywords if any(s in kw for s in sec_signals)]
 
             if infra_kws:
                 session.add(RoleRule(id=uuid.uuid4(), cluster="infra", base_role="infra", keywords=infra_kws, is_active=True))
@@ -166,19 +173,31 @@ async def seed_role_cluster_configs():
         existing = (await session.execute(select(RoleClusterConfig))).scalars().all()
         existing_names = {r.name for r in existing}
 
+        # F264 — cluster reshape (Option C):
+        # - ``devsecops`` keyword and "DevSecOps Engineer" approved
+        #   role moved from security → infra. DevSecOps is build-
+        #   pipeline security (CI/CD scanning, IaC security, secrets
+        #   management) and naturally clusters with DevOps / SRE
+        #   roles, not with SOC analyst / GRC / pure InfoSec.
+        # - Both clusters retain ``is_relevant=True`` (Option C is
+        #   the least-disruptive reshape — no cluster gets demoted
+        #   from the Relevant Jobs feed).
+        # - Display names tightened: ``infra`` now mentions DevSecOps;
+        #   ``security`` tightened to its actual contents (no longer
+        #   advertises DevSecOps).
         clusters = [
             {
                 "name": "infra",
-                "display_name": "Infrastructure / Cloud / DevOps / SRE",
-                "keywords": "devops,cloud,infrastructure,sre,site reliability,platform engineer,platform engineering,kubernetes,docker,terraform,ansible,aws engineer,azure engineer,gcp engineer,linux,systems engineer,systems administrator,network engineer,network administrator,reliability engineer,release engineer,monitoring,observability,ci/cd,cicd,build engineer,finops,mlops,dataops",
-                "approved_roles": "DevOps Engineer,Cloud Engineer,Infrastructure Engineer,Site Reliability Engineer",
+                "display_name": "Infrastructure / Cloud / DevOps / SRE / DevSecOps",
+                "keywords": "devops,devsecops,cloud,infrastructure,sre,site reliability,platform engineer,platform engineering,kubernetes,docker,terraform,ansible,aws engineer,azure engineer,gcp engineer,linux,systems engineer,systems administrator,network engineer,network administrator,reliability engineer,release engineer,monitoring,observability,ci/cd,cicd,build engineer,finops,mlops,dataops",
+                "approved_roles": "DevOps Engineer,DevSecOps Engineer,Cloud Engineer,Infrastructure Engineer,Site Reliability Engineer",
                 "sort_order": 1,
             },
             {
                 "name": "security",
-                "display_name": "Security / Compliance / DevSecOps",
-                "keywords": "security,devsecops,soc,compliance,grc,pentest,penetration,incident response,red team,offensive,cyber,infosec,information security,vulnerability,threat,appsec,application security,cloud security,network security,identity,iam,access management,data protection,privacy engineer,forensic,malware,blue team",
-                "approved_roles": "Security Engineer,DevSecOps Engineer,Cloud Security Engineer,SOC Analyst,SOC Engineer,Compliance Analyst,GRC Analyst,Compliance Engineer,Incident Response Engineer,Penetration Tester,Red Team Engineer,Offensive Security Architect",
+                "display_name": "Security / Compliance / SOC / GRC",
+                "keywords": "security,soc,compliance,grc,pentest,penetration,incident response,red team,offensive,cyber,infosec,information security,vulnerability,threat,appsec,application security,cloud security,network security,identity,iam,access management,data protection,privacy engineer,forensic,malware,blue team",
+                "approved_roles": "Security Engineer,Cloud Security Engineer,SOC Analyst,SOC Engineer,Compliance Analyst,GRC Analyst,Compliance Engineer,Incident Response Engineer,Penetration Tester,Red Team Engineer,Offensive Security Architect",
                 "sort_order": 2,
             },
         ]

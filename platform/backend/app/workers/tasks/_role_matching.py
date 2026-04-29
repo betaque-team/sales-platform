@@ -45,7 +45,18 @@ INFRA_KEYWORDS = [
 ]
 
 SECURITY_KEYWORDS = [
-    "security", "devsecops", "soc", "grc", "pentest",
+    # F264 — ``devsecops`` was previously in BOTH this list AND
+    # INFRA_KEYWORDS (line 27). Since the role-matcher iterates both
+    # lists, the cluster a devsecops job ended up in depended on
+    # iteration order — effectively unreliable. Per the F264 ship
+    # decision (Option C: move devsecops into the broader infra
+    # cluster, keep security as a relevant-but-narrower bucket for
+    # pure SOC/GRC/InfoSec roles), the keyword is removed from this
+    # list. INFRA_KEYWORDS line 27 retains it. The DB-backed cluster
+    # config is also updated in seed_data.py + a one-time prod
+    # UPDATE so existing rows reclassify on the next reclassify_and_
+    # rescore run.
+    "security", "soc", "grc", "pentest",
     "penetration", "incident response", "red team", "offensive",
     "cyber", "infosec", "information security",
     "vulnerability", "threat", "appsec", "application security",
@@ -111,10 +122,17 @@ INFRA_ROLES = [
     "Kubernetes Engineer", "Container Engineer",
     "Linux Engineer", "Linux Administrator",
     "Automation Engineer",
+    # F264 — DevSecOps belongs with infra/devops/SRE per the cluster
+    # reshape decision. It's a build-pipeline-security role, not a
+    # SOC/GRC role; the user's team treats it as part of "engineering
+    # platform" rather than "security ops".
+    "DevSecOps Engineer",
 ]
 
 SECURITY_ROLES = [
-    "Security Engineer", "DevSecOps Engineer", "Cloud Security Engineer",
+    # F264 — "DevSecOps Engineer" moved to INFRA_ROLES. Pure security
+    # roles stay here.
+    "Security Engineer", "Cloud Security Engineer",
     "SOC Analyst", "SOC Engineer", "Compliance Analyst", "GRC Analyst",
     "Compliance Engineer", "Incident Response Engineer",
     "Penetration Tester", "Red Team Engineer",
