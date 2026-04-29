@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · 2d58204 · sha-2d58204
+Merge fix/migration-collision-and-jsonb-binding: unblock alembic + JSONB filter
+
+
 ## 2026-04-23 · 1a7b853 · sha-1a7b853
 chore(ui): rename "Claude Routine" to "Apply Routine" in user-visible copy
 
