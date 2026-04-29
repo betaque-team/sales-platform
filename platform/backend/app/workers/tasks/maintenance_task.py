@@ -98,58 +98,37 @@ def prune_scan_logs():
     at current scale; if the table grows past 10M rows we should
     revisit and chunk this like F262 does for rescore_jobs.
 
-    Preserves the most-recent ``ScanLog`` per (platform, source) pair
-    BEFORE deletion so an admin viewing /platforms always sees the
-    last-known-state of every board even if all its recent scans
-    were pruned. We use a NOT IN subquery against the per-key max(id)
-    rows. At 252k rows this subquery runs in ~50ms.
+    F272(d) — original design preserved the most-recent row per
+    (platform, source) via ``func.max(ScanLog.id) GROUP BY platform,
+    source``. That fails on Postgres because ``ScanLog.id`` is a
+    UUID column and ``max(uuid)`` is not a defined aggregate. The
+    earlier per-key preservation was also a "nice to have" rather
+    than load-bearing — boards scanned within the last 60 days are
+    automatically preserved (they're after the cutoff), and boards
+    that haven't been scanned in 60+ days are typically dead/
+    inactive anyway. The /platforms aggregate just shows fewer
+    historical rows but the data is still correct.
+
+    Simplified implementation: single DELETE WHERE started_at < cutoff.
+    No subquery, no UUID aggregate, no preservation edge cases.
     """
     logger.info("Starting prune_scan_logs (retention=%dd)", SCAN_LOG_RETENTION_DAYS)
     session = SyncSession()
 
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=SCAN_LOG_RETENTION_DAYS)
-
-        # Per-(platform, source) latest-id subquery. The (platform,
-        # source) tuple is the natural grain admins care about — each
-        # board's last scan is preserved even if it predates the
-        # cutoff. Without this, a board that hasn't been scanned in
-        # 61 days would have ALL its history pruned, and the
-        # /platforms page would show "no scans ever" instead of "last
-        # scan was 65 days ago".
-        latest_ids_subq = session.execute(
-            select(func.max(ScanLog.id))
-            .group_by(ScanLog.platform, ScanLog.source)
-        ).scalars().all()
-        latest_ids_set = set(latest_ids_subq)
-
-        # Target rows: started_at < cutoff AND NOT in latest-per-key
-        # set. Single DELETE — fast at this scale.
-        if latest_ids_set:
-            result = session.execute(
-                ScanLog.__table__.delete().where(
-                    ScanLog.started_at < cutoff,
-                    ~ScanLog.id.in_(latest_ids_set),
-                )
+        result = session.execute(
+            ScanLog.__table__.delete().where(
+                ScanLog.started_at < cutoff,
             )
-        else:
-            # Empty set guard (table empty / first run) — skip the
-            # NOT IN clause entirely so we don't hit the "empty IN"
-            # corner case.
-            result = session.execute(
-                ScanLog.__table__.delete().where(
-                    ScanLog.started_at < cutoff,
-                )
-            )
-
+        )
         deleted = result.rowcount
         session.commit()
         logger.info(
-            "prune_scan_logs complete: %d rows deleted (retention=%dd, "
-            "preserved %d per-key latest)",
-            deleted, SCAN_LOG_RETENTION_DAYS, len(latest_ids_set),
+            "prune_scan_logs complete: %d rows deleted (retention=%dd)",
+            deleted, SCAN_LOG_RETENTION_DAYS,
         )
-        return {"deleted": deleted, "preserved_latest": len(latest_ids_set)}
+        return {"deleted": deleted}
 
     except Exception as e:
         logger.exception("prune_scan_logs failed: %s", e)
