@@ -73,24 +73,40 @@ def test_migration_creates_pg_trgm_extension():
     )
 
 
-def test_migration_creates_lower_title_gin_index():
-    """The GIN index must be on ``lower(title)``, not raw ``title``.
-    Without the ``lower(...)`` wrapper, the query
-    ``Job.title.ilike(...)`` (which produces ``LOWER(title) LIKE
-    '%term%'``) cannot use the index — Postgres requires the
-    indexed expression to match the query expression exactly.
+def test_migration_creates_raw_title_gin_index():
+    """F274(b) — the GIN index must be on RAW ``title``, NOT
+    ``lower(title)``.
+
+    The original F274 patch put the index on ``lower(title)`` thinking
+    that would back the ILIKE search. But ``Job.title.ilike(...)``
+    compiles to ``title ~~* pattern`` (the ILIKE operator) with NO
+    ``LOWER(...)`` wrapper. Postgres requires indexed expression to
+    EXACTLY match the query expression to apply the index — so the
+    lower-wrapped index never fired and queries fell back to seq
+    scan (146ms on 86k rows).
+
+    The correct shape is ``USING gin (title gin_trgm_ops)`` — the
+    pg_trgm extension's trigram extraction is inherently case-
+    insensitive, so the raw-column index supports both LIKE and
+    ILIKE. With the correct index, the same query drops to ~3ms.
     """
     src = _find_migration().read_text()
-    assert "lower(title)" in src, (
-        "F274 regression: index expression no longer wraps title in "
-        "``lower(...)``. The frontend search uses ILIKE which "
-        "compiles to ``LOWER(title) LIKE`` — the index must match "
-        "to be applicable."
+    # The DDL must NOT wrap title in lower() — that's the bug.
+    # We check the actual CREATE INDEX line, not the docstring
+    # (which can mention the historical bug).
+    code_lines = [
+        ln for ln in src.splitlines()
+        if "CREATE INDEX" in ln or ("USING gin" in ln) or "gin_trgm_ops" in ln
+    ]
+    code = " ".join(code_lines)
+    assert "lower(title)" not in code, (
+        "F274(b) regression: index is on ``lower(title)`` again. "
+        "ILIKE compiles to ``title ~~* pattern`` (no LOWER wrapper) "
+        "so the lower-wrapped index doesn't fire. Use raw ``title``."
     )
-    assert "gin_trgm_ops" in src, (
-        "F274 regression: index no longer uses gin_trgm_ops "
-        "operator class. Plain GIN doesn't support substring "
-        "matching."
+    assert "(title gin_trgm_ops)" in code or "title gin_trgm_ops" in code, (
+        "F274(b) regression: index expression must be ``title "
+        "gin_trgm_ops`` (raw column). Current source: " + code[:200]
     )
     assert "using gin" in src.lower(), (
         "F274 regression: index type is no longer GIN. Btree/hash "
