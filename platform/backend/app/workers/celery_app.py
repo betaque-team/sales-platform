@@ -271,6 +271,19 @@ else:
             "task": "app.workers.tasks.maintenance_task.auto_target_companies",
             "schedule": crontab(minute=15, hour=3),
         },
+        # F272 — daily prune of scan_logs older than 60 days. Same
+        # entry as the aggressive block above; this duplicate is
+        # required because beat_schedule is set per-mode (the file
+        # has two parallel branches for ``aggressive`` vs ``normal``
+        # SCAN_MODE). Live verification post-F272 caught that the
+        # initial patch only updated the aggressive block — prod
+        # is on SCAN_MODE=normal, so the prune task wasn't actually
+        # firing. Same mode-parity gotcha that ``fix_stuck_discovery_
+        # _runs`` flagged in its comment below.
+        "prune_scan_logs": {
+            "task": "app.workers.tasks.maintenance_task.prune_scan_logs",
+            "schedule": crontab(minute=45, hour=3),
+        },
         "fix_stuck_enrichments": {
             "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
             "schedule": crontab(minute=45, hour="*/6"),
