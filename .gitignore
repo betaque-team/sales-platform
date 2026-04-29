@@ -64,3 +64,10 @@ id_ecdsa
 **/sales-platform-ci
 # (explicitly allow the .pub counterpart)
 !*.pub
+
+# =============================================================================
+# F265 — Playwright E2E artifacts (local-only runs, never committed)
+# =============================================================================
+playwright-report/
+test-results/
+playwright/.cache/

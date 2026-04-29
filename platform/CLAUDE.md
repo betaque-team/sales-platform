@@ -93,3 +93,15 @@ docker compose exec backend python -m app.seed_remote_companies
 - Admin monitoring panel with DB stats, activity, breakdowns
 - Resume ATS scoring with AI customization
 - Company scoring for filtering
+
+## E2E Tests (F265)
+Playwright suite at `platform/frontend/e2e/`. **Local-only — NOT in
+CI** to preserve GitHub Actions free minutes. Run before pushing
+changes to user-facing flows:
+```bash
+cd platform/frontend
+npm run e2e -- --project chromium       # 6 specs, ~2 min
+```
+Covers regression surfaces from F260, F261, F263, F207. See
+`platform/frontend/e2e/README.md` for the full pre-merge checklist
+(which spec to run for which file change).
