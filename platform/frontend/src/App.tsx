@@ -1,6 +1,7 @@
 import { Routes, Route } from "react-router-dom";
 import { ProtectedRoute } from "./lib/auth";
 import { Layout } from "./components/Layout";
+import { WorkWindowGate } from "./components/WorkWindowGate";
 import { DashboardPage } from "./pages/DashboardPage";
 import { JobsPage } from "./pages/JobsPage";
 import { JobDetailPage } from "./pages/JobDetailPage";
@@ -29,11 +30,18 @@ import { ProfileDetailPage } from "./pages/ProfileDetailPage";
 import { RoutinePage } from "./pages/RoutinePage";
 import { RoutineRunDetailPage } from "./pages/RoutineRunDetailPage";
 import { RequiredSetupPage } from "./pages/RequiredSetupPage";
+import { WorkWindowsPage } from "./pages/WorkWindowsPage";
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   return (
     <ProtectedRoute>
-      <Layout>{children}</Layout>
+      {/* Work-window gate sits between auth and layout so non-admins
+          outside their IST shift see the lock-out screen instead of
+          the app chrome. Admins fall straight through (the gate's
+          first guard short-circuits on role). */}
+      <WorkWindowGate>
+        <Layout>{children}</Layout>
+      </WorkWindowGate>
     </ProtectedRoute>
   );
 }
@@ -266,6 +274,18 @@ export default function App() {
         element={
           <ProtectedLayout>
             <RequiredSetupPage />
+          </ProtectedLayout>
+        }
+      />
+      {/* Admin: per-user IST work-window configuration + extension
+          requests queue. The page itself doesn't role-gate (the
+          backend 403s on every API call for non-admins); the sidebar
+          link is gated by role so non-admins never see it. */}
+      <Route
+        path="/work-windows"
+        element={
+          <ProtectedLayout>
+            <WorkWindowsPage />
           </ProtectedLayout>
         }
       />

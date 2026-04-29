@@ -16,6 +16,44 @@ export interface User {
   created_at: string;
 }
 
+// ─── Work-time window (admin-set IST shifts) ──────────────────────
+//
+// Drives both the per-user lock-out screen and the admin /work-windows
+// page. ``server_now_utc`` is included so the lock-out countdown is
+// computed against the server's clock, not the (possibly skewed)
+// client clock.
+export interface WorkWindowState {
+  enabled: boolean;
+  start_ist: string; // "HH:MM" 24-hour, IST
+  end_ist: string;   // "HH:MM"
+  override_until: string | null; // ISO UTC, or null
+  within_window_now: boolean;
+  server_now_utc: string; // ISO UTC
+}
+
+export interface WorkTimeExtensionRequest {
+  id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  requested_minutes: number;
+  reason: string;
+  status: "pending" | "approved" | "denied";
+  requested_at: string;
+  decided_by_user_id: string | null;
+  decided_at: string | null;
+  decision_note: string;
+  approved_until: string | null;
+}
+
+export interface WorkTimeExtensionRequestList {
+  items: WorkTimeExtensionRequest[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface ManagedUser {
   id: string;
   email: string;

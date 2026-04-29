@@ -81,6 +81,9 @@ import type {
   KillSwitchState,
   HumanizeResult,
   SubmissionDetail,
+  WorkWindowState,
+  WorkTimeExtensionRequest,
+  WorkTimeExtensionRequestList,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -1475,5 +1478,83 @@ export async function promoteAnswer(
   return request<{ answer_book_entry_id: string; already_existed: boolean }>(
     `/applications/${appId}/promote-answer`,
     { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+// ─── Work-time window control plane ───────────────────────────────
+//
+// User surface (allowlisted in backend deps so a locked-out user can
+// still see their state and submit a request).
+
+export async function getMyWorkWindow(): Promise<WorkWindowState> {
+  return request<WorkWindowState>("/work-window/me");
+}
+
+export async function createMyExtensionRequest(payload: {
+  requested_minutes: number;
+  reason?: string;
+}): Promise<WorkTimeExtensionRequest> {
+  return request<WorkTimeExtensionRequest>(
+    "/work-window/me/extension-requests",
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function listMyExtensionRequests(
+  page = 1,
+  pageSize = 20,
+): Promise<WorkTimeExtensionRequestList> {
+  return request<WorkTimeExtensionRequestList>(
+    `/work-window/me/extension-requests?page=${page}&page_size=${pageSize}`,
+  );
+}
+
+// Admin surface — set per-user windows, grant overrides, review
+// extension-request queue.
+
+export async function adminGetUserWorkWindow(
+  userId: string,
+): Promise<WorkWindowState> {
+  return request<WorkWindowState>(`/work-window/admin/users/${userId}`);
+}
+
+export async function adminUpdateUserWorkWindow(
+  userId: string,
+  payload: { enabled?: boolean; start_ist?: string; end_ist?: string },
+): Promise<WorkWindowState> {
+  return request<WorkWindowState>(`/work-window/admin/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function adminSetUserOverride(
+  userId: string,
+  override_until: string | null,
+): Promise<WorkWindowState> {
+  return request<WorkWindowState>(
+    `/work-window/admin/users/${userId}/override`,
+    { method: "POST", body: JSON.stringify({ override_until }) },
+  );
+}
+
+export async function adminListExtensionRequests(
+  status: "pending" | "approved" | "denied" | "all" = "pending",
+  page = 1,
+  pageSize = 20,
+): Promise<WorkTimeExtensionRequestList> {
+  return request<WorkTimeExtensionRequestList>(
+    `/work-window/admin/extension-requests?status=${status}&page=${page}&page_size=${pageSize}`,
+  );
+}
+
+export async function adminDecideExtensionRequest(
+  requestId: string,
+  decision: "approved" | "denied",
+  note = "",
+): Promise<WorkTimeExtensionRequest> {
+  return request<WorkTimeExtensionRequest>(
+    `/work-window/admin/extension-requests/${requestId}/decision`,
+    { method: "POST", body: JSON.stringify({ decision, note }) },
   );
 }

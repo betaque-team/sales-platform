@@ -26,6 +26,7 @@ import {
   Sparkles,
   ShieldCheck,
   Bot,
+  Clock,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { logout } from "@/lib/api";
@@ -76,6 +77,10 @@ const adminNavigation = [
   // require_role("admin"), so the hierarchy admits both admin and
   // super_admin. Shield icon distinguishes from generic "Docs" help.
   { name: "Profile Vault", to: "/profiles", icon: ShieldCheck },
+  // Per-user IST work-time windows + extension-request review queue.
+  // Backend gates the same way as Profile Vault — admin role admits
+  // both admin and super_admin via the role hierarchy.
+  { name: "Work Windows", to: "/work-windows", icon: Clock },
 ];
 
 const superAdminNavigation = [
