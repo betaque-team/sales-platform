@@ -456,6 +456,28 @@ async def list_jobs(
         # implementation-defined order.
         order_clauses = [Job.first_seen_at.desc()]
 
+    # F271 — append ``Job.id`` as a final tiebreaker so pagination is
+    # deterministic across requests. Without this, a sort like
+    # ``relevance_score:desc`` produces unstable order on ties (many
+    # jobs share score 93.16, 80.0, etc.) and a reviewer flipping
+    # between pages can see the same row appear twice or vanish
+    # because Postgres returns the tie-rows in implementation-
+    # defined order. Adding Job.id (UUID, btree-indexed) costs
+    # nothing on the planner but makes ORDER BY total — every tie
+    # resolves consistently from one request to the next.
+    # Skipped if the user already explicitly sorted by Job.id (avoid
+    # ``ORDER BY id DESC, id ASC`` which Postgres simplifies to the
+    # first one but is noisy in EXPLAIN).
+    explicit_id_sort = any(
+        getattr(c, "_F271_id_sentinel__", False) is True for c in order_clauses
+    ) or any(
+        # Pragmatic check via repr — sort_chain entries with key=="id"
+        # would land here. Cheap; the chain is bounded by validation.
+        ("jobs.id" in str(c).lower()) for c in order_clauses
+    )
+    if not explicit_id_sort:
+        order_clauses.append(Job.id.asc())
+
     query = query.order_by(*order_clauses)
 
     query = query.offset((page - 1) * per_page).limit(per_page)
