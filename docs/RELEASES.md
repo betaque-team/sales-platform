@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · 0aa0cc1 · sha-0aa0cc1
+Merge fix/f272c-import-scanlog into main
+
+
 ## 2026-04-29 · 331896e · sha-331896e
 Merge feat/f272-scan-logs-retention into main
 
