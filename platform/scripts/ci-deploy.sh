@@ -448,8 +448,17 @@ action_deploy() {
     die "Backend HTTP probe failure"
   fi
 
-  log "Rolling restart: celery-worker, celery-beat, frontend"
-  $COMPOSE up -d --no-deps celery-worker celery-beat frontend
+  # F262: ``celery-worker-heavy`` was added to docker-compose.prod.yml
+  # to host memory-greedy batch tasks (rescore_jobs, reclassify_and_
+  # rescore) on a dedicated 2GB container, isolated from the everyday
+  # scan worker. The first deploy with the new compose file silently
+  # left the new container undefined because this list of restart
+  # targets was hardcoded — adding it here so future deploys keep the
+  # heavy worker alive across image rolls. ``up -d --no-deps`` creates
+  # the service if it doesn't exist and recreates it on image change,
+  # so the same line works for first-deploy and subsequent-deploy.
+  log "Rolling restart: celery-worker, celery-worker-heavy, celery-beat, frontend"
+  $COMPOSE up -d --no-deps celery-worker celery-worker-heavy celery-beat frontend
 
   # Force-recreate nginx AFTER frontend is up. Without --force-recreate,
   # docker skips the restart (nginx image hash unchanged) and nginx keeps
