@@ -40,10 +40,17 @@ services:
       - BACKUP_DIR=/app/backups
       - BACKUP_KEEP_LAST=14
 
+  # F262 — default-queue worker. Handles the high-frequency steady-
+  # state tasks (30-min scans, hourly career-page checks, enrichment
+  # fan-out, AI insights, backups). Explicit ``--queues=default`` so
+  # this worker ignores anything routed to ``heavy`` — those tasks
+  # belong to ``celery-worker-heavy`` below. Memory bumped to 1.5GB
+  # (was implicitly 1GB) to absorb the worker-baseline footprint
+  # plus a healthy headroom for in-flight scan tasks.
   celery-worker:
     image: platform-backend
     restart: unless-stopped
-    command: celery -A app.workers.celery_app worker -l info
+    command: celery -A app.workers.celery_app worker -l info --queues=default
     depends_on:
       - postgres
       - redis
@@ -57,6 +64,42 @@ services:
       - POSTGRES_PORT=5432
       - BACKUP_DIR=/app/backups
       - BACKUP_KEEP_LAST=14
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    mem_limit: 1536M
+
+  # F262 — heavy-queue worker. Dedicated container for the batch
+  # tasks that load big result sets even after Layer 1's chunked
+  # iteration fix (peak ~50MB/chunk × ORM identity-map churn).
+  # Currently picks up ``rescore_jobs`` (03:00 UTC nightly) and
+  # ``reclassify_and_rescore`` (admin-triggered). 2GB limit gives
+  # ~4× headroom over the chunked-iteration peak — enough to absorb
+  # any future memory-greedy task routed here without an OOM. Host
+  # has 11GB RAM with 9.5GB available, so 2GB is safe.
+  celery-worker-heavy:
+    image: platform-backend
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker -l info --queues=heavy --concurrency=1
+    depends_on:
+      - postgres
+      - redis
+      - backend
+    env_file:
+      - .env
+    volumes:
+      - backups:/app/backups
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - BACKUP_DIR=/app/backups
+      - BACKUP_KEEP_LAST=14
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    mem_limit: 2G
 
   celery-beat:
     image: platform-backend
@@ -64,6 +107,7 @@ services:
     command: celery -A app.workers.celery_app beat -l info
     depends_on:
       - celery-worker
+      - celery-worker-heavy
     env_file:
       - .env
 

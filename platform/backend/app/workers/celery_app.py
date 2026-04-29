@@ -46,6 +46,24 @@ celery_app.conf.update(
     # Cost: one extra JSON field per result row in Redis (~30 bytes for a
     # UUID arg). Retention is capped by `result_expires=3600`.
     result_extended=True,
+    # F262 — queue partitioning. The default queue handles the steady-
+    # state firehose (every-30-min scans, hourly career-page checks,
+    # enrichment fan-out). The ``heavy`` queue handles the memory-hungry
+    # batch tasks that touch every active job at once — currently
+    # ``rescore_jobs`` and ``reclassify_and_rescore``. The two run on
+    # separate worker containers in docker-compose so an OOM on one
+    # doesn't take down the other. Even though Layer 1 (chunked
+    # iteration) makes the tasks bounded in memory by themselves, the
+    # queue split is defence-in-depth: any future memory-greedy task
+    # routed to ``heavy`` blows up its own worker without affecting the
+    # 30-min scan cadence on the default worker.
+    task_default_queue="default",
+    task_routes={
+        # The two batch tasks we know are heavy. New tasks default to
+        # the ``default`` queue unless explicitly routed here.
+        "app.workers.tasks.maintenance_task.rescore_jobs": {"queue": "heavy"},
+        "app.workers.tasks.maintenance_task.reclassify_and_rescore": {"queue": "heavy"},
+    },
 )
 
 # Autodiscover tasks from the tasks subpackage

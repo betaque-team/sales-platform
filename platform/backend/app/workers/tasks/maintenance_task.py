@@ -59,32 +59,51 @@ def expire_stale_jobs():
         session.close()
 
 
+# F262 — chunk size for the streaming rescore loop. Empirically chosen
+# to keep peak ORM identity-map RSS under ~50MB per chunk while still
+# amortising the round-trip cost of the SELECT. At 86k active jobs and
+# 2k chunk size that's ~43 chunks per nightly run; each chunk commits
+# + ``expire_all()``s before moving on so the worker's resident memory
+# stays flat instead of accumulating to ~500MB (which is what was
+# OOM-killing the celery container at 03:01 UTC every night before
+# this fix landed — see dmesg, Apr 25-29 2026).
+_RESCORE_CHUNK = 2000
+
+
 @celery_app.task(name="app.workers.tasks.maintenance_task.rescore_jobs")
 def rescore_jobs():
-    """Recalculate relevance_score for all active (non-expired, non-archived) jobs."""
-    logger.info("Starting rescore_jobs")
+    """Recalculate relevance_score for all active (non-expired, non-archived) jobs.
+
+    F262: streams jobs in 2k-row chunks instead of loading everything
+    into memory at once. Pre-fix, ``select(Job).all()`` materialised
+    all ~86k active jobs as ORM objects in one go (~500 MB), which the
+    1 GB celery container OOM-killed every night at 03:01 UTC. Now
+    memory is bounded to one chunk × 2k rows regardless of catalog
+    size — the task scales linearly in time with row count but stays
+    flat in memory.
+    """
+    logger.info("Starting rescore_jobs (chunked)")
     session = SyncSession()
 
     try:
         active_statuses = ["new", "under_review", "accepted"]
-        jobs = session.execute(
-            select(Job).where(Job.status.in_(active_statuses))
-        ).scalars().all()
 
-        # Pre-fetch all companies in a single query for efficiency
-        company_ids = {j.company_id for j in jobs}
-        companies = {}
-        if company_ids:
-            rows = session.execute(
-                select(Company).where(Company.id.in_(company_ids))
-            ).scalars().all()
-            companies = {c.id: c for c in rows}
+        # Pre-load lookup tables ONCE — these are small and don't grow
+        # with job count. Stored as plain Python dicts (not ORM objects)
+        # so ``session.expire_all()`` between chunks doesn't invalidate
+        # them. The pre-fix code held full Company ORM rows here; we
+        # only need ``is_target``, so we project to a (uuid → bool)
+        # dict and shed the ORM weight.
+        target_lookup: dict = {
+            cid: bool(is_target)
+            for cid, is_target in session.execute(
+                select(Company.id, Company.is_target)
+            ).all()
+        }
 
-        # Preload scoring signals for feedback adjustments
         signal_rows = session.execute(select(ScoringSignal)).scalars().all()
         signals_cache = {s.signal_key: s.weight for s in signal_rows}
 
-        # Build approved roles set from cluster config
         from app.workers.tasks._role_matching import load_cluster_config_sync
         cluster_config = load_cluster_config_sync(session)
         approved_roles_set = set()
@@ -92,36 +111,78 @@ def rescore_jobs():
             for role in cfg["approved_roles"]:
                 approved_roles_set.add(role.lower())
 
-        rescored = 0
-        for job in jobs:
-            company = companies.get(job.company_id)
-            is_target = company.is_target if company else False
-            feedback_adj = get_feedback_adjustment(job, signals_cache)
+        # Stream over jobs using keyset pagination on ``id``. Keyset
+        # (``WHERE id > last_id``) over OFFSET because:
+        #   * it's robust to concurrent inserts during the run — new
+        #     rows just get higher ids and are picked up on a future
+        #     chunk or next nightly invocation;
+        #   * it doesn't degrade as the run progresses (OFFSET 80,000
+        #     scans 80k rows each time on Postgres before returning);
+        #   * Job.id is a UUID with btree-comparable ordering, so the
+        #     ``id > last_id`` predicate is index-backed.
+        last_id = None
+        total_checked = 0
+        total_rescored = 0
+        chunk_no = 0
+        while True:
+            q = select(Job).where(Job.status.in_(active_statuses))
+            if last_id is not None:
+                q = q.where(Job.id > last_id)
+            batch = session.execute(
+                q.order_by(Job.id).limit(_RESCORE_CHUNK)
+            ).scalars().all()
+            if not batch:
+                break
 
-            new_score = compute_relevance_score(
-                title=job.title,
-                matched_role=job.matched_role,
-                role_cluster=job.role_cluster,
-                is_target=is_target,
-                geography_bucket=job.geography_bucket,
-                remote_scope=job.remote_scope,
-                platform=job.platform,
-                posted_at=job.posted_at,
-                approved_roles_set=approved_roles_set if approved_roles_set else None,
-                feedback_adjustment=feedback_adj,
-            )
+            chunk_no += 1
+            chunk_rescored = 0
+            for job in batch:
+                is_target = target_lookup.get(job.company_id, False)
+                feedback_adj = get_feedback_adjustment(job, signals_cache)
 
-            if job.relevance_score != new_score:
-                job.relevance_score = new_score
-                rescored += 1
+                new_score = compute_relevance_score(
+                    title=job.title,
+                    matched_role=job.matched_role,
+                    role_cluster=job.role_cluster,
+                    is_target=is_target,
+                    geography_bucket=job.geography_bucket,
+                    remote_scope=job.remote_scope,
+                    platform=job.platform,
+                    posted_at=job.posted_at,
+                    approved_roles_set=approved_roles_set if approved_roles_set else None,
+                    feedback_adjustment=feedback_adj,
+                )
 
-        session.commit()
+                if job.relevance_score != new_score:
+                    job.relevance_score = new_score
+                    chunk_rescored += 1
+
+            # Capture the boundary id BEFORE expire_all() invalidates
+            # the ORM identity map — after expire we can't access
+            # ``batch[-1].id`` without a re-fetch.
+            new_last_id = batch[-1].id
+            session.commit()
+            # Drop ORM identity-map state so the next chunk doesn't
+            # accumulate. This is the critical line — without it the
+            # session retains every Job processed and we're back to
+            # the pre-fix unbounded memory shape.
+            session.expire_all()
+
+            total_checked += len(batch)
+            total_rescored += chunk_rescored
+            last_id = new_last_id
+
+            if chunk_no % 10 == 0:
+                logger.info(
+                    "rescore_jobs progress: chunk %d, %d checked, %d rescored so far",
+                    chunk_no, total_checked, total_rescored,
+                )
 
         logger.info(
-            "rescore_jobs complete: %d active jobs checked, %d rescored",
-            len(jobs), rescored,
+            "rescore_jobs complete: %d chunks, %d active jobs checked, %d rescored",
+            chunk_no, total_checked, total_rescored,
         )
-        return {"checked": len(jobs), "rescored": rescored}
+        return {"checked": total_checked, "rescored": total_rescored, "chunks": chunk_no}
 
     except Exception as e:
         logger.exception("rescore_jobs failed: %s", e)
@@ -135,29 +196,33 @@ def rescore_jobs():
 def reclassify_and_rescore():
     """Re-run role matching, geography classification, and scoring for all active jobs.
 
-    Unlike rescore_jobs which only recalculates scores, this re-runs the full
-    classification pipeline with updated keywords/roles/geography signals.
+    Unlike rescore_jobs which only recalculates scores, this re-runs the
+    full classification pipeline with updated keywords/roles/geography
+    signals.
+
+    F262: same chunked-iteration pattern as ``rescore_jobs``. This task
+    is admin-triggered (button on the monitoring page) rather than
+    cron-scheduled, but the unbounded ``select(Job).all()`` was the
+    same OOM hazard waiting for someone to click it. Fixing both at
+    once so neither path can blow up the heavy worker.
     """
-    logger.info("Starting reclassify_and_rescore")
+    logger.info("Starting reclassify_and_rescore (chunked)")
     session = SyncSession()
 
     try:
         cluster_config = load_cluster_config_sync(session)
 
         active_statuses = ["new", "under_review", "accepted"]
-        jobs = session.execute(
-            select(Job).where(Job.status.in_(active_statuses))
-        ).scalars().all()
 
-        company_ids = {j.company_id for j in jobs}
-        companies = {}
-        if company_ids:
-            rows = session.execute(
-                select(Company).where(Company.id.in_(company_ids))
-            ).scalars().all()
-            companies = {c.id: c for c in rows}
+        # Pre-load lookup tables ONCE — same pattern as rescore_jobs.
+        # Plain dict so ``expire_all()`` between chunks doesn't bite.
+        target_lookup: dict = {
+            cid: bool(is_target)
+            for cid, is_target in session.execute(
+                select(Company.id, Company.is_target)
+            ).all()
+        }
 
-        # Build approved roles set
         approved_roles_set = set()
         for cfg in cluster_config.values():
             for role in cfg["approved_roles"]:
@@ -166,58 +231,94 @@ def reclassify_and_rescore():
         signal_rows = session.execute(select(ScoringSignal)).scalars().all()
         signals_cache = {s.signal_key: s.weight for s in signal_rows}
 
-        reclassified = 0
-        rescored = 0
+        last_id = None
+        total_checked = 0
+        total_reclassified = 0
+        total_rescored = 0
+        chunk_no = 0
+        while True:
+            q = select(Job).where(Job.status.in_(active_statuses))
+            if last_id is not None:
+                q = q.where(Job.id > last_id)
+            batch = session.execute(
+                q.order_by(Job.id).limit(_RESCORE_CHUNK)
+            ).scalars().all()
+            if not batch:
+                break
 
-        for job in jobs:
-            # Re-run role matching
-            role_match = match_role_with_config(job.title, cluster_config)
-            new_cluster = role_match["role_cluster"]
-            new_matched_role = role_match["matched_role"]
-            new_title_norm = role_match["title_normalized"]
+            chunk_no += 1
+            chunk_reclassified = 0
+            chunk_rescored = 0
+            for job in batch:
+                # Re-run role matching
+                role_match = match_role_with_config(job.title, cluster_config)
+                new_cluster = role_match["role_cluster"]
+                new_matched_role = role_match["matched_role"]
+                new_title_norm = role_match["title_normalized"]
 
-            # Re-run geography classification
-            new_geo = classify_geography(job.location_raw or "", job.remote_scope or "")
+                # Re-run geography classification
+                new_geo = classify_geography(
+                    job.location_raw or "", job.remote_scope or ""
+                )
 
-            cluster_changed = new_cluster != (job.role_cluster or "")
-            geo_changed = new_geo != (job.geography_bucket or "")
+                cluster_changed = new_cluster != (job.role_cluster or "")
+                geo_changed = new_geo != (job.geography_bucket or "")
 
-            if cluster_changed or geo_changed:
-                job.role_cluster = new_cluster
-                job.matched_role = new_matched_role
-                job.title_normalized = new_title_norm
-                job.geography_bucket = new_geo
-                reclassified += 1
+                if cluster_changed or geo_changed:
+                    job.role_cluster = new_cluster
+                    job.matched_role = new_matched_role
+                    job.title_normalized = new_title_norm
+                    job.geography_bucket = new_geo
+                    chunk_reclassified += 1
 
-            # Rescore
-            company = companies.get(job.company_id)
-            is_target = company.is_target if company else False
-            feedback_adj = get_feedback_adjustment(job, signals_cache)
+                # Rescore using the (possibly updated) classification
+                is_target = target_lookup.get(job.company_id, False)
+                feedback_adj = get_feedback_adjustment(job, signals_cache)
 
-            new_score = compute_relevance_score(
-                title=job.title,
-                matched_role=new_matched_role,
-                role_cluster=new_cluster,
-                is_target=is_target,
-                geography_bucket=new_geo,
-                remote_scope=job.remote_scope,
-                platform=job.platform,
-                posted_at=job.posted_at,
-                approved_roles_set=approved_roles_set if approved_roles_set else None,
-                feedback_adjustment=feedback_adj,
-            )
+                new_score = compute_relevance_score(
+                    title=job.title,
+                    matched_role=new_matched_role,
+                    role_cluster=new_cluster,
+                    is_target=is_target,
+                    geography_bucket=new_geo,
+                    remote_scope=job.remote_scope,
+                    platform=job.platform,
+                    posted_at=job.posted_at,
+                    approved_roles_set=approved_roles_set if approved_roles_set else None,
+                    feedback_adjustment=feedback_adj,
+                )
 
-            if job.relevance_score != new_score:
-                job.relevance_score = new_score
-                rescored += 1
+                if job.relevance_score != new_score:
+                    job.relevance_score = new_score
+                    chunk_rescored += 1
 
-        session.commit()
+            new_last_id = batch[-1].id
+            session.commit()
+            session.expire_all()
+
+            total_checked += len(batch)
+            total_reclassified += chunk_reclassified
+            total_rescored += chunk_rescored
+            last_id = new_last_id
+
+            if chunk_no % 10 == 0:
+                logger.info(
+                    "reclassify_and_rescore progress: chunk %d, %d checked, "
+                    "%d reclassified, %d rescored so far",
+                    chunk_no, total_checked, total_reclassified, total_rescored,
+                )
 
         logger.info(
-            "reclassify_and_rescore complete: %d jobs, %d reclassified, %d rescored",
-            len(jobs), reclassified, rescored,
+            "reclassify_and_rescore complete: %d chunks, %d jobs, "
+            "%d reclassified, %d rescored",
+            chunk_no, total_checked, total_reclassified, total_rescored,
         )
-        return {"checked": len(jobs), "reclassified": reclassified, "rescored": rescored}
+        return {
+            "checked": total_checked,
+            "reclassified": total_reclassified,
+            "rescored": total_rescored,
+            "chunks": chunk_no,
+        }
 
     except Exception as e:
         logger.exception("reclassify_and_rescore failed: %s", e)
