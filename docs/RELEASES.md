@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · 8087430 · sha-8087430
+Merge fix/f268-strict-admin-schemas into main
+
+
 ## 2026-04-29 · 7c37c5d · sha-7c37c5d
 Merge fix/f266-hn-error-msg-and-pipeline-app-count into main
 
