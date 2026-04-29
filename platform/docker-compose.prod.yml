@@ -114,10 +114,18 @@ services:
           memory: 1024M
           cpus: "1.0"
 
+  # F262 — default-queue worker. Handles the high-frequency steady-
+  # state tasks (30-min scans, hourly career-page checks, enrichment,
+  # AI insights, backups). ``--queues=default`` so this worker ignores
+  # anything routed to ``heavy`` — those tasks belong to the dedicated
+  # ``celery-worker-heavy`` container below. Memory bumped from 1024M
+  # to 1536M to absorb baseline + in-flight scan workload with
+  # headroom (was tight at 1G; live-stats showed steady-state RSS at
+  # ~900MB / 1G = 90% before this fix).
   celery-worker:
     image: platform-backend:${RELEASE_TAG:-latest}
     restart: always
-    command: celery -A app.workers.celery_app worker -l info --concurrency=${CELERY_CONCURRENCY:-2}
+    command: celery -A app.workers.celery_app worker -l info --concurrency=${CELERY_CONCURRENCY:-2} --queues=default
     depends_on:
       postgres:
         condition: service_healthy
@@ -138,7 +146,45 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 1536M
+          cpus: "1.0"
+
+  # F262 — heavy-queue worker. Dedicated container for the batch
+  # tasks that touch the entire job catalog (rescore_jobs +
+  # reclassify_and_rescore). Routed via celery_app.task_routes.
+  # ``--concurrency=1`` because heavy tasks hold the DB connection
+  # pool warm for several minutes; running multiple in parallel
+  # would queue connections behind each other for no throughput
+  # gain. 2GB ceiling gives ~4× headroom over the chunked-iteration
+  # peak (~50MB/chunk × ORM identity-map churn) so any future
+  # memory-greedy task routed here doesn't OOM.
+  # Host has 11GB RAM with 9.5GB available pre-fix; this container
+  # adds 2GB, well within the ceiling.
+  celery-worker-heavy:
+    image: platform-backend:${RELEASE_TAG:-latest}
+    restart: always
+    command: celery -A app.workers.celery_app worker -l info --concurrency=1 --queues=heavy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+      - BACKUP_DIR=/app/backups
+      - BACKUP_KEEP_LAST=${BACKUP_KEEP_LAST:-14}
+    volumes:
+      - backups:/app/backups
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
           cpus: "1.0"
 
   celery-beat:
@@ -147,6 +193,7 @@ services:
     command: celery -A app.workers.celery_app beat -l info
     depends_on:
       - celery-worker
+      - celery-worker-heavy
     env_file:
       - .env
     environment:
