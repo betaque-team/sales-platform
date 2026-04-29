@@ -6,7 +6,7 @@ from app.api.v1 import (
     companies, career_pages, discovery, rules, export, platforms, monitoring,
     resume, users, role_config, credentials, answer_book, applications, feedback,
     alerts, cover_letter, interview_prep, intelligence, audit, ai, insights,
-    training_data, saved_filters, profiles, routine,
+    training_data, saved_filters, profiles, routine, work_window,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -51,3 +51,8 @@ api_router.include_router(profiles.router)
 # (top-to-apply, runs CRUD, kill-switch, humanize helper). The routine
 # runs as the caller; no admin-gated routes here.
 api_router.include_router(routine.router)
+# Work-time window enforcement: admin-set per-user IST shifts, one-off
+# overrides, and a reviewer-driven extension-request workflow. The
+# enforcement itself lives in ``api.deps.get_current_user`` — this
+# router is purely the control plane.
+api_router.include_router(work_window.router)

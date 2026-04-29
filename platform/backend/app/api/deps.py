@@ -10,12 +10,39 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.models.resume import Resume
+from app.utils.work_window import user_can_access_now
 
 settings = get_settings()
 
+# Endpoints that must remain reachable even when a user is outside
+# their work-time window — the lock-out page itself, auth flows, and
+# the user-facing extension-request submitter all need to keep
+# functioning. Path prefixes are matched against ``request.url.path``.
+#
+# Kept narrow on purpose: anything not on this list goes through the
+# 423 gate. New endpoints that should bypass enforcement (e.g. a
+# future "I'm clocking out" endpoint) get added here explicitly.
+WORK_WINDOW_ALLOWLIST_PREFIXES = (
+    "/api/v1/auth/",            # login, logout, whoami, change-password
+    "/api/v1/work-window/me",   # user reads own state + lists requests
+)
+
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    """Extract and validate JWT from cookie or Authorization header."""
+    """Extract and validate JWT from cookie or Authorization header.
+
+    Also enforces per-user work-time windows: when the resolved user
+    has ``work_window_enabled=True`` and ``now_ist`` is outside their
+    shift (and no admin override is active), this raises **423 Locked**
+    with a structured payload the frontend uses to render the lock-out
+    screen. Admin / super_admin roles are exempt.
+
+    The work-window check runs AFTER token validation so an unauth'd
+    request still gets a 401 (not a misleading 423). It runs BEFORE
+    the dependency returns so every protected endpoint sees a uniform
+    "you can't be here right now" wall — no per-router sprinkling
+    required.
+    """
     token = request.cookies.get("session")
     if not token:
         auth_header = request.headers.get("Authorization", "")
@@ -35,6 +62,23 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # ── Work-time window enforcement ───────────────────────────────
+    # Admins always pass — they need to reach admin UIs to extend a
+    # locked-out user. Everyone else is gated unless the path is on
+    # the allowlist (auth flows + the user's own work-window page).
+    if user.role not in ("admin", "super_admin"):
+        path = request.url.path
+        on_allowlist = any(path.startswith(p) for p in WORK_WINDOW_ALLOWLIST_PREFIXES)
+        if not on_allowlist and not user_can_access_now(user):
+            # 423 Locked: the resource exists and the credential is
+            # valid, but a temporal policy is blocking access. The
+            # frontend distinguishes this from 401 (re-login) and 403
+            # (privilege denied) — see ``Layout`` and ``LockedOutScreen``.
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="Outside your work-time window",
+            )
 
     return user
 

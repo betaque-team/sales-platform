@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, Integer
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -61,4 +61,43 @@ class User(Base):
         default=dict,
         server_default="{}",
         nullable=False,
+    )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Work-time window enforcement (migration c9d0e1f2g3h4)
+    #
+    # Sales-team members can be restricted to a daily IST shift. Outside
+    # the window the API rejects requests with 423 Locked. Admins are
+    # always exempt; reviewers/viewers can request a one-off extension.
+    # ──────────────────────────────────────────────────────────────────
+
+    # Enforcement is opt-in per user — defaults False so the migration
+    # is transparent and admins flip it on individually.
+    work_window_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    # Minutes-since-midnight in IST (Asia/Kolkata, UTC+5:30, no DST).
+    # Defaults form a 09:00–18:00 IST shift. Wraparound (start > end)
+    # is supported by ``utils.work_window.is_within_window``.
+    work_window_start_min: Mapped[int] = mapped_column(
+        Integer,
+        default=540,  # 09:00
+        server_default="540",
+        nullable=False,
+    )
+    work_window_end_min: Mapped[int] = mapped_column(
+        Integer,
+        default=1080,  # 18:00
+        server_default="1080",
+        nullable=False,
+    )
+    # Admin one-off "extend until" grace. Stored in UTC. While now_utc
+    # < override_until, enforcement passes regardless of the regular
+    # window. Approving a WorkTimeExtensionRequest bumps this column.
+    work_window_override_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
