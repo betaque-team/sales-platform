@@ -63,6 +63,21 @@ services:
       dockerfile: Dockerfile
     image: platform-backend:${RELEASE_TAG:-latest}
     restart: always
+    # F273 — explicit multi-worker uvicorn override. The Dockerfile
+    # CMD ships with a single worker, which became a real bottleneck
+    # under burst load (load test showed 50 parallel /jobs requests
+    # all queuing behind one Python process: p50 = 2.6s vs 28ms
+    # single-call baseline). With 2 workers + the existing 30-conn
+    # pool per worker (20 base + 10 overflow), 50-concurrent should
+    # drop to ~1.3s p50 while staying under Postgres
+    # max_connections=100 (2×30 backend + 26 celery + headroom).
+    # ``UVICORN_WORKERS`` env var overrides for ops without a
+    # rebuild; default 2 covers small-team usage.
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers ${UVICORN_WORKERS:-2}
     depends_on:
       postgres:
         condition: service_healthy
