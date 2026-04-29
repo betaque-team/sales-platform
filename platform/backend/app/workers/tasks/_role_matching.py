@@ -181,12 +181,18 @@ GLOBAL_REMOTE_SIGNALS = [
     "distributed", "100% remote",
 ]
 
-# Patterns for multi-country remote (3+ countries → likely global)
-# These are checked separately via regex
-MULTI_COUNTRY_PATTERN = re.compile(
-    r"remote[,;].*remote[,;].*remote",  # "Remote, US; Remote, UK; Remote, DE"
-    re.IGNORECASE,
-)
+# F263 — DEPRECATED. Was promoting any "3+ remote mentions" listing
+# to global_remote, which mis-classified region-restricted jobs like
+# "France, Remote; Netherlands, Remote; Spain, Remote; UK, Remote" as
+# worldwide (feedback 3fc6b5c5 — Dataiku 5973407004 / 5963977004 are
+# only available to residents of the four listed EU countries, NOT
+# global). Kept as a placeholder regex that matches nothing so any
+# remaining ``MULTI_COUNTRY_PATTERN.search`` callsites silently
+# become no-ops; the real signal is now extracted from the explicit
+# REGION_LOCKED + GLOBAL_REMOTE lists below. Multi-country listings
+# without "global"/"worldwide" framing now classify as ``""``
+# (unknown bucket) — the honest answer.
+MULTI_COUNTRY_PATTERN = re.compile(r"(?!x)x", re.IGNORECASE)  # never matches
 
 # USA-specific signals
 USA_SIGNALS = [
@@ -252,6 +258,45 @@ REGION_LOCKED_SIGNALS = [
     "remote - apac", "apac only",
     "remote - latam", "latam only", "latin america only",
 ]
+
+
+# F263 — country names for the comma-form region-locked regex below.
+# Pre-fix the substring list above caught "remote - france" / "remote
+# france" / "france (remote)" but NOT "france, remote" — which is the
+# format Greenhouse emits when a listing has multiple country/remote
+# pairs separated by semicolons (e.g. Dataiku 5973407004:
+# ``"France, Remote; Netherlands, Remote; Spain, Remote; UK, Remote"``).
+# The MULTI_COUNTRY_PATTERN heuristic then promoted that to
+# ``global_remote`` even though the role is region-restricted to those
+# four EU countries (feedback 3fc6b5c5).
+#
+# Switching to a regex matcher catches every comma-form for the
+# countries we already know are region-locked, without forcing us to
+# triple-list every variation in REGION_LOCKED_SIGNALS. The matcher
+# is conservative: only triggers on a country name immediately
+# adjacent to "remote" via a comma, dash, slash, or paren — phrases
+# like "We have offices in France and a remote team in Spain" don't
+# match. ``\b`` word boundaries prevent "germany" matching inside
+# "Germanys" or "South France" matching as "France".
+_REGION_COUNTRIES = (
+    "uk", "united kingdom", "canada", "india", "germany", "philippines",
+    "mexico", "ireland", "poland", "australia", "brazil", "sweden",
+    "netherlands", "switzerland", "israel", "estonia", "singapore",
+    "spain", "france", "japan", "south korea", "korea", "nigeria",
+    "south africa", "colombia", "argentina", "chile", "italy",
+    "portugal", "denmark", "norway", "finland", "belgium", "austria",
+    "romania", "turkey", "ukraine", "greece", "czech republic",
+)
+# Matches "<country>, remote" / "<country> - remote" / "<country> (remote)"
+# AND the reversed form "remote, <country>" / etc. Used in addition to
+# the substring REGION_LOCKED_SIGNALS list so the simple `signal in
+# combined` lookup catches the easy cases (cheap path) and the regex
+# catches the comma-form variants (broader path).
+_REGION_LOCKED_COMMA_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(c) for c in _REGION_COUNTRIES) + r")\s*[,/\-(]\s*remote\b"
+    r"|\bremote\s*[,/\-(]\s*(?:" + "|".join(re.escape(c) for c in _REGION_COUNTRIES) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize(text: str) -> str:
@@ -643,12 +688,27 @@ def classify_geography(location_raw: str, remote_scope: str) -> str:
         if signal in combined:
             return ""  # Region-locked, not classifiable into our buckets
 
+    # F263 — comma-form region-locked check. Catches Greenhouse-style
+    # listings like "France, Remote; Netherlands, Remote; …" that the
+    # substring list above misses (it has "remote - france" but not
+    # "france, remote"). If ANY country in the listing is region-
+    # locked, the whole job is treated as not-globally-remote — better
+    # to surface "unclassified" than to falsely promise global.
+    if _REGION_LOCKED_COMMA_RE.search(combined):
+        return ""
+
     # Check global remote signals
     for signal in GLOBAL_REMOTE_SIGNALS:
         if signal in combined:
             return "global_remote"
 
-    # Multi-country postings (3+ "remote" mentions) → likely global
+    # F263 — MULTI_COUNTRY_PATTERN was previously a heuristic that
+    # promoted "3+ remote mentions" to global_remote. It mis-classified
+    # region-restricted multi-country jobs (feedback 3fc6b5c5). Now a
+    # no-op regex that never matches; if every country in a multi-
+    # country listing is region-locked, the regex above already
+    # returned "" — anything that gets here is genuinely ambiguous and
+    # we'd rather classify as unknown than falsely as global.
     if MULTI_COUNTRY_PATTERN.search(combined):
         return "global_remote"
 

@@ -1081,9 +1081,29 @@ export function JobsPage() {
                         </p>
                         <div className="mt-0.5 flex gap-1">
                           {job.role_cluster && <Badge variant="gray">{job.role_cluster}</Badge>}
-                          {job.geography_bucket && (
+                          {/* F263 (feedback 63ed0c32 — "Status under
+                              All jobs is not visible after 18+ pages,
+                              there is no status (worldwide, remote)"):
+                              the geography badge was conditional on a
+                              non-empty bucket. With ~60% of jobs
+                              unclassified (no detectable geography
+                              from location_raw + remote_scope), users
+                              hit blank cells on every page and
+                              assumed the column was broken. Showing
+                              an explicit "Unclassified" badge with
+                              muted styling makes the absence of data
+                              legible — same width, same row layout,
+                              clearly distinct from a real bucket. */}
+                          {job.geography_bucket ? (
                             <Badge variant="gray">
                               {job.geography_bucket.replace(/_/g, " ")}
+                            </Badge>
+                          ) : (
+                            <Badge
+                              variant="default"
+                              className="opacity-60 italic"
+                            >
+                              unclassified
                             </Badge>
                           )}
                         </div>
