@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · cc908b5 · sha-cc908b5
+Merge feat/f275-companies-name-trigram into main
+
+
 ## 2026-04-29 · ffb8f66 · sha-ffb8f66
 Merge feat/f274-jobs-title-trigram-index into main
 
