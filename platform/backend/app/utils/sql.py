@@ -21,6 +21,19 @@ to the DB).
 from __future__ import annotations
 
 
+# F267 — characters PostgreSQL UTF-8 refuses or that are pointless in
+# a search term. Null byte (0x00) crashes the asyncpg driver with
+# ``CharacterNotInRepertoireError: invalid byte sequence for encoding
+# "UTF8": 0x00`` — bubbles up as a 500. Other C0 control chars are
+# accepted by Postgres but never legitimate user input; stripping them
+# keeps LIKE patterns clean and makes the helper a single-source-of-
+# truth for "search input sanitisation". Tab (0x09), LF (0x0A), CR
+# (0x0D) stay since they occasionally appear in pasted input.
+_CONTROL_CHARS_TO_DROP = {
+    i: None for i in range(0x20) if i not in (0x09, 0x0A, 0x0D)
+}
+
+
 def escape_like(value: str) -> str:
     """Escape LIKE/ILIKE metacharacters so `value` is matched literally.
 
@@ -32,6 +45,16 @@ def escape_like(value: str) -> str:
     Order matters: escape `\\` first so we don't double-escape the
     backslashes we insert for `%` and `_`.
 
+    F267 — null + control chars are dropped BEFORE the LIKE escape
+    pass. The asyncpg driver crashes the request with
+    ``CharacterNotInRepertoireError`` on a single null byte
+    (PostgreSQL's UTF-8 encoding rejects 0x00). Pre-fix,
+    ``?search=test%00admin`` returned a 500 (DoS vector if hit at
+    scale, plus log noise on every curious probe). Now the helper
+    strips them transparently — every callsite that already routes
+    through ``escape_like`` is auto-protected; no per-callsite
+    change required.
+
     Example:
         user types "100%" →
         escape_like("100%") == "100\\%" →
@@ -39,4 +62,5 @@ def escape_like(value: str) -> str:
         `.ilike("%100\\%%", escape="\\\\")` matches rows whose
         column contains the literal substring "100%".
     """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    cleaned = value.translate(_CONTROL_CHARS_TO_DROP)
+    return cleaned.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
