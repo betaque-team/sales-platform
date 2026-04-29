@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from uuid import UUID
 
@@ -44,6 +44,10 @@ class PipelineItemOut(BaseModel):
 
 
 class PipelineUpdate(BaseModel):
+    # F268 — extra="forbid" so admin typos in the kanban edit modal
+    # 422 instead of being silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
     stage: str | None = None
     priority: int | None = Field(default=None, ge=0, le=PIPELINE_MAX_PRIORITY)
     assigned_to: UUID | None = None

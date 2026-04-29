@@ -3,7 +3,7 @@
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -37,6 +37,10 @@ DEFAULT_STAGES = [
 
 
 class PipelineCreateRequest(BaseModel):
+    # F268 — extra="forbid". Tightening admin-side mutation schemas
+    # so typos like ``compny_id`` 422 instead of silently dropping.
+    model_config = ConfigDict(extra="forbid")
+
     # F181: body fields that carry a UUID should be typed as `UUID` so
     # Pydantic rejects "not-a-uuid" with HTTP 422 before the handler
     # runs. Previously `str` allowed garbage through, which surfaced
@@ -49,6 +53,9 @@ class PipelineCreateRequest(BaseModel):
 
 
 class StageCreate(BaseModel):
+    # F268 — strict on stage CRUD too.
+    model_config = ConfigDict(extra="forbid")
+
     key: str
     label: str
     color: str = "bg-gray-500"
@@ -56,6 +63,8 @@ class StageCreate(BaseModel):
 
 
 class StageUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     label: str | None = None
     color: str | None = None
     sort_order: int | None = None

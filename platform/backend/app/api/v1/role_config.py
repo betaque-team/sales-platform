@@ -5,7 +5,7 @@ import uuid
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +70,12 @@ def _coerce_keywords_list(v):
 
 
 class RoleClusterCreate(BaseModel):
+    # F268 — extra="forbid" so admin-side typos like ``is_releavant``
+    # 422 instead of being silently dropped. Pre-fix, PATCH/POST
+    # against role-clusters silently ignored unknown fields, masking
+    # admin keystroke errors as no-op responses.
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=40)
     display_name: str = Field(..., min_length=1, max_length=120)
     is_relevant: bool = True
@@ -83,6 +89,11 @@ class RoleClusterCreate(BaseModel):
 
 
 class RoleClusterUpdate(BaseModel):
+    # F268 — same forbid policy as RoleClusterCreate above. Manual
+    # sweep found PATCH /role-clusters/{id} accepted ``foo_bar`` and
+    # returned 200, silently dropping the unknown field.
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     is_relevant: bool | None = None
     is_active: bool | None = None

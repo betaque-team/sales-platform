@@ -1,4 +1,4 @@
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -195,6 +195,11 @@ class JobDescriptionOut(BaseModel):
 
 
 class JobStatusUpdate(BaseModel):
+    # F268 — extra="forbid" so callers can't sneak in unknown fields.
+    # The bulk-action endpoint hits this schema; it's a high-leverage
+    # admin path where typos in the UI payload should be visible.
+    model_config = ConfigDict(extra="forbid")
+
     # Restricted to the documented status vocabulary (see JOB_STATUS_VALUES).
     # FastAPI returns a 422 with the allowed values if a client sends
     # something else — no more silent persistence of typos / unknown states.
