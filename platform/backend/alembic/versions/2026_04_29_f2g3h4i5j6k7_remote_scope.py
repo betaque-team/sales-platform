@@ -1,8 +1,14 @@
 """Remote scope redefinition — replace geography_bucket vocabulary.
 
-Revision ID: d0e1f2g3h4i5
-Revises: c9d0e1f2g3h4
-Create Date: 2026-04-27
+Revision ID: f2g3h4i5j6k7
+Revises: e1f2g3h4i5j6
+Create Date: 2026-04-29
+
+Originally landed as ``d0e1f2g3h4i5`` on 2026-04-27, but two parallel
+feature branches (``routine_prefs_and_targets`` and
+``application_company_stage``) had picked the same revision IDs in
+sequence. Renumbered + re-chained on top of the renumbered work-time
+migration (``e1f2g3h4i5j6_work_time_windows``).
 
 The team was confused by the legacy ``geography_bucket`` enum
 (``global_remote`` / ``usa_only`` / ``uae_only`` / ``""``):
@@ -52,8 +58,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 
-revision = "d0e1f2g3h4i5"
-down_revision = "c9d0e1f2g3h4"
+revision = "f2g3h4i5j6k7"
+down_revision = "e1f2g3h4i5j6"
 branch_labels = None
 depends_on = None
 

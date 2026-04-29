@@ -450,9 +450,20 @@ class TestJobsEndpointFilters:
     def test_list_jobs_filter_uses_jsonb_containment(self):
         """The country filter must use ``@>`` containment on the
         JSONB column — anything else (LIKE, indexed-text) silently
-        falls back to a slow seq-scan and breaks at scale."""
+        falls back to a slow seq-scan and breaks at scale.
+
+        Also pins the ``bindparam(..., type_=JSONB)`` form. Manual
+        e2e testing on a fresh local DB caught that ``.op("@>")(
+        literal)`` and ``.contains([code])`` both bind the right-side
+        value as VARCHAR, producing
+        ``operator does not exist: jsonb @> character varying``
+        at query time. Only an explicit ``bindparam`` with
+        ``type_=JSONB`` ships the parameter at the right type.
+        """
         src = inspect.getsource(jobs_list_jobs())
         assert 'op("@>")' in src
+        assert "bindparam(" in src
+        assert "type_=JSONB" in src
 
     def test_list_jobs_validates_country_code(self):
         """Bad country codes must 422 at the boundary, not corrupt

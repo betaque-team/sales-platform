@@ -260,17 +260,33 @@ async def list_jobs(
     if remote_policy:
         query = query.where(Job.remote_policy == remote_policy)
     if remote_country:
-        # JSONB containment via the ``@>`` operator. Validates the
-        # input shape — exactly two letters, alpha — to keep the
-        # GIN index hit rate predictable. Bad input 422s before we
-        # ever build the query.
+        # JSONB containment — the Postgres ``@>`` operator. Manual
+        # testing on a fresh local DB caught two SA-level traps:
+        #   * ``.op("@>")(string_literal)`` binds the literal as
+        #     VARCHAR → ``operator does not exist: jsonb @>
+        #     character varying``.
+        #   * ``cast(literal, JSONB)`` doesn't change the bound
+        #     parameter's type — only how the literal is rendered
+        #     in the SQL string. asyncpg still ships VARCHAR.
+        #   * ``.contains([code])`` on a JSONB-typed column has
+        #     the same outcome — the right-side type isn't
+        #     inferred from the column.
+        # The reliable path is an explicit ``bindparam`` with
+        # ``type_=JSONB``: the binding tells the driver to send
+        # the value as a JSONB-encoded string, so the operator
+        # has matching types on both sides and the GIN index is
+        # used.
         from app.utils.remote_policy import normalise_country
+        from sqlalchemy import bindparam
+        from sqlalchemy.dialects.postgresql import JSONB
         try:
             code = normalise_country(remote_country)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         query = query.where(
-            Job.remote_policy_countries.op("@>")(f'["{code}"]')
+            Job.remote_policy_countries.op("@>")(
+                bindparam("remote_country_filter", value=[code], type_=JSONB)
+            )
         )
     if role_cluster:
         # F260 regression fix: ``role_cluster=any`` is the explicit

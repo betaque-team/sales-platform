@@ -1,8 +1,16 @@
 """Work-time windows: per-user IST shift enforcement + extension requests.
 
-Revision ID: c9d0e1f2g3h4
-Revises: b8c9d0e1f2g3
-Create Date: 2026-04-27
+Revision ID: e1f2g3h4i5j6
+Revises: d0e1f2g3h4i5
+Create Date: 2026-04-29
+
+Originally landed as ``c9d0e1f2g3h4`` on 2026-04-27, but two parallel
+feature branches (``routine_prefs_and_targets`` and
+``application_company_stage``) had picked the same revision IDs in
+sequence. Renumbered + re-chained on top of the actual prod head
+(``d0e1f2g3h4i5_application_company_stage``) before any environment
+ever applied the colliding head — alembic refused to migrate while
+the duplicate IDs were on disk.
 
 Adds platform-level access control by user shift in IST. Admin /
 super_admin define a daily window per sales-team member; outside that
@@ -52,8 +60,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "c9d0e1f2g3h4"
-down_revision = "b8c9d0e1f2g3"
+revision = "e1f2g3h4i5j6"
+down_revision = "d0e1f2g3h4i5"
 branch_labels = None
 depends_on = None
 
