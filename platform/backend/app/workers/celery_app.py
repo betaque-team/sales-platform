@@ -146,6 +146,16 @@ if SCAN_MODE == "aggressive":
             "task": "app.workers.tasks.maintenance_task.auto_target_companies",
             "schedule": crontab(minute=15, hour=3),  # After rescore
         },
+        # F272 — daily prune of scan_logs older than 60 days.
+        # Sequenced at 03:45 UTC after rescore (3:00) + auto_target
+        # (3:15) + rescore_active_resumes (3:30) so it doesn't
+        # contend with the read-heavy scoring tasks for the
+        # connection pool. The DELETE is a single statement, runs
+        # in ~3-5s at current row counts.
+        "prune_scan_logs": {
+            "task": "app.workers.tasks.maintenance_task.prune_scan_logs",
+            "schedule": crontab(minute=45, hour=3),
+        },
         "fix_stuck_enrichments": {
             "task": "app.workers.tasks.maintenance_task.fix_stuck_enrichments",
             "schedule": crontab(minute=45, hour="*/6"),  # Every 6 hours
