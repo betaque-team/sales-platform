@@ -118,6 +118,28 @@ def test_celery_beat_schedule_includes_prune_task():
     )
 
 
+def test_prune_scan_logs_can_resolve_ScanLog_symbol():
+    """F272(c) regression guard. The initial F272 patch referenced
+    ``ScanLog.id`` / ``ScanLog.platform`` etc. inside the task body
+    but never imported the model. Live invocation post-F272(b) hit
+    ``NameError: name 'ScanLog' is not defined``. Source-grep tests
+    don't catch this — the import block is whitespace away from the
+    function body but Python only resolves names at runtime.
+
+    This test imports the module and verifies ``ScanLog`` is in the
+    module's globals — a regression that drops the import surfaces
+    here, before any celery-worker ever tries to run the task.
+    """
+    from app.workers.tasks import maintenance_task
+    assert hasattr(maintenance_task, "ScanLog"), (
+        "F272(c) regression: app.models.scan.ScanLog is no longer "
+        "imported into maintenance_task. The prune_scan_logs body "
+        "references ``ScanLog`` and will raise NameError on every "
+        "invocation. Add ``from app.models.scan import ScanLog`` to "
+        "the imports."
+    )
+
+
 def test_prune_task_registered_in_BOTH_schedule_modes():
     """F272(b) regression guard. The celery_app.py file has two
     parallel beat-schedule blocks — one for SCAN_MODE=aggressive

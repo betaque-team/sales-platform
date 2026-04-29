@@ -16,6 +16,13 @@ from app.models.company import Company
 from app.models.job import Job, JobDescription
 from app.models.scoring_signal import ScoringSignal
 from app.models.discovery import DiscoveryRun
+# F272 — ScanLog needed by prune_scan_logs. Live verification post-
+# F272(b) caught a NameError("name 'ScanLog' is not defined") on the
+# very first invocation; the task body referenced ``ScanLog`` but
+# the import was never added. Catching this here so the next
+# pre-commit run on a clean checkout would fail loudly instead of
+# at celery-worker runtime.
+from app.models.scan import ScanLog
 from app.workers.tasks._feedback import get_feedback_adjustment
 from app.utils.job_description import extract_description
 
