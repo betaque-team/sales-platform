@@ -354,6 +354,49 @@ _SECURITY_NEGATIVE_TITLE_SIGNALS = frozenset([
     # HR / people ops
     "hr compliance", "people compliance", "labor compliance",
     "human resources", "talent acquisition",
+    # F269 — parity with _INFRA_NEGATIVE_TITLE_SIGNALS. The infra
+    # cluster excluded sales/marketing titles via F92 + F227, but the
+    # security cluster never got the same guard. Manual sweep found
+    # 50 sales-titled jobs misclassified as ``security`` (e.g.
+    # "SALES TEAM LEADER (DevSecOps)", "Sales Engineer Cloud
+    # Security", "Customer Success Manager — Cybersecurity") because
+    # the title contains a security keyword AND a sales keyword, but
+    # only the infra side guards against the sales pattern. Bringing
+    # the lists into parity drops these from the relevant feed.
+    "sales", "account executive", "account manager",
+    "marketing", "customer success", "business development",
+    "partner development", "go-to-market", "go to market",
+    "demand generation", "revenue operations",
+    "pre-sales", "pre sales", "presales", "solutions consultant",
+])
+
+# F269 — QA cluster previously had NO negative signal list (only
+# infra and security did). 3 sales-titled jobs slipped into the
+# qa cluster post-F260 because of QA-keyword-bearing sales titles
+# like "Sales Quality Specialist". Adding the same revenue /
+# marketing / people-ops guards as the other two clusters. Order
+# of inclusion mirrors _INFRA_NEGATIVE_TITLE_SIGNALS so future
+# audits can diff the three lists with grep.
+_QA_NEGATIVE_TITLE_SIGNALS = frozenset([
+    # Revenue / marketing — same as infra/security
+    "sales", "account executive", "account manager",
+    "marketing", "customer success", "business development",
+    "partner development", "go-to-market", "go to market",
+    "demand generation", "revenue operations",
+    "pre-sales", "pre sales", "presales", "solutions consultant",
+    # HR / people ops
+    "human resources", "talent acquisition",
+    "hr compliance", "people compliance",
+    # Finance — "Quality Assurance Analyst, Investment Operations" etc.
+    "tax", "fund monitoring", "fund accounting",
+    "financial compliance",
+    # Manufacturing / hardware QA — these are LEGITIMATE QA roles but
+    # for hardware/manufacturing contexts that don't match the
+    # software-engineering audience our cluster targets. Leaving the
+    # call here for now: software QA is the relevant cluster, hardware
+    # QA isn't.
+    "manufacturing quality", "hardware quality",
+    "supplier quality", "operations quality",
 ])
 
 # Regression finding 92: tokens that disqualify a title from the
@@ -462,6 +505,17 @@ def _is_excluded_from_infra(norm_title: str) -> bool:
     )
 
 
+def _is_excluded_from_qa(norm_title: str) -> bool:
+    """F269 — disqualify sales / marketing / people-ops titles that
+    happen to match a QA keyword (e.g. ``Sales Quality Specialist``,
+    ``Customer Success Quality Analyst``). Pre-F269 the QA cluster
+    had no negative-signal list at all — every sales/marketing role
+    bearing a QA keyword landed in the relevant feed. Mirrors the
+    infra + security guard pattern.
+    """
+    return _title_has_signal(norm_title, _QA_NEGATIVE_TITLE_SIGNALS)
+
+
 def load_cluster_config_sync(session) -> dict:
     """Load role cluster config from DB for use in matching.
 
@@ -506,19 +560,28 @@ def match_role_from_config(title: str, cluster_config: dict) -> dict:
             result["level"] = level
             break
 
-    # Regression findings 91 + 92: apply the same cluster-specific
-    # negative-signal guards here. The config system uses the cluster
-    # name verbatim, so `infra` and `security` get their tailored
-    # negative lists; any admin-added cluster (e.g. "data_science")
-    # passes through unguarded because we have no FP profile for it.
+    # Regression findings 91 + 92 (extended by F269): apply the same
+    # cluster-specific negative-signal guards here. The config system
+    # uses the cluster name verbatim, so ``infra``, ``security``, and
+    # ``qa`` get their tailored negative lists; any admin-added
+    # cluster (e.g. ``data_science``) passes through unguarded because
+    # we have no FP profile for it.
+    #
+    # F269 — added the ``qa`` guard. Pre-fix, QA was alone in having
+    # NO negative list, so 3 sales-titled jobs ended up tagged as qa
+    # in prod. ``_is_excluded_from_qa`` now mirrors the infra/security
+    # guards' shape.
     excluded_from_security = _is_excluded_from_security(norm)
     excluded_from_infra = _is_excluded_from_infra(norm)
+    excluded_from_qa = _is_excluded_from_qa(norm)
 
     def _skip_cluster(cluster_name: str) -> bool:
         if cluster_name == "infra":
             return excluded_from_infra
         if cluster_name == "security":
             return excluded_from_security
+        if cluster_name == "qa":
+            return excluded_from_qa
         return False
 
     # Try exact-ish matching against approved roles from each cluster
@@ -623,13 +686,16 @@ def match_role(title: str) -> dict:
             result["level"] = level
             break
 
-    # Regression findings 91 + 92: check negative-signal guards once
-    # per title. The approved-role loop below short-circuits on the
-    # first match, so we apply the same guards there too — e.g. a
-    # "Tax Compliance Analyst" title matches the approved role
-    # "Compliance Analyst" and would otherwise land in security.
+    # Regression findings 91 + 92 + F269: check negative-signal guards
+    # once per title. The approved-role loop below short-circuits on
+    # the first match, so we apply the same guards there too — e.g.
+    # a "Tax Compliance Analyst" title matches the approved role
+    # "Compliance Analyst" and would otherwise land in security; a
+    # "Sales Quality Analyst" matches "Quality Analyst" and would
+    # otherwise land in qa (F269 fix).
     excluded_from_security = _is_excluded_from_security(norm)
     excluded_from_infra = _is_excluded_from_infra(norm)
+    excluded_from_qa = _is_excluded_from_qa(norm)
 
     # Try exact-ish matching against approved role bases
     for role in INFRA_ROLES:
@@ -662,6 +728,11 @@ def match_role(title: str) -> dict:
 
     for role in QA_ROLES:
         if _normalize(role) in norm:
+            # F269 — same exclusion semantics as infra/security: bail
+            # if the title carries a sales/marketing/people-ops
+            # negative signal.
+            if excluded_from_qa:
+                break
             result["matched_role"] = role
             result["role_cluster"] = "qa"
             if result["level"]:
@@ -685,11 +756,12 @@ def match_role(title: str) -> dict:
                 result["matched_role"] = title.strip()
                 return result
 
-    for kw in QA_KEYWORDS:
-        if _keyword_in_text(kw, norm):
-            result["role_cluster"] = "qa"
-            result["matched_role"] = title.strip()
-            return result
+    if not excluded_from_qa:
+        for kw in QA_KEYWORDS:
+            if _keyword_in_text(kw, norm):
+                result["role_cluster"] = "qa"
+                result["matched_role"] = title.strip()
+                return result
 
     return result
 
