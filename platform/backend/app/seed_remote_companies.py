@@ -154,31 +154,80 @@ def slugify(name: str) -> str:
 
 
 async def seed_remote():
+    """Seed the curated remote-friendly company + ATS-board list.
+
+    F270 — pre-fix this lookup was by ``name`` only, but the unique
+    constraint on ``companies.slug`` caused IntegrityError on every
+    backend startup when a company existed in the DB under a slightly
+    different name (e.g. scan added ``"Vercel, Inc."`` with slug
+    ``"vercel-inc"``; seed then tries to create ``"Vercel"`` with slug
+    ``"vercel"`` — no name collision but if discovery had also added
+    ``"Vercel"`` with slug ``"vercel"``, the seed's INSERT collides).
+    Result: every backend container restart logged a giant traceback
+    marked "(non-fatal)" — noisy + masks real errors.
+
+    Fix:
+      1. Lookup by **both name AND slug** so we reuse the existing row
+         no matter which side matches.
+      2. Wrap the per-company INSERT in a SAVEPOINT (``begin_nested``).
+         If a slug-conflict still slips through (e.g. concurrent
+         insert from a scan), we catch the IntegrityError, rollback
+         the savepoint, re-lookup by slug, and reuse the conflict
+         row. The outer transaction continues — no loud traceback,
+         no lost work on subsequent companies in the loop.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy import or_
+
     engine = create_async_engine(settings.database_url)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as session:
         added = 0
         skipped = 0
+        recovered = 0  # F270: counter for slug-conflict recoveries
 
         for entry in REMOTE_COMPANIES:
             name = entry["name"]
             platform = entry["platform"]
             slug = entry["slug"]
+            company_slug = slugify(name)
 
-            # Find or create company
-            result = await session.execute(select(Company).where(Company.name == name))
+            # F270 — match on EITHER name OR computed slug. Pre-fix,
+            # the lookup only matched name; if a scan or earlier seed
+            # had inserted the same slug under a different name, we'd
+            # try to create a duplicate slug and fail.
+            result = await session.execute(
+                select(Company).where(
+                    or_(Company.name == name, Company.slug == company_slug)
+                )
+            )
             company = result.scalar_one_or_none()
             if not company:
-                company = Company(
-                    id=uuid.uuid4(),
-                    name=name,
-                    slug=slugify(name),
-                    is_target=False,
-                    created_at=datetime.now(timezone.utc),
-                )
-                session.add(company)
-                await session.flush()
+                # Wrap the INSERT in a savepoint so a residual race
+                # (concurrent scan adding the same slug between our
+                # SELECT and INSERT) doesn't poison the outer
+                # transaction. On conflict we rollback the savepoint,
+                # re-fetch by slug, and continue with that row.
+                try:
+                    async with session.begin_nested():
+                        company = Company(
+                            id=uuid.uuid4(),
+                            name=name,
+                            slug=company_slug,
+                            is_target=False,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                        session.add(company)
+                        await session.flush()
+                except IntegrityError:
+                    # Race lost — someone else inserted the slug.
+                    # Reload from DB and reuse.
+                    result = await session.execute(
+                        select(Company).where(Company.slug == company_slug)
+                    )
+                    company = result.scalar_one()
+                    recovered += 1
 
             # Check if board exists
             result = await session.execute(
@@ -202,7 +251,10 @@ async def seed_remote():
             added += 1
 
         await session.commit()
-        print(f"Added {added} new boards, skipped {skipped} existing")
+        print(
+            f"Added {added} new boards, skipped {skipped} existing"
+            + (f", recovered {recovered} slug conflicts" if recovered else "")
+        )
 
     await engine.dispose()
 
