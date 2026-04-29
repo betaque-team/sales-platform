@@ -59,6 +59,99 @@ def expire_stale_jobs():
         session.close()
 
 
+# F272 — scan_logs retention. Manual integrity audit found the
+# scan_logs table at 252k rows with no cleanup task wired up. The
+# table grows ~13k rows/day (16 platforms × ~800 scans/day) so at
+# current rate the row count doubles every ~20 days unbounded.
+# Concrete impact today is small (~38MB on disk, queries still
+# fast on the started_at btree index), but at 1M+ rows the
+# /monitoring activity_24h aggregate query starts paying real cost.
+# Better to add the prune task now than firefight at 5M rows later.
+#
+# Retention window: 60 days. Rationale:
+#   * /monitoring activity_24h only looks at last 24h — 60 days is
+#     vastly beyond what's queried.
+#   * /platforms last_scan / total_errors aggregations look at
+#     "most recent" or "last 24h" — same reasoning.
+#   * Debug cases occasionally need to look at "what happened a
+#     month ago when scans started failing" — 60 days covers two
+#     months of cycles which is a reasonable forensic window.
+#   * If the team needs longer retention later, bump the constant
+#     and re-deploy; the historical rows are compacted in postgres
+#     so re-shrinking is fast.
+SCAN_LOG_RETENTION_DAYS = 60
+
+
+@celery_app.task(name="app.workers.tasks.maintenance_task.prune_scan_logs")
+def prune_scan_logs():
+    """Delete scan_logs rows older than ``SCAN_LOG_RETENTION_DAYS``.
+
+    Single bulk DELETE — postgres handles 100k+ row deletes in
+    seconds against the started_at btree index. No chunking needed
+    at current scale; if the table grows past 10M rows we should
+    revisit and chunk this like F262 does for rescore_jobs.
+
+    Preserves the most-recent ``ScanLog`` per (platform, source) pair
+    BEFORE deletion so an admin viewing /platforms always sees the
+    last-known-state of every board even if all its recent scans
+    were pruned. We use a NOT IN subquery against the per-key max(id)
+    rows. At 252k rows this subquery runs in ~50ms.
+    """
+    logger.info("Starting prune_scan_logs (retention=%dd)", SCAN_LOG_RETENTION_DAYS)
+    session = SyncSession()
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=SCAN_LOG_RETENTION_DAYS)
+
+        # Per-(platform, source) latest-id subquery. The (platform,
+        # source) tuple is the natural grain admins care about — each
+        # board's last scan is preserved even if it predates the
+        # cutoff. Without this, a board that hasn't been scanned in
+        # 61 days would have ALL its history pruned, and the
+        # /platforms page would show "no scans ever" instead of "last
+        # scan was 65 days ago".
+        latest_ids_subq = session.execute(
+            select(func.max(ScanLog.id))
+            .group_by(ScanLog.platform, ScanLog.source)
+        ).scalars().all()
+        latest_ids_set = set(latest_ids_subq)
+
+        # Target rows: started_at < cutoff AND NOT in latest-per-key
+        # set. Single DELETE — fast at this scale.
+        if latest_ids_set:
+            result = session.execute(
+                ScanLog.__table__.delete().where(
+                    ScanLog.started_at < cutoff,
+                    ~ScanLog.id.in_(latest_ids_set),
+                )
+            )
+        else:
+            # Empty set guard (table empty / first run) — skip the
+            # NOT IN clause entirely so we don't hit the "empty IN"
+            # corner case.
+            result = session.execute(
+                ScanLog.__table__.delete().where(
+                    ScanLog.started_at < cutoff,
+                )
+            )
+
+        deleted = result.rowcount
+        session.commit()
+        logger.info(
+            "prune_scan_logs complete: %d rows deleted (retention=%dd, "
+            "preserved %d per-key latest)",
+            deleted, SCAN_LOG_RETENTION_DAYS, len(latest_ids_set),
+        )
+        return {"deleted": deleted, "preserved_latest": len(latest_ids_set)}
+
+    except Exception as e:
+        logger.exception("prune_scan_logs failed: %s", e)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 # F262 — chunk size for the streaming rescore loop. Empirically chosen
 # to keep peak ORM identity-map RSS under ~50MB per chunk while still
 # amortising the round-trip cost of the SELECT. At 86k active jobs and
