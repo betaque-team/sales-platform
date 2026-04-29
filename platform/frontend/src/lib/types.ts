@@ -335,6 +335,12 @@ export interface PipelineItem {
   hiring_velocity: "high" | "medium" | "low";
   total_open_roles: number;
   accepted_jobs_count: number;
+  // F266 — count of submitted applications under this card's company
+  // (denormalised via Application.company_id, F261). Surfaced as a
+  // small badge on the card so admins can see at a glance which
+  // targets actually have apply activity. Defaults to 0 if older
+  // backends omit the field.
+  applications_count?: number;
   last_job_at: string | null;
 }
 
