@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · b3f1ca7 · sha-b3f1ca7
+Merge fix/f271-stable-pagination-tiebreaker into main
+
+
 ## 2026-04-29 · e091e86 · sha-e091e86
 Merge fix/f269-classifier-negative-parity into main
 
