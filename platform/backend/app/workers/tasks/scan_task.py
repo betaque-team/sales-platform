@@ -614,6 +614,25 @@ def _scan_board(session: Session, board: CompanyATSBoard, cluster_config: dict |
             except Exception as e:
                 logger.error("Error upserting job %s: %s", raw_job.get("external_id", "?"), e, exc_info=True)
                 stats["errors"] += 1
+                # F266 — propagate the per-job error message into
+                # ``stats["error_message"]`` so the monitoring page
+                # surfaces a non-empty hint. Pre-fix the bare
+                # ``stats["errors"] += 1`` left the message field
+                # empty, and the HN scanner reported errors=2 every
+                # nightly run with no clue what failed (see /monitoring
+                # /scan-errors — sample showed 3+ days of empty
+                # err_excerpt for hackernews/__all__). Now we keep
+                # the FIRST per-job exception's message + record how
+                # many subsequent errors occurred. ``errs`` counter
+                # is the existing ``stats["errors"]``; we just add a
+                # text channel that's currently silent.
+                if not stats.get("error_message"):
+                    ext = (raw_job.get("external_id") or "?")[:30]
+                    stats["error_message"] = f"job {ext}: {str(e)[:400]}"
+                # else: subsequent errors keep stats["errors"]++ but
+                # don't overwrite the first message — admin sees
+                # "errors=N · first_error_msg" rather than a churn of
+                # last-wins messages that hide the leading cause.
 
         # Update last_scanned_at + staleness health on the board.
         # `_update_board_health` mutates the board row in place (counter,

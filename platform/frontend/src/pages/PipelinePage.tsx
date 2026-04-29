@@ -130,13 +130,36 @@ function PipelineCard({
         </div>
       </div>
 
-      <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
+      <div className="flex items-center gap-3 text-xs text-gray-500 mb-2 flex-wrap">
         <div className="flex items-center gap-1">
           <Briefcase className="h-3 w-3" />
           <span>{formatCount(item.accepted_jobs_count)} accepted</span>
         </div>
         <span>&middot;</span>
         <span>{formatCount(item.total_open_roles)} total</span>
+        {/* F266 — applications count badge. Audit found 19/23 cards
+            had zero applications behind them. Pre-fix, admins clicked
+            "Apps" → empty drill-down → repeated on the next card.
+            Surfacing the count here lets the admin see at a glance
+            which targets actually have submitted-application
+            activity vs which are research-only / accepted-but-not-
+            applied. Backend F266 wires up the count via
+            ``Application.company_id`` (F261 denormalisation). */}
+        {typeof item.applications_count === "number" && (
+          <>
+            <span>&middot;</span>
+            <span
+              className={
+                item.applications_count > 0
+                  ? "font-medium text-emerald-600"
+                  : "text-gray-400"
+              }
+            >
+              {formatCount(item.applications_count)} app
+              {item.applications_count === 1 ? "" : "s"}
+            </span>
+          </>
+        )}
       </div>
 
       {item.notes && (
@@ -177,17 +200,39 @@ function PipelineCard({
         <div className="flex items-center gap-2">
           {/* F261 — drill-down trigger. Only renders for admins (the
               parent gates ``onOpenApplications``) so non-admins
-              never see a button that would 403 on click. */}
-          {onOpenApplications && (
-            <button
-              onClick={() => onOpenApplications(item.id)}
-              className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-700 hover:bg-gray-200 transition-colors"
-              title="View applications under this company"
-            >
-              <Users className="h-3 w-3" />
-              Apps
-            </button>
-          )}
+              never see a button that would 403 on click.
+              F266 — disabled (with a different tooltip) when there
+              are 0 applications under the card. Audit showed 19/23
+              cards were empty when drilled into; users repeatedly
+              clicked → empty panel → close → next card. Now the
+              button visibly indicates "nothing to see here" up
+              front. ``disabled:opacity-40 cursor-not-allowed`` makes
+              the disabled state legible without removing the button
+              entirely (so the count badge above still shows + the
+              control surface stays consistent). */}
+          {onOpenApplications && (() => {
+            const hasApps = (item.applications_count ?? 0) > 0;
+            return (
+              <button
+                onClick={() => hasApps && onOpenApplications(item.id)}
+                disabled={!hasApps}
+                className={
+                  "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors " +
+                  (hasApps
+                    ? "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    : "bg-gray-50 text-gray-300 cursor-not-allowed")
+                }
+                title={
+                  hasApps
+                    ? "View applications under this company"
+                    : "No applications under this card yet — accept jobs in /review and submit them via /applications"
+                }
+              >
+                <Users className="h-3 w-3" />
+                Apps
+              </button>
+            );
+          })()}
           <span className="text-xs text-gray-400">
             {new Date(item.created_at).toLocaleDateString("en-US", {
               month: "short",

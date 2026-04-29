@@ -28,6 +28,15 @@ class PipelineItemOut(BaseModel):
     accepted_jobs_count: int
     total_open_roles: int
     hiring_velocity: str
+    # F266 — count of submitted applications under this card's company.
+    # Pre-fix the kanban gave no signal that 19/23 cards had zero
+    # applications behind them (admin clicked "Apps" → empty panel,
+    # repeated). Surfaced on the card so admins can see at a glance
+    # which targets actually have apply activity vs which are still
+    # research-only / stalled-after-accept. Defaults to 0 for legacy
+    # rows; populated by /pipeline + /pipeline/{id} via a single
+    # aggregated query.
+    applications_count: int = 0
     notes: str
     created_at: datetime
 

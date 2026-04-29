@@ -252,6 +252,11 @@ async def get_pipeline(
     accepted_map: dict[str, int] = {}
     velocity_map: dict[str, str] = {}
     last_job_map: dict[str, datetime | None] = {}
+    # F266 — applications-per-card map. Pre-fix the kanban gave no
+    # signal that 19/23 cards were empty under drill-down; surfacing
+    # the count up-front (as a small badge on the card) lets admins
+    # see at a glance which targets actually have apply activity.
+    apps_map: dict[str, int] = {}
 
     if company_ids:
         open_result = await db.execute(
@@ -288,6 +293,19 @@ async def get_pipeline(
         for cid, last_seen in last_result:
             last_job_map[str(cid)] = last_seen
 
+        # F266 — count submitted applications per company. Mirrors the
+        # ``accepted_map`` shape so the frontend can render a small
+        # "N apps" badge on each card. The ``Application.company_id``
+        # column is denormalised (F261) so this is a single-table
+        # COUNT — no Application⨝Job join cost.
+        apps_result = await db.execute(
+            select(Application.company_id, func.count(Application.id))
+            .where(Application.company_id.in_(company_ids))
+            .group_by(Application.company_id)
+        )
+        for cid, cnt in apps_result:
+            apps_map[str(cid)] = cnt
+
     items = []
     for c in clients:
         item = PipelineItemOut.model_validate(c)
@@ -311,6 +329,11 @@ async def get_pipeline(
         # fallback means a company with zero accepted jobs shows 0 here
         # consistently — matching what the detail endpoint now returns.
         d["accepted_jobs_count"] = accepted_map.get(cid, 0)
+        # F266: applications_count is the count of submitted apps under
+        # this card's company — drives the new "N apps" badge on each
+        # PipelineCard. Falls through to 0 for cards without a
+        # company_id (orphan rows; rare).
+        d["applications_count"] = apps_map.get(cid, 0)
         d["hiring_velocity"] = velocity_map.get(cid, "low")
         d["last_job_at"] = last_job_map.get(cid, None)
         if d["last_job_at"]:
@@ -436,8 +459,19 @@ async def get_client(client_id: UUID, user: User = Depends(get_current_user), db
             )
         )).scalar() or 0
         item.accepted_jobs_count = int(live_accepted)
+        # F266 — also surface the live applications count on the
+        # detail endpoint so the frontend's card badge stays
+        # consistent whether rendered from /pipeline (list) or
+        # /pipeline/{id} (detail).
+        live_apps = (await db.execute(
+            select(func.count(Application.id)).where(
+                Application.company_id == client.company_id
+            )
+        )).scalar() or 0
+        item.applications_count = int(live_apps)
     else:
         item.accepted_jobs_count = 0
+        item.applications_count = 0
 
     return item
 
