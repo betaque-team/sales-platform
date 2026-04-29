@@ -744,3 +744,195 @@ def classify_geography(location_raw: str, remote_scope: str) -> str:
         return "usa_only"
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Remote-policy classification (d0e1f2g3h4i5)
+#
+# Replacement for ``classify_geography`` with a richer return shape:
+# ``(policy, countries)`` where ``policy`` is one of
+# ``worldwide`` | ``country_restricted`` | ``region_restricted`` |
+# ``hybrid`` | ``onsite`` | ``unknown`` and ``countries`` carries the
+# ISO-3166 alpha-2 codes for the ``country_restricted`` case.
+#
+# See ``app/utils/remote_policy.py`` for the canonical definitions.
+# The legacy ``classify_geography`` is kept for backward compatibility
+# during the transition window — both functions are called by the
+# scan + maintenance tasks so the legacy ``geography_bucket`` column
+# stays in sync via shadow-write.
+# ---------------------------------------------------------------------------
+
+# On-site signals — full office presence, no remote work.
+ONSITE_SIGNALS = (
+    "on-site only", "onsite only", "on site only",
+    "no remote", "in-office only", "in office only",
+    "fully on-site", "fully onsite", "fully on site",
+    "must be on-site", "must be onsite",
+    "100% on-site", "100% onsite",
+)
+
+# Hybrid signals — mix of office + remote.
+HYBRID_SIGNALS = (
+    "hybrid",
+    "hybrid remote",
+    "hybrid - ",
+    "hybrid (",
+    "days a week in",
+    "days/week in",
+    "in office",  # weak — only used after stronger signals miss
+    "flexible work arrangement",
+    "flex remote",
+)
+
+# Region-restricted signals — broader than a single country, narrower
+# than worldwide. These overlap with REGION_LOCKED_SIGNALS but are
+# specifically the *region-named* ones (EU, EMEA, APAC, LATAM…) — a
+# job that names a single country goes into ``country_restricted``
+# with a populated countries list.
+REGION_RESTRICTED_SIGNALS = (
+    "emea only", "emea based", "remote emea", "remote - emea",
+    "home based - emea",
+    "europe only", "eu only", "remote - europe",
+    "apac only", "remote - apac",
+    "latam only", "latin america only", "remote - latam",
+    "americas only", "remote - americas",
+    "north america",  # treats as regional rather than country_restricted
+    "middle east", "gcc",
+)
+
+# Country-name → ISO-3166 alpha-2 mapping for the existing
+# REGION_LOCKED_SIGNALS recognition. Drives the
+# ``country_restricted`` countries list when the classifier sees a
+# single-country region-locked signal. Future iteration: parse multi-
+# country listings ("US or Canada", "remote, US/CA") into a list.
+_COUNTRY_NAME_TO_ISO: dict[str, str] = {
+    "united states": "US", "usa": "US", "u.s.": "US", "us": "US",
+    "united arab emirates": "AE", "uae": "AE",
+    "united kingdom": "GB", "uk": "GB",
+    "canada": "CA",
+    "india": "IN",
+    "germany": "DE",
+    "philippines": "PH",
+    "mexico": "MX",
+    "ireland": "IE",
+    "poland": "PL",
+    "australia": "AU",
+    "brazil": "BR",
+    "sweden": "SE",
+    "netherlands": "NL",
+    "switzerland": "CH",
+    "israel": "IL",
+    "estonia": "EE",
+    "singapore": "SG",
+    "spain": "ES",
+    "france": "FR",
+    "japan": "JP",
+    "south korea": "KR", "korea": "KR",
+    "nigeria": "NG",
+    "south africa": "ZA",
+    "colombia": "CO",
+    "argentina": "AR",
+    "chile": "CL",
+    "romania": "RO",
+    "turkey": "TR",
+    "portugal": "PT",
+}
+
+
+def classify_remote_policy(
+    location_raw: str, remote_scope: str
+) -> tuple[str, list[str]]:
+    """Classify a job into the ``remote_policy`` enum + country list.
+
+    Returns ``(policy, countries)`` where ``policy`` ∈
+    ``{"worldwide","country_restricted","region_restricted","hybrid",
+    "onsite","unknown"}`` and ``countries`` is a sorted list of ISO
+    alpha-2 codes (only populated for ``country_restricted``).
+
+    Order of detection (first match wins):
+
+      1. **On-site** — explicit "no remote" markers. Beats hybrid
+         because "on-site only" sometimes co-occurs with "hybrid"
+         in scraped descriptions.
+      2. **Hybrid** — explicit hybrid markers.
+      3. **Region restricted** — region-named signals (EMEA, APAC,
+         "Europe only", etc.). Stays as policy=region_restricted with
+         empty countries list — we don't try to enumerate the region.
+      4. **Country restricted** — single country mentioned via the
+         legacy region-locked list, mapped to ISO codes.
+      5. **Worldwide** — global remote signals from the legacy list.
+      6. **Country restricted (US/UAE special)** — fallback for
+         "remote - us" / "us only" / "remote - uae" patterns the
+         legacy classifier already recognises.
+      7. **Unknown** — everything else.
+
+    Note: this function does NOT shadow-write ``geography_bucket`` —
+    that's the caller's job (scan_task / maintenance_task), which
+    derives the legacy bucket via ``legacy_bucket_for(policy,
+    countries)`` so there's only one source of truth.
+    """
+    combined = _normalize(f"{location_raw} {remote_scope}")
+    loc_lower = _normalize(location_raw)
+
+    # 1. On-site — explicit hard-no-remote signals beat everything.
+    for signal in ONSITE_SIGNALS:
+        if signal in combined:
+            return "onsite", []
+
+    # 2. Hybrid — explicit "hybrid" wording. Skip when the strong
+    # remote signals are present (rare but happens in noisy scrapes).
+    has_strong_remote = any(
+        sig in combined for sig in ("100% remote", "fully remote", "remote - anywhere")
+    )
+    if not has_strong_remote:
+        for signal in HYBRID_SIGNALS:
+            if signal in combined:
+                return "hybrid", []
+
+    # 3. Region-restricted — region-named signals (EMEA / APAC / etc).
+    for signal in REGION_RESTRICTED_SIGNALS:
+        if signal in combined:
+            return "region_restricted", []
+
+    # 4. Country-restricted via the legacy single-country signals. We
+    # walk the region-locked list and try to extract the country
+    # name; the ISO map below converts to alpha-2.
+    for signal in REGION_LOCKED_SIGNALS:
+        if signal in combined:
+            for country_name, iso in _COUNTRY_NAME_TO_ISO.items():
+                if country_name in signal:
+                    return "country_restricted", [iso]
+            # Region-locked signal we didn't have an ISO mapping for
+            # — fall back to region_restricted rather than dropping
+            # to unknown (we know it's not worldwide).
+            return "region_restricted", []
+
+    # 5. Worldwide — explicit global signals.
+    for signal in GLOBAL_REMOTE_SIGNALS:
+        if signal in combined:
+            return "worldwide", []
+
+    # 6. Country-restricted special cases — legacy USA/UAE detection.
+    for signal in USA_SIGNALS:
+        if signal in combined:
+            return "country_restricted", ["US"]
+    for signal in UAE_SIGNALS:
+        if signal in combined:
+            return "country_restricted", ["AE"]
+
+    # 7. Bare "remote" + empty/remote location → worldwide
+    if remote_scope and "remote" in remote_scope.lower():
+        if not loc_lower or loc_lower in ("remote", "fully remote", "remote, remote"):
+            return "worldwide", []
+    if loc_lower in (
+        "anywhere", "worldwide", "global", "remote",
+        "anywhere in the world", "work from anywhere",
+        "fully remote", "100% remote", "remote - anywhere",
+    ):
+        return "worldwide", []
+
+    # USA fallback (location text without "remote" prefix).
+    if any(sig in loc_lower for sig in ("united states", "usa", "u.s.")):
+        return "country_restricted", ["US"]
+
+    return "unknown", []

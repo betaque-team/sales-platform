@@ -391,7 +391,7 @@ export function DocsPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 mb-1">Filters That Matter</h3>
             <ul className="text-sm text-gray-600 space-y-1.5 ml-4 list-disc">
-              <li><strong>Geography: "Global Remote"</strong> -- Shows only worldwide-remote roles. Most valuable for international sales.</li>
+              <li><strong>Remote scope: "Worldwide remote"</strong> -- Shows roles open to candidates anywhere. Most valuable for international sales.</li>
               <li><strong>Platform filter</strong> -- Use this to focus on Greenhouse/Lever (higher quality boards) or check LinkedIn results.</li>
               <li><strong>Sort by Relevance</strong> (default) -- Puts best matches first. Switch to "Date" to see the freshest postings.</li>
               <li><strong>Status: "New"</strong> -- Shows only jobs nobody has reviewed yet. Great for daily triage.</li>
@@ -703,7 +703,7 @@ export function DocsPage() {
           {[
             { term: "Role Cluster", def: "A category of job titles (Infra, Security, QA). Defines which jobs are 'relevant' to your team." },
             { term: "ATS Board", def: "A company's job board on an Applicant Tracking System (Greenhouse, Lever, etc). The platform scrapes these for new jobs." },
-            { term: "Geography Bucket", def: "Where a job can be done from: Global Remote (anywhere), USA Only, or UAE Only." },
+            { term: "Remote scope", def: "Where the candidate can work from: Worldwide remote (anywhere), Country-restricted remote (e.g. US-only, UAE-only — companion country list says which), Region-restricted remote (EMEA / APAC), Hybrid (office + remote), On-site (no remote), or Needs classification." },
             { term: "Relevance Score", def: "0-100 score measuring how well a job matches your team's criteria. Higher = better match." },
             { term: "ATS Score", def: "0-100 score measuring how well your resume matches a specific job. Used by actual ATS systems." },
             { term: "Warm Lead", def: "A company that is actively hiring, has verified contacts, and shows recent activity. Best outreach targets." },

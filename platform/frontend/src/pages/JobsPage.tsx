@@ -239,11 +239,16 @@ const PLATFORM_OPTIONS = [
   { value: "remotive", label: "Remotive" },
 ];
 
+// Legacy filter values still sent on the wire as ``?geography=`` so
+// the existing URL-share / saved-filter rows keep working through
+// the transition window. Labels updated to the new vocabulary so the
+// team sees the same words across the app — the value→label mapping
+// below is the only place this asymmetry exists.
 const GEOGRAPHY_OPTIONS = [
-  { value: "", label: "All Geographies" },
-  { value: "global_remote", label: "Global Remote" },
-  { value: "usa_only", label: "USA Only" },
-  { value: "uae_only", label: "UAE Only" },
+  { value: "", label: "All remote scopes" },
+  { value: "global_remote", label: "Worldwide remote" },
+  { value: "usa_only", label: "USA-restricted remote" },
+  { value: "uae_only", label: "UAE-restricted remote" },
 ];
 
 export function JobsPage() {

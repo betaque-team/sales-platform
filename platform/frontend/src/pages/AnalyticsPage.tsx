@@ -678,10 +678,23 @@ const CLUSTER_COLORS: Record<string, string> = {
   cloud:    "#14b8a6",
   data:     "#ec4899",
 };
+// Legacy series keys (analytics endpoint still pivots on the old
+// ``geography_bucket`` strings during the transition window). New
+// vocabulary keys piggy-back so charts produced by either pipeline
+// pick up consistent colours. Source of truth:
+// ``frontend/src/lib/remote-policy.ts``.
 const GEO_COLORS: Record<string, string> = {
+  // Legacy
   global_remote: "#10b981",
   usa_only:      "#f97316",
   uae_only:      "#ec4899",
+  // New (matches REMOTE_POLICY_COLORS)
+  worldwide:           "#10b981",
+  country_restricted:  "#f97316",
+  region_restricted:   "#f59e0b",
+  hybrid:              "#3b82f6",
+  onsite:              "#6366f1",
+  unknown:             "#94a3b8",
 };
 
 const _SERIES_FALLBACK = ["#64748b", "#0ea5e9", "#a855f7", "#facc15", "#22c55e", "#ef4444"];

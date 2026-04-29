@@ -335,8 +335,17 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
                 title_normalized, existing.platform, existing.id, board.platform,
             )
 
-    # Geography classification
-    geography_bucket = classify_geography(location_raw, remote_scope)
+    # Geography classification — both legacy bucket and new policy
+    # are written. ``classify_remote_policy`` is the source of truth;
+    # the legacy bucket is derived from (policy, countries) so the
+    # two columns can never disagree.
+    from app.workers.tasks._role_matching import classify_remote_policy
+    from app.utils.remote_policy import legacy_bucket_for, normalise_countries
+    remote_policy, remote_policy_countries = classify_remote_policy(
+        location_raw, remote_scope
+    )
+    remote_policy_countries = normalise_countries(remote_policy_countries)
+    geography_bucket = legacy_bucket_for(remote_policy, remote_policy_countries)
 
     now = datetime.now(timezone.utc)
 
@@ -352,6 +361,8 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
         existing.matched_role = matched_role
         existing.role_cluster = role_cluster
         existing.geography_bucket = geography_bucket
+        existing.remote_policy = remote_policy
+        existing.remote_policy_countries = remote_policy_countries
         existing.last_seen_at = now
         existing.raw_json = raw_job.get("raw_json", {})
 
@@ -405,6 +416,8 @@ def _upsert_job(session: Session, company: Company, board: CompanyATSBoard, raw_
             employment_type=raw_job.get("employment_type") or "",
             salary_range=raw_job.get("salary_range") or "",
             geography_bucket=geography_bucket,
+            remote_policy=remote_policy,
+            remote_policy_countries=remote_policy_countries,
             matched_role=matched_role,
             role_cluster=role_cluster,
             relevance_score=0.0,

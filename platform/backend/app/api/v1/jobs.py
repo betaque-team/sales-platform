@@ -19,7 +19,7 @@ from app.models.audit_log import AuditLog
 from app.api.deps import get_current_user, require_role
 from app.schemas.job import (
     JobOut, JobDescriptionOut, JobStatusUpdate, BulkActionRequest,
-    JobStatusFilter, GeographyBucketFilter, PlatformFilter,
+    JobStatusFilter, GeographyBucketFilter, RemotePolicyFilter, PlatformFilter,
 )
 from app.utils.audit import log_action
 from app.utils.sanitize import sanitize_html
@@ -194,6 +194,13 @@ async def list_jobs(
     company: str | None = None,
     geography_bucket: GeographyBucketFilter | None = None,
     geography: GeographyBucketFilter | None = None,
+    # d0e1f2g3h4i5: new vocabulary. Accepts ``remote_policy`` (enum)
+    # plus optional ``remote_country`` (single ISO-3166 alpha-2 code,
+    # uppercased; matches against the JSONB containment ``@>``).
+    # Both legacy (``geography``) and new (``remote_policy``) filters
+    # are supported in parallel during the transition window.
+    remote_policy: RemotePolicyFilter | None = None,
+    remote_country: str | None = None,
     role_cluster: str | None = None,
     is_classified: bool | None = None,
     search: str | None = None,
@@ -250,6 +257,21 @@ async def list_jobs(
     geo = geography_bucket or geography
     if geo:
         query = query.where(Job.geography_bucket == geo)
+    if remote_policy:
+        query = query.where(Job.remote_policy == remote_policy)
+    if remote_country:
+        # JSONB containment via the ``@>`` operator. Validates the
+        # input shape — exactly two letters, alpha — to keep the
+        # GIN index hit rate predictable. Bad input 422s before we
+        # ever build the query.
+        from app.utils.remote_policy import normalise_country
+        try:
+            code = normalise_country(remote_country)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        query = query.where(
+            Job.remote_policy_countries.op("@>")(f'["{code}"]')
+        )
     if role_cluster:
         # F260 regression fix: ``role_cluster=any`` is the explicit
         # "no filter" sentinel introduced for the Sidebar's "All Jobs"
