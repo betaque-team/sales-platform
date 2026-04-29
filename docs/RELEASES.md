@@ -30,6 +30,10 @@ long-form writeups (one `.md` per notable round). This file is the index.
 
 <!-- RELEASES_LOG_START -->
 
+## 2026-04-29 · c3ee2df · sha-c3ee2df
+Merge feat/f273-uvicorn-multi-worker into main
+
+
 ## 2026-04-29 · b8a0186 · sha-b8a0186
 Merge fix/f272d-prune-uuid-max-fix into main
 
