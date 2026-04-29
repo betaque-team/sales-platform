@@ -116,3 +116,26 @@ def test_celery_beat_schedule_includes_prune_task():
         "scan_logs continues to grow unbounded. Add a beat entry "
         "calling 'app.workers.tasks.maintenance_task.prune_scan_logs'."
     )
+
+
+def test_prune_task_registered_in_BOTH_schedule_modes():
+    """F272(b) regression guard. The celery_app.py file has two
+    parallel beat-schedule blocks — one for SCAN_MODE=aggressive
+    and one for the else (normal) branch. The initial F272 patch
+    only updated the aggressive block, but prod runs on
+    SCAN_MODE=normal, so the prune task never fired. This test
+    grep-checks the source for two distinct ``"prune_scan_logs":``
+    entries — one in each branch — so the next time someone adds
+    a new task they remember to update both branches.
+    """
+    import inspect
+    from app.workers import celery_app as celery_module
+    src = inspect.getsource(celery_module)
+    occurrences = src.count('"prune_scan_logs": {')
+    assert occurrences >= 2, (
+        f"F272(b) regression: only {occurrences} ``\"prune_scan_logs\": {{`` "
+        "entries in celery_app.py. There must be at least 2 — one in the "
+        "aggressive-mode block and one in the normal-mode block. Otherwise "
+        "the task only fires under one SCAN_MODE setting and silently fails "
+        "to fire under the other (which is the original F272(b) bug)."
+    )
